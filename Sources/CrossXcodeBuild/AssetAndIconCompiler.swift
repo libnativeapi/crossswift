@@ -140,6 +140,9 @@ public final class AssetAndIconCompiler {
     let fm = FileManager.default
     let resourcesDir = stagingRoot.appendingPathComponent("Resources")
     let winMetaDir = stagingRoot.appendingPathComponent("WindowsMeta")
+    if fm.fileExists(atPath: resourcesDir.path) {
+      try fm.removeItem(at: resourcesDir)
+    }
     try fm.createDirectory(at: resourcesDir, withIntermediateDirectories: true)
     try fm.createDirectory(at: winMetaDir, withIntermediateDirectories: true)
 
@@ -157,7 +160,21 @@ public final class AssetAndIconCompiler {
       try fm.copyItem(at: xcstrings, to: dest)
     }
     for res in target.otherResources {
-      let dest = resourcesDir.appendingPathComponent(res.lastPathComponent)
+      let components = res.pathComponents
+      let dest: URL
+      if let lprojIdx = components.lastIndex(where: { $0.lowercased().hasSuffix(".lproj") }) {
+        var targetURL = resourcesDir
+        for comp in components[lprojIdx...] {
+          targetURL = targetURL.appendingPathComponent(comp)
+        }
+        try fm.createDirectory(
+          at: targetURL.deletingLastPathComponent(),
+          withIntermediateDirectories: true
+        )
+        dest = targetURL
+      } else {
+        dest = resourcesDir.appendingPathComponent(res.lastPathComponent)
+      }
       if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
       try fm.copyItem(at: res, to: dest)
     }

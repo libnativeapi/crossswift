@@ -870,6 +870,74 @@ final class CrossXcodeBuildTests: XCTestCase {
     XCTAssertTrue(patched.contains("https://example.com/ignored.git"))
   }
 
+  func testAssetAndIconCompilerPreservesLprojSubdirectories() throws {
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory.appendingPathComponent("CrossXcodeBuildLproj-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: tmp) }
+
+    let enDir = tmp.appendingPathComponent("App/en.lproj")
+    let zhDir = tmp.appendingPathComponent("App/zh-Hans.lproj")
+    try fm.createDirectory(at: enDir, withIntermediateDirectories: true)
+    try fm.createDirectory(at: zhDir, withIntermediateDirectories: true)
+
+    let enStrings = enDir.appendingPathComponent("Localizable.strings")
+    let zhStrings = zhDir.appendingPathComponent("Localizable.strings")
+    try "\"app.name\" = \"DazzCal\";\n".write(to: enStrings, atomically: true, encoding: .utf8)
+    try "\"app.name\" = \"正好日历\";\n".write(to: zhStrings, atomically: true, encoding: .utf8)
+
+    let target = ResolvedTarget(
+      name: "App",
+      productName: "App",
+      executableName: "App",
+      bundleIdentifier: "io.example.app",
+      marketingVersion: "1.0.0",
+      buildVersion: "1",
+      productType: "com.apple.product-type.application",
+      swiftVersion: "5.9",
+      defaultActorIsolation: nil,
+      activeCompilationConditions: [],
+      preprocessorDefinitions: [],
+      infoPlistFile: nil,
+      infoPlistKeys: [:],
+      copyright: nil,
+      categoryType: nil,
+      isAccessoryApp: false,
+      generateAssetSymbols: false,
+      appIconName: "AppIcon",
+      swiftSources: [],
+      cSources: [],
+      assetCatalogs: [],
+      stringCatalogs: [],
+      otherResources: [enStrings, zhStrings],
+      buildSettings: ["PRODUCT_NAME": "App"],
+      importedModules: []
+    )
+    let project = ResolvedXcodeProject(
+      projectURL: tmp.appendingPathComponent("App.xcodeproj"),
+      projectRootURL: tmp,
+      projectName: "App",
+      configuration: .debug,
+      mainTarget: target,
+      internalTargets: [],
+      remotePackages: [],
+      localPackages: [],
+      productDependencies: [],
+      inferredCrossSwiftModules: [],
+      skippedDarwinOnlyProducts: []
+    )
+
+    let staging = tmp.appendingPathComponent("Staging")
+    let compiled = try AssetAndIconCompiler().compile(project: project, stagingRoot: staging)
+
+    let stagedEn = compiled.resourcesDirectory.appendingPathComponent("en.lproj/Localizable.strings")
+    let stagedZh = compiled.resourcesDirectory.appendingPathComponent("zh-Hans.lproj/Localizable.strings")
+    XCTAssertTrue(fm.fileExists(atPath: stagedEn.path))
+    XCTAssertTrue(fm.fileExists(atPath: stagedZh.path))
+    XCTAssertEqual(try String(contentsOf: stagedEn, encoding: .utf8), "\"app.name\" = \"DazzCal\";\n")
+    XCTAssertEqual(try String(contentsOf: stagedZh, encoding: .utf8), "\"app.name\" = \"正好日历\";\n")
+    XCTAssertFalse(fm.fileExists(atPath: compiled.resourcesDirectory.appendingPathComponent("Localizable.strings").path))
+  }
+
   private func makeMinimalPNG(width: Int, height: Int) -> Data {
     var data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
     data.append(contentsOf: [0, 0, 0, 13]) // IHDR length
