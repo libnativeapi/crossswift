@@ -875,9 +875,10 @@ public enum PackageDependencyAdapter {
       try fm.createDirectory(at: checkoutDir, withIntermediateDirectories: true)
       for args in [
         ["init"],
+        ["config", "core.longpaths", "true"],
         ["remote", "add", "origin", remote.repositoryURL],
         ["fetch", "--depth", "1", "origin", targetRef],
-        ["checkout", "FETCH_HEAD"],
+        ["-c", "core.longpaths=true", "checkout", "FETCH_HEAD"],
       ] {
         let res = try ProcessRunner.run(executable: gitExe, arguments: args, workingDirectory: checkoutDir)
         if res.exitCode != 0 {
@@ -890,7 +891,7 @@ public enum PackageDependencyAdapter {
         }
       }
     } else {
-      let args = ["clone", "--depth", "1", remote.repositoryURL, checkoutDir.path]
+      let args = ["-c", "core.longpaths=true", "clone", "--depth", "1", remote.repositoryURL, checkoutDir.path]
       let res = try ProcessRunner.run(executable: gitExe, arguments: args)
       if res.exitCode != 0 {
         throw ProcessRunnerError.commandFailed(

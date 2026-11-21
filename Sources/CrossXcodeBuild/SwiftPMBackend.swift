@@ -853,10 +853,16 @@ public final class SwiftPMBackend {
 
     var remoteOverrides: [String: URL] = [:]
     for remote in project.remotePackages {
-      guard let checkoutDir = try? PackageDependencyAdapter.checkoutRemotePackage(
-        remote,
-        cacheRoot: cacheRoot
-      ) else {
+      let checkoutDir: URL
+      do {
+        checkoutDir = try PackageDependencyAdapter.checkoutRemotePackage(
+          remote,
+          cacheRoot: cacheRoot
+        )
+      } catch {
+        if let data = "warning: failed to checkout remote package \(remote.repositoryURL) for adaptation: \(error)\n".data(using: .utf8) {
+          FileHandle.standardError.write(data)
+        }
         continue
       }
       let slug = ProcessRunner.sanitizedSlug(remote.packageName)
