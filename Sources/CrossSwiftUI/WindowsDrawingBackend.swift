@@ -10,6 +10,9 @@
     /// Ensures NativeAPI's early Per-Monitor V2 DPI setup has run before any
     /// standalone HWNDs are created outside `Application`.
     public static func prepareApplication() { _ = NativeAPI.Application.shared.isRunning() }
+    public static func setApplicationIdentifier(_ identifier: String) {
+      sui_set_application_identifier(identifier)
+    }
 
     public var tapHandler: ((NodeID) -> Void)?
     public var transactionHandler: ((() -> Void) -> Void)?

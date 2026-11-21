@@ -639,7 +639,7 @@ struct GalleryElement {
         .height('100%')
         .align(Alignment.TopStart)
         .hitTestBehavior(HitTestMode.None)
-    } else if (this.model.snapshot.kind === 'image' && this.model.snapshot.image.startsWith('fluent/')) {
+    } else if (this.model.snapshot.kind === 'image' && this.model.snapshot.image.length > 0) {
       Image('resource://RAWFILE/' + this.model.snapshot.image)
         .objectFit(ImageFit.Contain)
         .fillColor(this.color(this.model.snapshot.foreground, '#ff000000'))
@@ -664,6 +664,9 @@ struct GalleryElement {
         .fontColor(this.color(this.model.snapshot.foreground, '#ff000000'))
         .width('100%')
         .height('100%')
+        .onSubmit(() => swiftProbe.galleryEvent(this.model.snapshot.id, 13, ''))
+        .onFocus(() => this.action(8))
+        .onBlur(() => this.action(9))
         .onChange((value: string) => {
           if (value !== this.model.snapshot.text) swiftProbe.galleryEvent(this.model.snapshot.id, 7, value);
         })
@@ -715,7 +718,15 @@ struct GalleryElement {
       .accessibilityText(this.model.snapshot.label)
       .accessibilitySelected(this.model.snapshot.selected)
       .id(this.model.snapshot.label.length > 0 ? 'swift-action-' + this.model.snapshot.label : 'swift-node-' + String(this.model.snapshot.id))
-      .onClick(() => this.action(1))
+      .onClick((event: ClickEvent) => {
+        swiftProbe.galleryEvent(this.model.snapshot.id, 11,
+          JSON.stringify([this.model.snapshot.x + event.x, this.model.snapshot.y + event.y]));
+      })
+      .parallelGesture(TapGesture({ count: 2 }).onAction((event: GestureEvent) => {
+        const finger = event.fingerList[0];
+        if (finger) swiftProbe.galleryEvent(this.model.snapshot.id, 12,
+          JSON.stringify([this.model.snapshot.x + finger.localX, this.model.snapshot.y + finger.localY]));
+      }))
       .onHover((hovered: boolean) => this.action(hovered ? 2 : 3))
       .onTouch((event: TouchEvent) => {
         if (event.type === TouchType.Down) this.action(4);

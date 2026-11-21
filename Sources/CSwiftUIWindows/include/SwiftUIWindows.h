@@ -4,6 +4,7 @@
 extern "C" {
 #endif
 typedef void (*sui_event_callback)(void *context, int64_t id, int event);
+void sui_set_application_identifier(const char *identifier);
 typedef struct {
   double width, height;
 } sui_size;

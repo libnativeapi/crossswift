@@ -352,7 +352,11 @@ public final class XcodeProjectLoader {
       let looksLikeKnownDarwinBinaryPkg =
         pkgNameLower == "sparkle" || dep.productName == "Sparkle"
 
-      if isDarwinOnlyLocal || (isOnlyConditionallyImported && looksLikeKnownDarwinBinaryPkg) {
+      if isDarwinOnlyLocal
+        || (isOnlyConditionallyImported
+          && (looksLikeKnownDarwinBinaryPkg
+            || importAnalysis.hasDarwinGuard(for: dep.productName)))
+      {
         skippedDarwinProducts.append(dep.productName)
         continue
       }

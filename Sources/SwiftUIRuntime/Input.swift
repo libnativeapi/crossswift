@@ -302,3 +302,20 @@ extension View {
     }
   }
 }
+
+extension View {
+  public func onTapGesture(
+    count: Int = 1, coordinateSpace: CoordinateSpace = .local,
+    perform action: @escaping (CGPoint) -> Void
+  ) -> some View {
+    TransformView(content: self) { node in
+      if count == 2 {
+        node.doubleTapAction = {}
+        node.doubleTapLocationAction = action
+      } else {
+        node.action = {}
+        node.tapLocationAction = action
+      }
+    }
+  }
+}

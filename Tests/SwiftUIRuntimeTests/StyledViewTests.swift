@@ -346,3 +346,24 @@ final class StyledViewTests: XCTestCase {
     XCTAssertEqual(closes, 2)
   }
 }
+
+extension StyledViewTests {
+  func testNativeFocusPeerForwardsCellPointerGestures() throws {
+    var selected = false
+    var opened = false
+    let renderer = render(
+      VStack {
+        Color.clear.frame(width: 100, height: 80)
+          .onTapGesture(count: 2) { opened = true }
+          .onTapGesture { selected = true }
+      }.focusable())
+    let focus = try XCTUnwrap(nodes(renderer.tree!).first { $0.props.focusable })
+    let cell = try XCTUnwrap(nodes(renderer.tree!).first { $0.doubleTapAction != nil })
+    let point = CGPoint(x: cell.frame.minX + 10, y: cell.frame.minY + 10)
+    renderer.input(id: focus.id, event: 2, point: point)
+    renderer.input(id: focus.id, event: 3, point: point)
+    renderer.input(id: focus.id, event: 4, point: point)
+    XCTAssertTrue(selected)
+    XCTAssertTrue(opened)
+  }
+}

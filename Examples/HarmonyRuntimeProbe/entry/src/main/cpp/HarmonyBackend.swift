@@ -150,7 +150,7 @@ final class HarmonyBackend: RenderBackend {
       "progressLinear", "progressCircular", "button",
       "navBar", "tabBar", "alert", "menu", "divider",
     ]
-    let kind: String
+    var kind: String
     var path = ""
     var resolvedBorder = color(props.borderColor)
     var resolvedBorderWidth = number(props.borderWidth)
@@ -206,6 +206,7 @@ final class HarmonyBackend: RenderBackend {
         kind = path.isEmpty ? "group" : "path"
       default: kind = "group"
       }
+      if kind == "group" && element.acceptsPointerInput { kind = "button" }
     }
     return Node(
       id: element.id.rawValue, kind: kind,

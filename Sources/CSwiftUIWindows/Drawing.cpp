@@ -1,6 +1,7 @@
 #include "SwiftUIWindows.h"
 #include <nativeapi.h>
 #include <windows.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <commctrl.h>
@@ -2114,6 +2115,10 @@ void CommitPendingResizeImpl(Surface *s, bool from_pos_changed) {
 }
 } // namespace
 extern "C" {
+void sui_set_application_identifier(const char *identifier) {
+  if (identifier && *identifier)
+    SetCurrentProcessExplicitAppUserModelID(Wide(identifier).c_str());
+}
 void *sui_surface_create(void *host, sui_event_callback callback, void *context,
                          uint64_t native_view) {
   InitializeGraphics();

@@ -300,6 +300,8 @@ public struct Element {
   var textAction: ((String) -> Void)? = nil
   var submitAction: (() -> Void)? = nil
   var dragAction: ((DragGesture.Value, Bool) -> Void)? = nil
+  var tapLocationAction: ((CGPoint) -> Void)?
+  var doubleTapLocationAction: ((CGPoint) -> Void)?
   var doubleTapAction: (() -> Void)? = nil
   var keyAction: ((KeyPress) -> KeyPress.Result)? = nil
   var scrollTarget: ScrollTarget?
@@ -378,6 +380,8 @@ public struct Element {
     }
     return resolved
   }
+
+  public var acceptsPointerInput: Bool { handlesPointerInput }
 
   package var handlesPointerInput: Bool {
     action != nil || doubleTapAction != nil || dragAction != nil || secondaryAction != nil

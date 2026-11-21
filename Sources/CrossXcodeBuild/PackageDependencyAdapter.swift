@@ -1256,9 +1256,29 @@ public enum PackageDependencyAdapter {
       }
     }
 
+    let joined = entries.joined(separator: ",\n        ")
+    let followingLabels: [String]
+    switch paramName {
+    case "dependencies":
+      followingLabels = ["path", "exclude", "sources", "resources", "publicHeadersPath", "packageAccess", "cSettings", "cxxSettings", "swiftSettings", "linkerSettings", "plugins"]
+    case "exclude":
+      followingLabels = ["sources", "resources", "publicHeadersPath", "packageAccess", "cSettings", "cxxSettings", "swiftSettings", "linkerSettings", "plugins"]
+    case "resources":
+      followingLabels = ["publicHeadersPath", "packageAccess", "cSettings", "cxxSettings", "swiftSettings", "linkerSettings", "plugins"]
+    default:
+      followingLabels = []
+    }
+    for label in followingLabels {
+      if let labelRegex = try? NSRegularExpression(pattern: "(?m)^([ \\t]*)\(label)\\s*:"),
+         let labelMatch = labelRegex.firstMatch(in: targetBody, range: NSRange(location: 0, length: ns.length))
+      {
+        let prefix = ns.substring(to: labelMatch.range.location)
+        let suffix = ns.substring(from: labelMatch.range.location)
+        return prefix + "      \(paramName): [\n        \(joined)\n      ],\n" + suffix
+      }
+    }
     let trimmedEnd = targetBody.trimmingCharacters(in: .whitespacesAndNewlines)
     let comma = trimmedEnd.hasSuffix(",") ? "" : ","
-    let joined = entries.joined(separator: ",\n        ")
     return targetBody + "\(comma)\n      \(paramName): [\n        \(joined)\n      ]"
   }
 

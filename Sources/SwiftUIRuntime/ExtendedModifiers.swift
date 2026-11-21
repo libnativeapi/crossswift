@@ -214,3 +214,23 @@ public struct StrokeStyle {
   public enum CGLineCap: Int32, Sendable { case butt = 0, round = 1, square = 2 }
   public enum CGLineJoin: Int32, Sendable { case miter = 0, round = 1, bevel = 2 }
 #endif
+
+extension View {
+  @ViewBuilder public func foregroundColor(_ color: Color?) -> some View {
+    if let color { foregroundColor(color) } else { self }
+  }
+  public func strikethrough(
+    _ active: Bool = true, pattern: Text.LineStyle.Pattern = .solid,
+    color: Color? = nil
+  ) -> some View {
+    overlay {
+      if active {
+        Rectangle().fill(color ?? EnvironmentValues.current.foregroundColor ?? .black)
+          .frame(height: 1).allowsHitTesting(false)
+      }
+    }
+  }
+}
+extension Text {
+  public enum LineStyle { public enum Pattern { case solid } }
+}

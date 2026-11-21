@@ -700,6 +700,130 @@ final class CrossXcodeBuildTests: XCTestCase {
     XCTAssertTrue(fm.fileExists(atPath: adaptedOut.appendingPathComponent("Sources/MyDesignKit/KitView.swift").path))
   }
 
+  func testPackageDependencyAdapterInsertsDependenciesBeforePath() throws {
+    let manifest = """
+      // swift-tools-version: 5.9
+      import PackageDescription
+
+      let package = Package(
+        name: "MultiTargetKit",
+        products: [
+          .library(name: "MobileKit", targets: ["MobileKit"]),
+        ],
+        targets: [
+          .target(
+            name: "MobileKit",
+            path: "packages/swift/MobileKit/Sources/MobileKit"
+          ),
+        ]
+      )
+      """
+    let inspection = PackageDependencyAdapter.InspectionResult(
+      targets: [
+        PackageDependencyAdapter.TargetInspection(
+          name: "MobileKit",
+          relativePath: "packages/swift/MobileKit/Sources/MobileKit",
+          importedCrossSwiftModules: ["SwiftUI"],
+          undeclaredAssetCatalogs: [],
+          largeAssetCatalogs: [],
+          hasObjCAttributes: false
+        )
+      ]
+    )
+    let patched = PackageDependencyAdapter.patchManifest(
+      manifest,
+      inspection: inspection,
+      crossSwiftRoot: URL(fileURLWithPath: "/tmp/crossswift")
+    )
+    let depsRange = try XCTUnwrap(patched.range(of: "dependencies: [\n        .product(name: \"SwiftUI\", package: \"crossswift\")"))
+    let pathRange = try XCTUnwrap(patched.range(of: "path: \"packages/swift/MobileKit/Sources/MobileKit\""))
+    XCTAssertLessThan(depsRange.lowerBound, pathRange.lowerBound)
+  }
+
+  func testXcodeProjectLoaderSkipsDarwinGuardedLocalPackageProduct() throws {
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory.appendingPathComponent("CrossXcodeBuild-DarwinGuard-\(UUID().uuidString)")
+    try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: tmp) }
+
+    let widgetsDir = tmp.appendingPathComponent("AppleWidgets")
+    try fm.createDirectory(at: widgetsDir.appendingPathComponent("Sources/AppleWidgets"), withIntermediateDirectories: true)
+    try """
+      // swift-tools-version: 5.9
+      import PackageDescription
+      let package = Package(
+        name: "AppleWidgets",
+        products: [.library(name: "AppleWidgets", targets: ["AppleWidgets"])],
+        targets: [.target(name: "AppleWidgets")]
+      )
+      """.write(to: widgetsDir.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+    try "import WidgetKit\n".write(
+      to: widgetsDir.appendingPathComponent("Sources/AppleWidgets/Widget.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+
+    let appSrcDir = tmp.appendingPathComponent("App")
+    try fm.createDirectory(at: appSrcDir, withIntermediateDirectories: true)
+    try """
+      import SwiftUI
+      #if os(macOS)
+        import AppleWidgets
+      #endif
+      @main struct AppMain: App { var body: some Scene { WindowGroup { Text("Hi") } } }
+      """.write(to: appSrcDir.appendingPathComponent("App.swift"), atomically: true, encoding: .utf8)
+
+    let projDir = tmp.appendingPathComponent("App.xcodeproj")
+    try fm.createDirectory(at: projDir, withIntermediateDirectories: true)
+    try """
+      // !$*UTF8*$!
+      {
+        archiveVersion = 1;
+        classes = {};
+        objectVersion = 77;
+        objects = {
+          A1 = { isa = PBXBuildFile; productRef = P1; };
+          F1 = { isa = PBXFileReference; explicitFileType = wrapper.application; path = App.app; sourceTree = BUILT_PRODUCTS_DIR; };
+          S1 = { isa = PBXFileSystemSynchronizedRootGroup; path = App; sourceTree = "<group>"; };
+          FB1 = { isa = PBXFrameworksBuildPhase; files = (A1, ); };
+          G0 = { isa = PBXGroup; children = (S1, G1, ); sourceTree = "<group>"; };
+          G1 = { isa = PBXGroup; children = (F1, ); name = Products; sourceTree = "<group>"; };
+          T1 = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = C1;
+            buildPhases = (SB1, FB1, );
+            fileSystemSynchronizedGroups = (S1, );
+            name = App;
+            packageProductDependencies = (P1, );
+            productName = App;
+            productReference = F1;
+            productType = "com.apple.product-type.application";
+          };
+          PRJ = {
+            isa = PBXProject;
+            buildConfigurationList = C0;
+            mainGroup = G0;
+            packageReferences = (LP1, );
+            targets = (T1, );
+          };
+          SB1 = { isa = PBXSourcesBuildPhase; files = (); };
+          BC0 = { isa = XCBuildConfiguration; buildSettings = {}; name = Debug; };
+          BC1 = { isa = XCBuildConfiguration; buildSettings = { PRODUCT_NAME = App; }; name = Debug; };
+          C0 = { isa = XCConfigurationList; buildConfigurations = (BC0, ); defaultConfigurationName = Debug; };
+          C1 = { isa = XCConfigurationList; buildConfigurations = (BC1, ); defaultConfigurationName = Debug; };
+          LP1 = { isa = XCLocalSwiftPackageReference; relativePath = AppleWidgets; };
+          P1 = { isa = XCSwiftPackageProductDependency; package = LP1; productName = AppleWidgets; };
+        };
+        rootObject = PRJ;
+      }
+      """.write(to: projDir.appendingPathComponent("project.pbxproj"), atomically: true, encoding: .utf8)
+
+    let resolved = try XcodeProjectLoader().load(from: projDir, configuration: .debug, targetName: "App")
+    XCTAssertTrue(resolved.skippedDarwinOnlyProducts.contains("AppleWidgets"))
+    XCTAssertFalse(resolved.productDependencies.contains(where: { $0.productName == "AppleWidgets" }))
+    XCTAssertFalse(resolved.localPackages.contains(where: { $0.name == "AppleWidgets" }))
+  }
+
   private func makeMinimalPNG(width: Int, height: Int) -> Data {
     var data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
     data.append(contentsOf: [0, 0, 0, 13]) // IHDR length

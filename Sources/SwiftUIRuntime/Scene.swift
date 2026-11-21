@@ -68,6 +68,7 @@ public struct WindowGroup<Content: View>: Scene {
   public typealias Body = EmptyScene
 
   public let title: String
+  public var _applicationIdentifier: String?
   public var _defaultSize = Size(width: 480, height: 320)
   private let content: () -> Content
 
@@ -80,6 +81,12 @@ public struct WindowGroup<Content: View>: Scene {
   }
 
   public var body: EmptyScene { EmptyScene() }
+  /// Native desktop identity, independent of the visible window title.
+  public func applicationIdentifier(_ identifier: String) -> Self {
+    var copy = self
+    copy._applicationIdentifier = identifier
+    return copy
+  }
   public func defaultSize(width: Double, height: Double) -> Self {
     var copy = self
     copy._defaultSize = Size(width: width, height: height)
@@ -89,9 +96,12 @@ public struct WindowGroup<Content: View>: Scene {
 
 public protocol _WindowScene {
   var _windowTitle: String { get }
+  var _applicationIdentifier: String? { get }
   var _defaultSize: Size { get }
   func _makeRootView() -> AnyView
 }
+
+extension _WindowScene { public var _applicationIdentifier: String? { nil } }
 
 extension WindowGroup: _WindowScene {
   public var _windowTitle: String { title }

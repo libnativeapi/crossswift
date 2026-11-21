@@ -4,6 +4,10 @@ import NativeAPI
 import Observation
 import SwiftUIRuntime
 
+#if os(Linux)
+  import CGTK3
+#endif
+
 /// Collects leaf scenes recursively from `@SceneBuilder` trees (`TupleScene`, custom `Scene`s).
 @MainActor
 private func flattenScenes(_ scene: any Scene) -> [any Scene] {
@@ -154,8 +158,24 @@ private final class MenuBarExtraHost<A: App>: NSMenuDelegate {
 public func runApp<A: App>(_ app: A) {
   installAssetResolversOnce()
 
+  let scenes = flattenScenes(app.body)
+  let primaryWindowScene = scenes.first(where: { $0 is any _WindowScene }) as? any _WindowScene
+  #if os(Windows)
+    if let identifier = primaryWindowScene?._applicationIdentifier {
+      WindowsDrawingBackend.setApplicationIdentifier(identifier)
+    }
+  #endif
+
   let application = NativeAPI.Application.shared
   _ = application.isRunning()
+  #if os(Linux)
+    if let identifier = primaryWindowScene?._applicationIdentifier,
+      let gtkApplication = g_application_get_default()
+    {
+      precondition(g_application_id_is_valid(identifier) != 0, "Invalid application identifier")
+      g_application_set_application_id(gtkApplication, identifier)
+    }
+  #endif
 
   // Install @NSApplicationDelegateAdaptor if present on `app`
   for child in Mirror(reflecting: app).children {
@@ -164,7 +184,6 @@ public func runApp<A: App>(_ app: A) {
     }
   }
 
-  let scenes = flattenScenes(app.body)
   let menuExtras = scenes.enumerated().compactMap { _, s in s as? any _MenuBarExtraScene }
   var menuHosts: [MenuBarExtraHost<A>] = []
   for idx in menuExtras.indices {
@@ -179,9 +198,24 @@ public func runApp<A: App>(_ app: A) {
     let title = windowScene._windowTitle
     window.setTitle(title.isEmpty ? "CrossSwiftUI" : title)
 
-    let initialWidth = windowScene._defaultSize.width
-    let initialHeight = windowScene._defaultSize.height
+    var initialWidth = windowScene._defaultSize.width
+    var initialHeight = windowScene._defaultSize.height
+    let position = window.position
+    let display =
+      NativeAPI.DisplayManager.shared.getAll().first {
+        let area = $0.workArea
+        return position.x >= area.x && position.x < area.x + area.width
+          && position.y >= area.y && position.y < area.y + area.height
+      } ?? NativeAPI.DisplayManager.shared.getPrimary()
+    if let display {
+      let available = display.workArea
+      if available.width > 0 && available.height > 0 {
+        initialWidth = min(initialWidth, max(1, available.width - 32))
+        initialHeight = min(initialHeight, max(1, available.height - 80))
+      }
+    }
     window.setContentSize(NativeAPI.Size(width: initialWidth, height: initialHeight))
+    window.center()
 
     #if os(Windows)
       guard let backend = WindowsDrawingBackend(window: window, schedulesUpdates: true) else {

@@ -441,6 +441,15 @@ import Foundation
     if event != 1 && event != 10 {
       if let id, id.rawValue != 0 {
         _ = ancestry(id, in: tree, into: &chain)
+        // Native focus peers represent keyboard focus, not an opaque hit target.
+        // Pointer gestures inside a focusable calendar must still reach its cells.
+        if [2, 3, 4, 9].contains(event), let container = chain.first,
+          container.props.focusable, container.action == nil, container.kind != .textField
+        {
+          let descendants = hitChain(
+            container, point: point, hover: false, event: event, modifiers: modifiers)
+          if !descendants.isEmpty { chain = descendants + chain.dropFirst() }
+        }
       } else if let root = tree {
         chain = hitChain(root, point: point, hover: false, event: event, modifiers: modifiers)
       }
@@ -505,7 +514,11 @@ import Foundation
     if event == 3 {
       defer { pointerDown = nil }
       if let down = pointerDown, chain.contains(where: { $0.id == down }) {
-        performTap(down)
+        if let node = find(down, in: tree), let action = node.tapLocationAction {
+          action(CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY))
+        } else {
+          performTap(down)
+        }
         return true
       }
     }
@@ -514,7 +527,11 @@ import Foundation
       return true
     }
     if event == 4, let node = chain.first(where: { $0.doubleTapAction != nil }) {
-      node.doubleTapAction?()
+      if let action = node.doubleTapLocationAction {
+        action(CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY))
+      } else {
+        node.doubleTapAction?()
+      }
       return true
     }
     if event == 5 {
