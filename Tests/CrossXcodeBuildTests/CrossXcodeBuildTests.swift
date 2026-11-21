@@ -824,6 +824,52 @@ final class CrossXcodeBuildTests: XCTestCase {
     XCTAssertFalse(resolved.localPackages.contains(where: { $0.name == "AppleWidgets" }))
   }
 
+  func testPatchManifestRewritesRemoteOverrideWithCRLFLineEndings() {
+    let manifest = [
+      "// swift-tools-version: 5.9",
+      "// Comment mentioning .package(url: \"https://example.com/ignored.git\", from: \"1.0.0\")",
+      "import PackageDescription",
+      "let package = Package(",
+      "  name: \"DazzUI\",",
+      "  dependencies: [",
+      "    .package(",
+      "      url: \"https://github.com/microsoft/fluentui-system-icons.git\",",
+      "      revision: \"21d5d02f724be2aaf586564775fff73a18a76eb6\"",
+      "    ),",
+      "  ],",
+      "  targets: [",
+      "    .target(",
+      "      name: \"DazzUI\",",
+      "      dependencies: [.product(name: \"FluentIcons\", package: \"fluentui-system-icons\")],",
+      "      path: \"Sources/DazzUI\"",
+      "    ),",
+      "  ]",
+      ")",
+    ].joined(separator: "\r\n")
+
+    let inspection = PackageDependencyAdapter.InspectionResult(targets: [
+      .init(
+        name: "DazzUI",
+        relativePath: "Sources/DazzUI",
+        importedCrossSwiftModules: ["SwiftUI"],
+        undeclaredAssetCatalogs: [],
+        largeAssetCatalogs: [],
+        hasObjCAttributes: false
+      )
+    ])
+    let adaptedIcons = URL(fileURLWithPath: "/tmp/AdaptedPackages/fluentui-system-icons")
+    let patched = PackageDependencyAdapter.patchManifest(
+      manifest,
+      inspection: inspection,
+      crossSwiftRoot: URL(fileURLWithPath: "/tmp/crossswift"),
+      adaptedRemoteOverrides: ["fluentui-system-icons": adaptedIcons]
+    )
+
+    XCTAssertTrue(patched.contains(".package(path: \"/tmp/AdaptedPackages/fluentui-system-icons\")"))
+    XCTAssertFalse(patched.contains("https://github.com/microsoft/fluentui-system-icons.git"))
+    XCTAssertTrue(patched.contains("https://example.com/ignored.git"))
+  }
+
   private func makeMinimalPNG(width: Int, height: Int) -> Data {
     var data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
     data.append(contentsOf: [0, 0, 0, 13]) // IHDR length

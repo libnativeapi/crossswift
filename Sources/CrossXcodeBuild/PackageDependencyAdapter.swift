@@ -343,7 +343,7 @@ public enum PackageDependencyAdapter {
       if i + 1 < count && chars[i] == "/" && chars[i + 1] == "/" {
         let start = i
         i += 2
-        while i < count && chars[i] != "\n" { i += 1 }
+        while i < count && !chars[i].isNewline { i += 1 }
         result.append(contentsOf: chars[start..<i])
         continue
       }
@@ -410,8 +410,10 @@ public enum PackageDependencyAdapter {
                   let r = Range(m.range(at: 1), in: callText)
         {
           let rawPath = String(callText[r])
-          if !rawPath.isEmpty && !rawPath.hasPrefix("/") && !rawPath.contains("\\(") {
+          let isWindowsAbs = rawPath.count >= 2 && rawPath[rawPath.index(after: rawPath.startIndex)] == ":"
+          if !rawPath.isEmpty && !rawPath.hasPrefix("/") && !rawPath.hasPrefix("\\") && !isWindowsAbs && !rawPath.contains("\\(") {
             let resolved = sourceRoot.appendingPathComponent(rawPath).standardizedFileURL.path
+              .replacingOccurrences(of: "\\", with: "/")
             replacement = callText.replacingCharacters(in: r, with: resolved)
           }
         }

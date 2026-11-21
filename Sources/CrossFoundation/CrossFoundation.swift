@@ -388,13 +388,6 @@ import Carbon
     public func setValue(_ value: Any?, forKey key: String) {}
   }
 
-  #if os(Windows)
-    public func NSLog(_ format: String, _ args: CVarArg...) {
-      let message = args.isEmpty ? format : String(format: format, arguments: args)
-      fputs("[NSLog] \(message)\n", stderr)
-    }
-  #endif
-
   #if os(Linux)
     // swift-corelibs-foundation's Bundle.urls(forResourcesWithExtension:subdirectory:)
     // returns `[NSURL]?` instead of `[URL]?` like Darwin Foundation.
