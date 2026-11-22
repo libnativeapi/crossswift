@@ -476,11 +476,34 @@ public func runApp<A: App>(_ app: A) {
   let application = NativeAPI.Application.shared
   _ = application.isRunning()
   #if os(Linux)
-    if let identifier = primaryWindowScene?._applicationIdentifier,
-      let gtkApplication = g_application_get_default()
-    {
-      precondition(g_application_id_is_valid(identifier) != 0, "Invalid application identifier")
-      g_application_set_application_id(gtkApplication, identifier)
+    if let gtkApplication = g_application_get_default() {
+      if let identifier = primaryWindowScene?._applicationIdentifier {
+        precondition(g_application_id_is_valid(identifier) != 0, "Invalid application identifier")
+        g_application_set_application_id(gtkApplication, identifier)
+      } else {
+        // Assign a per-app D-Bus identifier and mark non-unique so multiple CrossSwift
+        // apps can run side by side without colliding on NativeAPI's default ID.
+        let bundleID = NSRunningApplication.current.bundleIdentifier
+          ?? Bundle.main.bundleIdentifier
+        let candidate: String
+        if let bundleID, g_application_id_is_valid(bundleID) != 0 {
+          candidate = bundleID
+        } else {
+          let raw = ProcessInfo.processInfo.processName
+          let slug = String(raw.unicodeScalars.map {
+            CharacterSet.alphanumerics.contains($0) ? Character($0) : "_"
+          }).trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+          candidate = "dev.crossswift.app.\(slug.isEmpty ? "main" : slug.lowercased())"
+        }
+        if g_application_id_is_valid(candidate) != 0 {
+          g_application_set_application_id(gtkApplication, candidate)
+        }
+        let flags = g_application_get_flags(gtkApplication)
+        g_application_set_flags(
+          gtkApplication,
+          GApplicationFlags(rawValue: flags.rawValue | G_APPLICATION_NON_UNIQUE.rawValue)
+        )
+      }
     }
   #endif
 
