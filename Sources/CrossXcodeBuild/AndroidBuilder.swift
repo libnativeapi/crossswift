@@ -273,7 +273,8 @@ public enum AndroidBuilder {
     configuration: BuildConfiguration,
     buildRoot: URL,
     scratchDir: URL,
-    crossSwiftRoot: URL
+    crossSwiftRoot: URL,
+    quiet: Bool = false
   ) throws -> AndroidBuildArtifacts {
     let fm = FileManager.default
     let androidSDK = resolveAndroidSDK()
@@ -345,12 +346,18 @@ public enum AndroidBuilder {
       ]
 
       let logURL = buildRoot.appendingPathComponent("swift-android-\(abi).log")
+      if !quiet {
+        ProcessRunner.writeStdoutLine(
+          "Building Android \(abi) target \(libName) (\(configuration.rawValue)) — log: \(logURL.path)"
+        )
+      }
       let buildResult = try ProcessRunner.run(
         executable: swiftTool,
         arguments: buildArgs,
         workingDirectory: buildRoot,
         environmentOverrides: ["CROSS_SWIFTUI_ANDROID": "1"],
-        logFile: logURL
+        logFile: logURL,
+        echoOutput: !quiet
       )
       if buildResult.exitCode != 0 {
         throw ProcessRunnerError.commandFailed(
@@ -415,7 +422,8 @@ public enum AndroidBuilder {
     androidArtifacts: AndroidBuildArtifacts,
     compiledAssets: CompiledAssets,
     crossSwiftRoot: URL,
-    destinationDir: URL
+    destinationDir: URL,
+    quiet: Bool = false
   ) throws -> URL? {
     let fm = FileManager.default
     let target = project.mainTarget
@@ -737,11 +745,15 @@ public enum AndroidBuilder {
     }
     gradleEnv["ANDROID_NDK_HOME"] = androidArtifacts.androidNDKURL.path
 
+    if !quiet {
+      ProcessRunner.writeStdoutLine("Assembling Android APK (\(gradleTask))...")
+    }
     let gradleResult = try ProcessRunner.run(
       executable: gradlewURL,
       arguments: [gradleTask, "--no-daemon", "--console=plain"],
       workingDirectory: destinationDir,
-      environmentOverrides: gradleEnv
+      environmentOverrides: gradleEnv,
+      echoOutput: !quiet
     )
     if gradleResult.exitCode != 0 {
       throw ProcessRunnerError.commandFailed(

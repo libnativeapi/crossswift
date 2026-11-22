@@ -495,12 +495,12 @@ public final class XcodeBuildDriver {
           }
         }
         if !options.quiet {
-          print("** CLEAN SUCCEEDED **")
+          ProcessRunner.writeStdoutLine("** CLEAN SUCCEEDED **")
         }
 
       case .build:
         if !options.quiet {
-          print(
+          ProcessRunner.writeStdoutLine(
             "Build target \(project.mainTarget.name) of project \(project.projectName) with configuration \(configuration.rawValue) (\(platform.rawValue))"
           )
         }
@@ -514,12 +514,13 @@ public final class XcodeBuildDriver {
         let staged = try stager.stage(
           project: project,
           built: built,
-          builtProductsDirectory: builtProductsDir
+          builtProductsDirectory: builtProductsDir,
+          quiet: options.quiet
         )
         lastStaged = staged
         if !options.quiet {
-          print("Staged product at \(staged.appBundleDirectory.path)")
-          print("** BUILD SUCCEEDED **")
+          ProcessRunner.writeStdoutLine("Staged product at \(staged.appBundleDirectory.path)")
+          ProcessRunner.writeStdoutLine("** BUILD SUCCEEDED **")
         }
       }
     }

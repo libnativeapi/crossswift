@@ -22,13 +22,50 @@ public enum ProcessRunnerError: Error, LocalizedError {
 }
 
 public enum ProcessRunner {
+  public static func writeStdout(_ text: String) {
+    guard !text.isEmpty else { return }
+    try? FileHandle.standardOutput.write(contentsOf: Data(text.utf8))
+  }
+
+  public static func writeStdoutLine(_ line: String) {
+    writeStdout(line + "\n")
+  }
+
+  public static func writeStderr(_ text: String) {
+    guard !text.isEmpty else { return }
+    try? FileHandle.standardError.write(contentsOf: Data(text.utf8))
+  }
+
   public static func run(
     executable: URL,
     arguments: [String],
     workingDirectory: URL? = nil,
     environmentOverrides: [String: String] = [:],
     logFile: URL? = nil,
-    echoOutput: Bool = false
+    echoOutput: Bool = false,
+    onOutput: (@Sendable (Data, Bool) -> Void)? = nil
+  ) throws -> ProcessResult {
+    try runImpl(
+      executable: executable,
+      arguments: arguments,
+      workingDirectory: workingDirectory,
+      environmentOverrides: environmentOverrides,
+      logFile: logFile,
+      echoOutput: echoOutput,
+      onOutput: onOutput,
+      postExitIdleTimeout: 2.0
+    )
+  }
+
+  internal static func runImpl(
+    executable: URL,
+    arguments: [String],
+    workingDirectory: URL? = nil,
+    environmentOverrides: [String: String] = [:],
+    logFile: URL? = nil,
+    echoOutput: Bool = false,
+    onOutput: (@Sendable (Data, Bool) -> Void)? = nil,
+    postExitIdleTimeout: TimeInterval = 2.0
   ) throws -> ProcessResult {
     let process = Process()
     process.executableURL = executable
@@ -48,20 +85,89 @@ public enum ProcessRunner {
     process.environment = env
     process.standardInput = FileHandle.nullDevice
 
+    let logHandle: FileHandle?
     if let logFile {
+      try FileManager.default.createDirectory(
+        at: logFile.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+      )
       _ = FileManager.default.createFile(atPath: logFile.path, contents: nil)
-      let handle = try FileHandle(forWritingTo: logFile)
-      defer { try? handle.close() }
-      process.standardOutput = handle
-      process.standardError = handle
-      try process.run()
-      process.waitUntilExit()
-      let combined = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
-      if echoOutput && !combined.isEmpty {
-        print(combined, terminator: "")
-      }
-      return ProcessResult(exitCode: process.terminationStatus, stdout: combined, stderr: "")
+      logHandle = try FileHandle(forWritingTo: logFile)
+    } else {
+      logHandle = nil
     }
+
+    final class StreamState: @unchecked Sendable {
+      let lock = NSLock()
+      var stdout = Data()
+      var stderr = Data()
+      var combined = Data()
+      var logHandle: FileHandle?
+      var lastActivity = Date()
+      var finished = false
+      let echoOutput: Bool
+      let onOutput: (@Sendable (Data, Bool) -> Void)?
+
+      init(
+        logHandle: FileHandle?,
+        echoOutput: Bool,
+        onOutput: (@Sendable (Data, Bool) -> Void)?
+      ) {
+        self.logHandle = logHandle
+        self.echoOutput = echoOutput
+        self.onOutput = onOutput
+      }
+
+      func append(_ chunk: Data, isStderr: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return }
+        lastActivity = Date()
+        if isStderr {
+          stderr.append(chunk)
+        } else {
+          stdout.append(chunk)
+        }
+        if let logHandle {
+          combined.append(chunk)
+          try? logHandle.write(contentsOf: chunk)
+        }
+        if echoOutput {
+          let target = isStderr ? FileHandle.standardError : FileHandle.standardOutput
+          try? target.write(contentsOf: chunk)
+        }
+        onOutput?(chunk, isStderr)
+      }
+
+      func markProcessExited() {
+        lock.lock()
+        lastActivity = Date()
+        lock.unlock()
+      }
+
+      func secondsSinceLastActivity() -> TimeInterval {
+        lock.lock()
+        let elapsed = Date().timeIntervalSince(lastActivity)
+        lock.unlock()
+        return elapsed
+      }
+
+      func finish() -> (stdout: Data, stderr: Data, combined: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        finished = true
+        try? logHandle?.close()
+        logHandle = nil
+        return (stdout, stderr, combined)
+      }
+    }
+
+    let state = StreamState(
+      logHandle: logHandle,
+      echoOutput: echoOutput,
+      onOutput: onOutput
+    )
+    defer { _ = state.finish() }
 
     let outPipe = Pipe()
     let errPipe = Pipe()
@@ -69,32 +175,47 @@ public enum ProcessRunner {
     process.standardError = errPipe
     try process.run()
 
-    final class DataBox: @unchecked Sendable {
-      var data = Data()
-    }
-    let outBox = DataBox()
-    let errBox = DataBox()
     let group = DispatchGroup()
-    group.enter()
-    DispatchQueue.global().async {
-      outBox.data = outPipe.fileHandleForReading.readDataToEndOfFile()
-      group.leave()
+    func drain(_ handle: FileHandle, isStderr: Bool) {
+      group.enter()
+      DispatchQueue.global().async {
+        defer { group.leave() }
+        while true {
+          let chunk = readAvailableData(from: handle)
+          if chunk.isEmpty { break }
+          state.append(chunk, isStderr: isStderr)
+        }
+      }
     }
-    group.enter()
-    DispatchQueue.global().async {
-      errBox.data = errPipe.fileHandleForReading.readDataToEndOfFile()
-      group.leave()
-    }
-    process.waitUntilExit()
-    group.wait()
 
-    let stdout = String(data: outBox.data, encoding: .utf8) ?? ""
-    let stderr = String(data: errBox.data, encoding: .utf8) ?? ""
-    if echoOutput {
-      if !stdout.isEmpty { print(stdout, terminator: "") }
-      if !stderr.isEmpty { fputs(stderr, stderrStream) }
+    drain(outPipe.fileHandleForReading, isStderr: false)
+    drain(errPipe.fileHandleForReading, isStderr: true)
+
+    process.waitUntilExit()
+    state.markProcessExited()
+    while group.wait(timeout: .now() + .milliseconds(50)) == .timedOut {
+      if state.secondsSinceLastActivity() >= postExitIdleTimeout {
+        break
+      }
     }
+
+    let captured = state.finish()
+    if logFile != nil {
+      let combined = String(decoding: captured.combined, as: UTF8.self)
+      return ProcessResult(exitCode: process.terminationStatus, stdout: combined, stderr: "")
+    }
+
+    let stdout = String(decoding: captured.stdout, as: UTF8.self)
+    let stderr = String(decoding: captured.stderr, as: UTF8.self)
     return ProcessResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
+  }
+
+  private static func readAvailableData(from handle: FileHandle) -> Data {
+    #if canImport(ObjectiveC)
+      return autoreleasepool { handle.availableData }
+    #else
+      return handle.availableData
+    #endif
   }
 
   public static func environmentValue(_ key: String) -> String? {
@@ -167,13 +288,5 @@ public enum ProcessRunner {
     }
     let collapsed = String(chars).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     return collapsed.isEmpty ? "app" : collapsed
-  }
-}
-
-private let stderrStream = FileHandle.standardError
-
-private func fputs(_ text: String, _ handle: FileHandle) {
-  if let data = text.data(using: .utf8) {
-    try? handle.write(contentsOf: data)
   }
 }

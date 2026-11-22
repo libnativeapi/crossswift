@@ -178,7 +178,8 @@ public final class ApplicationStager {
   public func stage(
     project: ResolvedXcodeProject,
     built: BuiltTargetArtifacts,
-    builtProductsDirectory: URL? = nil
+    builtProductsDirectory: URL? = nil,
+    quiet: Bool = false
   ) throws -> StagedApplication {
     let fm = FileManager.default
     let target = project.mainTarget
@@ -198,6 +199,9 @@ public final class ApplicationStager {
 
     switch built.targetPlatform {
     case .windows:
+      if !quiet {
+        ProcessRunner.writeStdoutLine("Staging Windows application bundle and runtime DLLs...")
+      }
       try fm.copyItem(at: built.executableURL, to: exeDestURL)
       if project.configuration == .release {
         stripReleaseBinaryIfPossible(
@@ -216,6 +220,9 @@ public final class ApplicationStager {
         destinationDir: appDir
       )
     case .linux:
+      if !quiet {
+        ProcessRunner.writeStdoutLine("Staging Linux application bundle and runtime libraries...")
+      }
       try fm.copyItem(at: built.executableURL, to: exeDestURL)
       if project.configuration == .release {
         stripReleaseBinaryIfPossible(
@@ -275,6 +282,9 @@ public final class ApplicationStager {
           URL(fileURLWithPath: "/usr/local/bin"),
         ]
       ) {
+        if !quiet {
+          ProcessRunner.writeStdoutLine("Installing WebAssembly runtime dependencies (npm)...")
+        }
         let npmResult = try ProcessRunner.run(
           executable: npmURL,
           arguments: [
@@ -285,7 +295,8 @@ public final class ApplicationStager {
             "--no-audit",
             "--no-fund",
           ],
-          workingDirectory: appDir
+          workingDirectory: appDir,
+          echoOutput: !quiet
         )
         if npmResult.exitCode != 0 {
           throw ProcessRunnerError.commandFailed(
@@ -342,7 +353,8 @@ public final class ApplicationStager {
         harmonyArtifacts: harmony,
         compiledAssets: built.compiledAssets,
         crossSwiftRoot: built.crossSwiftRoot,
-        destinationDir: appDir
+        destinationDir: appDir,
+        quiet: quiet
       )
       exeDestURL = hapURL ?? appDir.appendingPathComponent("runtime/\(target.executableName).o")
       resourcesDestURL = appDir.appendingPathComponent("entry/src/main/resources/rawfile/Resources")
@@ -355,7 +367,8 @@ public final class ApplicationStager {
         androidArtifacts: android,
         compiledAssets: built.compiledAssets,
         crossSwiftRoot: built.crossSwiftRoot,
-        destinationDir: appDir
+        destinationDir: appDir,
+        quiet: quiet
       )
       let firstAbi = android.abis.first ?? "arm64-v8a"
       exeDestURL = apkURL

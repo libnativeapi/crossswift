@@ -865,7 +865,8 @@ public enum PackageDependencyAdapter {
   /// Shallow-clones (or reuses a cached checkout of) a remote package dependency.
   public static func checkoutRemotePackage(
     _ remote: RemotePackageDependency,
-    cacheRoot: URL
+    cacheRoot: URL,
+    echoOutput: Bool = false
   ) throws -> URL {
     let fm = FileManager.default
     let targetRef: String? = {
@@ -893,6 +894,12 @@ public enum PackageDependencyAdapter {
       )
     }
 
+    if echoOutput {
+      ProcessRunner.writeStdoutLine(
+        "Fetching remote package \(remote.packageName) (\(remote.repositoryURL))..."
+      )
+    }
+
     try fm.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
     if fm.fileExists(atPath: checkoutDir.path) {
       try? fm.removeItem(at: checkoutDir)
@@ -907,7 +914,13 @@ public enum PackageDependencyAdapter {
         ["fetch", "--depth", "1", "origin", targetRef],
         ["-c", "core.longpaths=true", "checkout", "FETCH_HEAD"],
       ] {
-        let res = try ProcessRunner.run(executable: gitExe, arguments: args, workingDirectory: checkoutDir)
+        let shouldEcho = echoOutput && args.first == "fetch"
+        let res = try ProcessRunner.run(
+          executable: gitExe,
+          arguments: args,
+          workingDirectory: checkoutDir,
+          echoOutput: shouldEcho
+        )
         if res.exitCode != 0 {
           try? fm.removeItem(at: checkoutDir)
           throw ProcessRunnerError.commandFailed(
@@ -919,7 +932,7 @@ public enum PackageDependencyAdapter {
       }
     } else {
       let args = ["-c", "core.longpaths=true", "clone", "--depth", "1", remote.repositoryURL, checkoutDir.path]
-      let res = try ProcessRunner.run(executable: gitExe, arguments: args)
+      let res = try ProcessRunner.run(executable: gitExe, arguments: args, echoOutput: echoOutput)
       if res.exitCode != 0 {
         throw ProcessRunnerError.commandFailed(
           command: "git \(args.joined(separator: " "))",

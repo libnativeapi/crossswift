@@ -252,7 +252,8 @@ public enum HarmonyBuilder {
     compiledAssets: CompiledAssets,
     crossSwiftRoot: URL,
     nativeAPISwiftRoot: URL,
-    dependencyPackages: [URL] = []
+    dependencyPackages: [URL] = [],
+    quiet: Bool = false
   ) throws -> HarmonyBuildArtifacts {
     let fm = FileManager.default
     let sdkURL = try resolveStaticLinuxSDK(crossSwiftRoot: crossSwiftRoot)
@@ -280,12 +281,18 @@ public enum HarmonyBuilder {
     // 1. Build NativeAPI.o and stage Swift/Foundation static archives via nativeapi/bindings/swift/scripts/build-ohos.sh
     let bashURL = ProcessRunner.findExecutable(named: ["bash"]) ?? URL(fileURLWithPath: "/bin/bash")
     let nativeLog = buildRoot.appendingPathComponent("harmony-nativeapi.log")
+    if !quiet {
+      ProcessRunner.writeStdoutLine(
+        "Building HarmonyOS NativeAPI runtime — log: \(nativeLog.path)"
+      )
+    }
     let nativeRes = try ProcessRunner.run(
       executable: bashURL,
       arguments: [buildOhosScript.path, sdkURL.path, runtimeDir.path],
       workingDirectory: buildRoot,
       environmentOverrides: envOverrides,
-      logFile: nativeLog
+      logFile: nativeLog,
+      echoOutput: !quiet
     )
     if nativeRes.exitCode != 0 {
       throw ProcessRunnerError.commandFailed(
@@ -358,12 +365,18 @@ public enum HarmonyBuilder {
       ] + macroPluginFlags + extraFlags + sources.map(\.path) + swiftcTool.suffixArgs
 
       let logURL = buildRoot.appendingPathComponent("harmony-\(moduleName).log")
+      if !quiet {
+        ProcessRunner.writeStdoutLine(
+          "Compiling HarmonyOS module \(moduleName) (\(sources.count) file(s)) — log: \(logURL.path)"
+        )
+      }
       let res = try ProcessRunner.run(
         executable: swiftcTool.executable,
         arguments: args,
         workingDirectory: buildRoot,
         environmentOverrides: envOverrides,
-        logFile: logURL
+        logFile: logURL,
+        echoOutput: !quiet
       )
       if res.exitCode != 0 {
         throw ProcessRunnerError.commandFailed(
@@ -512,7 +525,8 @@ public enum HarmonyBuilder {
     harmonyArtifacts: HarmonyBuildArtifacts,
     compiledAssets: CompiledAssets,
     crossSwiftRoot: URL,
-    destinationDir: URL
+    destinationDir: URL,
+    quiet: Bool = false
   ) throws -> URL? {
     let fm = FileManager.default
     let target = project.mainTarget
@@ -933,11 +947,15 @@ public enum HarmonyBuilder {
         "PATH": pathEntries.joined(separator: ":"),
       ]
       if fm.isExecutableFile(atPath: ohpmBin.path) {
+        if !quiet {
+          ProcessRunner.writeStdoutLine("Installing HarmonyOS packages (ohpm)...")
+        }
         let ohpmRes = try ProcessRunner.run(
           executable: ohpmBin,
           arguments: ["install", "--all"],
           workingDirectory: destinationDir,
-          environmentOverrides: env
+          environmentOverrides: env,
+          echoOutput: !quiet
         )
         if ohpmRes.exitCode != 0 {
           throw ProcessRunnerError.commandFailed(
@@ -948,13 +966,17 @@ public enum HarmonyBuilder {
         }
       }
       if fm.isExecutableFile(atPath: nodeBin.path) && fm.fileExists(atPath: hvigorScript.path) {
+        if !quiet {
+          ProcessRunner.writeStdoutLine("Assembling HarmonyOS HAP (hvigorw)...")
+        }
         let hvRes = try ProcessRunner.run(
           executable: nodeBin,
           arguments: [
             hvigorScript.path, "--mode", "module", "-p", "product=default", "assembleHap", "--no-daemon",
           ],
           workingDirectory: destinationDir,
-          environmentOverrides: env
+          environmentOverrides: env,
+          echoOutput: !quiet
         )
         if hvRes.exitCode != 0 {
           throw ProcessRunnerError.commandFailed(

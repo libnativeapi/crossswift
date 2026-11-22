@@ -1084,6 +1084,140 @@ final class CrossXcodeBuildTests: XCTestCase {
     XCTAssertFalse(preprocessed.contains("@UIApplicationMain"))
   }
 
+  func testProcessRunnerStreamsOutputIncrementallyWithLogFile() throws {
+    let tmp = FileManager.default.temporaryDirectory
+      .appendingPathComponent("crossxcodebuild-stream-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let logURL = tmp.appendingPathComponent("logs/swift-build.log")
+
+    final class Recorder: @unchecked Sendable {
+      let lock = NSLock()
+      var step1Time: Date?
+      var step3Time: Date?
+      var logHadStep1WhenStreamed = false
+      var sawStdout = false
+      var sawStderr = false
+    }
+    let recorder = Recorder()
+
+    #if os(Windows)
+      let exe = URL(fileURLWithPath: ProcessRunner.environmentValue("ComSpec") ?? "C:\\Windows\\System32\\cmd.exe")
+      let args = ["/c", "echo step-1 & ping -n 2 127.0.0.1 >nul & echo step-2 1>&2 & echo step-3"]
+    #else
+      let exe = URL(fileURLWithPath: "/bin/sh")
+      let args = ["-c", "echo step-1; sleep 0.4; echo step-2 >&2; sleep 0.2; echo step-3"]
+    #endif
+
+    let result = try ProcessRunner.run(
+      executable: exe,
+      arguments: args,
+      logFile: logURL,
+      echoOutput: false
+    ) { chunk, isStderr in
+      let text = String(decoding: chunk, as: UTF8.self)
+      let now = Date()
+      recorder.lock.lock()
+      defer { recorder.lock.unlock() }
+      if !isStderr && text.contains("step-1") && recorder.step1Time == nil {
+        recorder.step1Time = now
+        recorder.sawStdout = true
+        if let onDisk = try? String(contentsOf: logURL, encoding: .utf8), onDisk.contains("step-1") {
+          recorder.logHadStep1WhenStreamed = true
+        }
+      }
+      if isStderr && text.contains("step-2") {
+        recorder.sawStderr = true
+      }
+      if !isStderr && text.contains("step-3") && recorder.step3Time == nil {
+        recorder.step3Time = now
+      }
+    }
+
+    XCTAssertEqual(result.exitCode, 0)
+    XCTAssertEqual(result.stderr, "")
+    XCTAssertTrue(result.stdout.contains("step-1"))
+    XCTAssertTrue(result.stdout.contains("step-2"))
+    XCTAssertTrue(result.stdout.contains("step-3"))
+
+    let persistedLog = try String(contentsOf: logURL, encoding: .utf8)
+    XCTAssertTrue(persistedLog.contains("step-1"))
+    XCTAssertTrue(persistedLog.contains("step-2"))
+    XCTAssertTrue(persistedLog.contains("step-3"))
+
+    XCTAssertTrue(recorder.sawStdout)
+    XCTAssertTrue(recorder.sawStderr)
+    XCTAssertTrue(recorder.logHadStep1WhenStreamed)
+    let t1 = try XCTUnwrap(recorder.step1Time)
+    let t3 = try XCTUnwrap(recorder.step3Time)
+    XCTAssertGreaterThan(
+      t3.timeIntervalSince(t1),
+      0.2,
+      "Expected step-1 to stream before step-3 rather than buffering until process exit"
+    )
+  }
+
+  func testProcessRunnerSeparatesStdoutAndStderrWithoutLogFile() throws {
+    final class StreamFlags: @unchecked Sendable {
+      let lock = NSLock()
+      var stdoutText = ""
+      var stderrText = ""
+    }
+    let flags = StreamFlags()
+
+    #if os(Windows)
+      let exe = URL(fileURLWithPath: ProcessRunner.environmentValue("ComSpec") ?? "C:\\Windows\\System32\\cmd.exe")
+      let args = ["/c", "echo out-line & echo err-line 1>&2"]
+    #else
+      let exe = URL(fileURLWithPath: "/bin/sh")
+      let args = ["-c", "echo out-line; echo err-line >&2"]
+    #endif
+
+    let result = try ProcessRunner.run(
+      executable: exe,
+      arguments: args,
+      echoOutput: false
+    ) { chunk, isStderr in
+      let text = String(decoding: chunk, as: UTF8.self)
+      flags.lock.lock()
+      if isStderr {
+        flags.stderrText += text
+      } else {
+        flags.stdoutText += text
+      }
+      flags.lock.unlock()
+    }
+
+    XCTAssertEqual(result.exitCode, 0)
+    XCTAssertTrue(result.stdout.contains("out-line"))
+    XCTAssertFalse(result.stdout.contains("err-line"))
+    XCTAssertTrue(result.stderr.contains("err-line"))
+    XCTAssertFalse(result.stderr.contains("out-line"))
+    XCTAssertTrue(flags.stdoutText.contains("out-line"))
+    XCTAssertTrue(flags.stderrText.contains("err-line"))
+  }
+
+  #if !os(Windows)
+  func testProcessRunnerDoesNotHangWhenDetachedGrandchildHoldsPipeOpen() throws {
+    let start = Date()
+    let result = try ProcessRunner.runImpl(
+      executable: URL(fileURLWithPath: "/bin/sh"),
+      arguments: ["-c", "echo done-now; (sleep 5) &"],
+      echoOutput: false,
+      postExitIdleTimeout: 0.3
+    )
+    let elapsed = Date().timeIntervalSince(start)
+    XCTAssertEqual(result.exitCode, 0)
+    XCTAssertTrue(result.stdout.contains("done-now"))
+    XCTAssertLessThan(
+      elapsed,
+      2.5,
+      "ProcessRunner should not block waiting for a detached grandchild holding stdout open"
+    )
+  }
+  #endif
+
   private func makeMinimalPNG(width: Int, height: Int) -> Data {
     var data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
     data.append(contentsOf: [0, 0, 0, 13]) // IHDR length

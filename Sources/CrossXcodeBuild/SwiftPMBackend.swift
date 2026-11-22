@@ -105,6 +105,9 @@ public final class SwiftPMBackend {
     if fm.fileExists(atPath: assetsStaging.path) {
       try? fm.removeItem(at: assetsStaging)
     }
+    if !options.quiet {
+      ProcessRunner.writeStdoutLine("Compiling assets and resources...")
+    }
     let assetCompiler = AssetAndIconCompiler()
     let compiledAssets = try assetCompiler.compile(project: project, stagingRoot: assetsStaging)
 
@@ -116,7 +119,8 @@ public final class SwiftPMBackend {
         project: project,
         platform: platform,
         buildRoot: buildRoot,
-        crossSwiftRoot: crossSwiftRoot
+        crossSwiftRoot: crossSwiftRoot,
+        quiet: options.quiet
       )
       var dependencyRoots: [URL] = []
       var seenRoots = Set<String>()
@@ -126,7 +130,11 @@ public final class SwiftPMBackend {
           if seenRoots.insert(adapted.standardizedFileURL.path).inserted {
             dependencyRoots.append(adapted)
           }
-        } else if let checkout = try? PackageDependencyAdapter.checkoutRemotePackage(remote, cacheRoot: cacheRoot) {
+        } else if let checkout = try? PackageDependencyAdapter.checkoutRemotePackage(
+          remote,
+          cacheRoot: cacheRoot,
+          echoOutput: !options.quiet
+        ) {
           if seenRoots.insert(checkout.standardizedFileURL.path).inserted {
             dependencyRoots.append(checkout)
           }
@@ -145,7 +153,8 @@ public final class SwiftPMBackend {
         compiledAssets: compiledAssets,
         crossSwiftRoot: crossSwiftRoot,
         nativeAPISwiftRoot: nativeAPISwiftRoot,
-        dependencyPackages: dependencyRoots
+        dependencyPackages: dependencyRoots,
+        quiet: options.quiet
       )
       let swiftExe = (try? locateSwiftExecutable()) ?? URL(fileURLWithPath: "/usr/bin/swift")
       return BuiltTargetArtifacts(
@@ -165,7 +174,10 @@ public final class SwiftPMBackend {
 
     var compiledResURL: URL?
     if platform == .windows, let rcURL = compiledAssets.windowsResourceScriptURL {
-      compiledResURL = try compileWindowsResources(rcURL: rcURL)
+      if !options.quiet {
+        ProcessRunner.writeStdoutLine("Compiling Windows resources...")
+      }
+      compiledResURL = try compileWindowsResources(rcURL: rcURL, echoOutput: !options.quiet)
     }
 
     try stageSources(
@@ -179,7 +191,8 @@ public final class SwiftPMBackend {
       project: project,
       platform: platform,
       buildRoot: buildRoot,
-      crossSwiftRoot: crossSwiftRoot
+      crossSwiftRoot: crossSwiftRoot,
+      quiet: options.quiet
     )
 
     let consoleSubsystem = options.consoleSubsystem
@@ -204,7 +217,8 @@ public final class SwiftPMBackend {
         configuration: configuration,
         buildRoot: buildRoot,
         scratchDir: scratchDir,
-        crossSwiftRoot: crossSwiftRoot
+        crossSwiftRoot: crossSwiftRoot,
+        quiet: options.quiet
       )
       let firstAbi = android.abis.first ?? "arm64-v8a"
       let primarySO = android.jniLibsDirectory
@@ -248,12 +262,18 @@ public final class SwiftPMBackend {
       ) {
         wasmEnv["NATIVEAPI_SWIFT_PATH"] = resolvedNativeAPI.path
       }
+      if !options.quiet {
+        ProcessRunner.writeStdoutLine(
+          "Running swift package js (\(wasmSDK), \(configuration.rawValue)) — log: \(logURL.path)"
+        )
+      }
       let buildResult = try ProcessRunner.run(
         executable: swiftTool,
         arguments: jsArgs,
         workingDirectory: buildRoot,
         environmentOverrides: wasmEnv,
-        logFile: logURL
+        logFile: logURL,
+        echoOutput: !options.quiet
       )
       if buildResult.exitCode != 0 {
         throw ProcessRunnerError.commandFailed(
@@ -318,12 +338,18 @@ public final class SwiftPMBackend {
     let productArgs = buildArgs + ["--product", project.mainTarget.executableName]
 
     let logURL = buildRoot.appendingPathComponent("swift-build.log")
+    if !options.quiet {
+      ProcessRunner.writeStdoutLine(
+        "Running swift build (\(platform.rawValue), \(configuration.rawValue)) — log: \(logURL.path)"
+      )
+    }
     let buildResult = try ProcessRunner.run(
       executable: swiftExe,
       arguments: productArgs,
       workingDirectory: buildRoot,
       environmentOverrides: envOverrides,
-      logFile: logURL
+      logFile: logURL,
+      echoOutput: !options.quiet
     )
     if buildResult.exitCode != 0 {
       throw ProcessRunnerError.commandFailed(
@@ -498,7 +524,7 @@ public final class SwiftPMBackend {
     }
   }
 
-  private func compileWindowsResources(rcURL: URL) throws -> URL {
+  private func compileWindowsResources(rcURL: URL, echoOutput: Bool = false) throws -> URL {
     let rcDir = rcURL.deletingLastPathComponent()
     let resURL = rcDir.appendingPathComponent("AppResources.res")
     var extraDirs: [URL] = []
@@ -529,7 +555,8 @@ public final class SwiftPMBackend {
     let result = try ProcessRunner.run(
       executable: rcTool,
       arguments: args,
-      workingDirectory: rcDir
+      workingDirectory: rcDir,
+      echoOutput: echoOutput
     )
     if result.exitCode != 0 {
       throw ProcessRunnerError.commandFailed(
@@ -880,7 +907,8 @@ public final class SwiftPMBackend {
     project: ResolvedXcodeProject,
     platform: TargetPlatform,
     buildRoot: URL,
-    crossSwiftRoot: URL
+    crossSwiftRoot: URL,
+    quiet: Bool = false
   ) throws -> (remote: [String: URL], local: [String: URL]) {
     var adaptedRemote: [String: URL] = [:]
     var adaptedLocal: [String: URL] = [:]
@@ -900,12 +928,13 @@ public final class SwiftPMBackend {
       do {
         checkoutDir = try PackageDependencyAdapter.checkoutRemotePackage(
           remote,
-          cacheRoot: cacheRoot
+          cacheRoot: cacheRoot,
+          echoOutput: !quiet
         )
       } catch {
-        if let data = "warning: failed to checkout remote package \(remote.repositoryURL) for adaptation: \(error)\n".data(using: .utf8) {
-          FileHandle.standardError.write(data)
-        }
+        ProcessRunner.writeStderr(
+          "warning: failed to checkout remote package \(remote.repositoryURL) for adaptation: \(error)\n"
+        )
         continue
       }
       let slug = ProcessRunner.sanitizedSlug(remote.packageName)
