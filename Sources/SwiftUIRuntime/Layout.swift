@@ -271,7 +271,8 @@ public struct LayoutEngine {
       && a.idealWidth == b.idealWidth && a.idealHeight == b.idealHeight
       && a.fixedWidth == b.fixedWidth && a.fixedHeight == b.fixedHeight
       && a.fillWidth == b.fillWidth && a.fillHeight == b.fillHeight && a.padding == b.padding
-      && a.spacing == b.spacing && a.flex == b.flex && a.scrollAxes == b.scrollAxes
+      && a.spacing == b.spacing && a.flex == b.flex && a.spacerMinLength == b.spacerMinLength
+      && a.layoutPriority == b.layoutPriority && a.scrollAxes == b.scrollAxes
       && a.gridUnsizedAxes == b.gridUnsizedAxes && a.visible == b.visible
       && a.multiline == b.multiline && a.offsetX == b.offsetX && a.offsetY == b.offsetY
       && a.scrollOffset == b.scrollOffset && a.scrollContentInsets == b.scrollContentInsets
@@ -528,25 +529,34 @@ public struct LayoutEngine {
       let horizontal = e.kind == .container(.horizontal)
       let childOffer = ProposedViewSize(
         width: horizontal ? nil : offer.width, height: horizontal ? offer.height : nil)
-      let visibleChildren = e.children.filter(\.props.visible)
-      let spacings = Double(max(0, visibleChildren.count - 1)) * p.spacing
-      var measuredChildren = visibleChildren.map { measure($0, childOffer) }
+      let children = e.children
+      let spacings = Double(max(0, children.count - 1)) * p.spacing
+      var measuredChildren = children.map { child -> Size in
+        if child.kind == .spacer {
+          return horizontal
+            ? Size(width: child.props.spacerMinLength, height: 0)
+            : Size(width: 0, height: child.props.spacerMinLength)
+        }
+        return measure(child, childOffer)
+      }
       var main =
         measuredChildren.reduce(0) { $0 + (horizontal ? $1.width : $1.height) } + spacings
       if horizontal, let offeredWidth = offer.width, offeredWidth.isFinite,
         main > Double(offeredWidth)
       {
-        let nonFlex = visibleChildren.indices.filter { i in
-          let c = visibleChildren[i]
+        let nonFlex = children.indices.filter { i in
+          let c = children[i]
           return c.kind != .spacer && c.props.flex <= 0 && !fills(c, horizontal: true)
         }
-        let widths = allocateHorizontalWidths(
-          nonFlex.map { measuredChildren[$0].width },
-          budget: max(0, Double(offeredWidth) - spacings))
+        let spacerReserve = children.reduce(0.0) { $0 + ($1.kind == .spacer ? $1.props.spacerMinLength : 0) }
+        let widths = allocateMainSizes(
+          ideals: nonFlex.map { measuredChildren[$0].width },
+          priorities: nonFlex.map { children[$0].props.layoutPriority },
+          budget: max(0, Double(offeredWidth) - spacings - spacerReserve))
         for (idx, allocated) in zip(nonFlex, widths)
         where allocated + 0.5 < measuredChildren[idx].width {
           measuredChildren[idx] = measure(
-            visibleChildren[idx],
+            children[idx],
             ProposedViewSize(width: CGFloat(allocated), height: offer.height))
         }
         main = min(Double(offeredWidth), measuredChildren.reduce(0) { $0 + $1.width } + spacings)
@@ -876,6 +886,19 @@ public struct LayoutEngine {
         for i in e.children.indices {
           let f = frames[i]
           place(&e.children[i], in: Rect(x: f.minX, y: f.minY, width: f.width, height: f.height))
+          if let stackKey = e.lazyCacheKey, let itemID = e.children[i].explicitID,
+             !e.children[i].children.isEmpty
+          {
+            let h = Double(f.height)
+            let w = Double(f.width)
+            if h > 1 {
+              LazyHeightCache.shared.record(stack: stackKey, item: itemID, height: h)
+              LazyHeightCache.shared.record(stack: stackKey, item: AnyHashable("__grid_row"), height: h)
+            }
+            if w > 1 {
+              LazyHeightCache.shared.record(stack: stackKey, item: AnyHashable("__grid_col"), height: w)
+            }
+          }
         }
       }
     case .scroll:
@@ -964,19 +987,20 @@ public struct LayoutEngine {
   }
   private func placeStack(_ e: inout Element, axis: Axis, in rect: Rect) {
     let vertical = axis == .vertical
-    let visible = e.children.indices.filter { e.children[$0].props.visible }
+    let indices = Array(e.children.indices)
     let mainExtent = vertical ? rect.height : rect.width
     let crossExtent = vertical ? rect.width : rect.height
     let proposal = ProposedViewSize(
       width: vertical ? rect.width : nil, height: vertical ? nil : rect.height)
     let alignment = Alignment(
       horizontal: e.props.horizontalAlignment, vertical: e.props.verticalAlignment)
-    var fixed = Double(max(0, visible.count - 1)) * e.props.spacing
-    var flexTotal = 0.0
-    var sizes: [(natural: Size, flex: Double)] = []
-    sizes.reserveCapacity(visible.count)
-    for i in visible {
+    let spacings = Double(max(0, indices.count - 1)) * e.props.spacing
+    var fixed = spacings
+    var sizes: [(natural: Size, flex: Double, minSpacer: Double, priority: Double)] = []
+    sizes.reserveCapacity(indices.count)
+    for i in indices {
       let child = e.children[i]
+      let minSpacer = child.kind == .spacer ? child.props.spacerMinLength : 0
       let flex =
         child.props.flex > 0 || fills(child, horizontal: !vertical)
         ? max(1, child.props.flex) : 0
@@ -987,38 +1011,74 @@ public struct LayoutEngine {
       } else {
         natural = measure(child, proposal)
       }
-      sizes.append((natural, flex))
+      sizes.append((natural, flex, minSpacer, child.props.layoutPriority))
       if flex > 0 {
-        flexTotal += flex
+        fixed += minSpacer
       } else {
         fixed += vertical ? natural.height : natural.width
       }
     }
     var cursor = vertical ? rect.minY : rect.minX
-    let spacings = Double(max(0, visible.count - 1)) * e.props.spacing
-    if !vertical && fixed > mainExtent {
+    let hasDistinctPriorities = Set(sizes.map(\.priority)).count > 1
+    if (!vertical && fixed > mainExtent) || (vertical && fixed > mainExtent && hasDistinctPriorities) {
       let nonFlexPositions = sizes.indices.filter { sizes[$0].flex == 0 }
-      let allocated = allocateHorizontalWidths(
-        nonFlexPositions.map { sizes[$0].natural.width },
-        budget: max(0, mainExtent - spacings))
-      for (pos, width) in zip(nonFlexPositions, allocated)
-      where width + 0.5 < sizes[pos].natural.width {
-        let child = e.children[visible[pos]]
-        let compressed = measure(
-          child, ProposedViewSize(width: CGFloat(width), height: CGFloat(rect.height)))
-        sizes[pos].natural = Size(width: width, height: compressed.height)
+      let spacerReserve = sizes.reduce(0.0) { $0 + $1.minSpacer }
+      let allocated = allocateMainSizes(
+        ideals: nonFlexPositions.map { vertical ? sizes[$0].natural.height : sizes[$0].natural.width },
+        priorities: nonFlexPositions.map { sizes[$0].priority },
+        budget: max(0, mainExtent - spacings - spacerReserve))
+      for (pos, extent) in zip(nonFlexPositions, allocated) {
+        let naturalMain = vertical ? sizes[pos].natural.height : sizes[pos].natural.width
+        if extent + 0.5 < naturalMain {
+          let child = e.children[indices[pos]]
+          if vertical {
+            let compressed = measure(
+              child, ProposedViewSize(width: CGFloat(rect.width), height: CGFloat(extent)))
+            sizes[pos].natural = Size(width: compressed.width, height: extent)
+          } else {
+            let compressed = measure(
+              child, ProposedViewSize(width: CGFloat(extent), height: CGFloat(rect.height)))
+            sizes[pos].natural = Size(width: extent, height: compressed.height)
+          }
+        }
       }
       fixed =
-        spacings
-        + sizes.reduce(0) { $0 + ($1.flex > 0 ? 0 : $1.natural.width) }
+        spacings + spacerReserve
+        + sizes.reduce(0) { $0 + ($1.flex > 0 ? 0 : (vertical ? $1.natural.height : $1.natural.width)) }
     }
-    let available = max(0, mainExtent - fixed)
-    for (i, sizing) in zip(visible, sizes) {
+    var available = max(0, mainExtent - fixed)
+    var flexShares = [Double](repeating: 0, count: sizes.count)
+    let flexPositions = sizes.indices.filter { sizes[$0].flex > 0 }
+    if !flexPositions.isEmpty && available > 0 {
+      let distinctFlexPriorities = Array(Set(flexPositions.map { sizes[$0].priority })).sorted(by: >)
+      for tier in distinctFlexPriorities {
+        guard available > 1e-6 else { break }
+        let tierPositions = flexPositions.filter { sizes[$0].priority == tier }
+        let tierFlex = tierPositions.reduce(0.0) { $0 + sizes[$1].flex }
+        var used = 0.0
+        for pos in tierPositions {
+          let rawShare = available * sizes[pos].flex / max(1, tierFlex)
+          let child = e.children[indices[pos]]
+          let maxCap = vertical ? child.props.maxHeight : child.props.maxWidth
+          let capped: Double
+          if let maxCap, maxCap.isFinite {
+            capped = min(rawShare, max(0, maxCap - sizes[pos].minSpacer))
+          } else {
+            capped = rawShare
+          }
+          flexShares[pos] = capped
+          used += capped
+        }
+        available = max(0, available - used)
+      }
+    }
+    for (pos, i) in indices.enumerated() {
       let child = e.children[i]
+      let sizing = sizes[pos]
       let natural = sizing.natural
       let main =
         sizing.flex > 0
-        ? available * sizing.flex / max(1, flexTotal) : (vertical ? natural.height : natural.width)
+        ? sizing.minSpacer + flexShares[pos] : (vertical ? natural.height : natural.width)
       let cross =
         fills(child, horizontal: vertical) || child.props.flex > 0
         ? crossExtent : min(crossExtent, vertical ? natural.width : natural.height)
@@ -1030,14 +1090,13 @@ public struct LayoutEngine {
       place(
         &e.children[i],
         in: aligned(size, in: slot, alignment: alignment, child: child))
-      if vertical, let stackKey = e.lazyCacheKey, let itemID = e.children[i].explicitID,
+      if let stackKey = e.lazyCacheKey, let itemID = e.children[i].explicitID,
          !e.children[i].children.isEmpty
       {
         LazyHeightCache.shared.record(stack: stackKey, item: itemID, height: main)
       }
       cursor += main + e.props.spacing
     }
-    for i in e.children.indices where !e.children[i].props.visible { e.children[i].frame = .zero }
   }
   private func applyFrames(_ element: inout Element, from previous: Element) {
     if element.frame != previous.frame { element.reusesLayout = false }
@@ -1067,23 +1126,34 @@ public struct LayoutEngine {
     }
     for i in element.children.indices { translate(&element.children[i], dx: dx, dy: dy) }
   }
-  private func allocateHorizontalWidths(_ ideals: [Double], budget: Double) -> [Double] {
+  private func allocateMainSizes(
+    ideals: [Double], priorities: [Double], budget: Double
+  ) -> [Double] {
     guard !ideals.isEmpty else { return [] }
-    var allocated = ideals
-    var remaining = Array(ideals.indices)
+    var allocated = [Double](repeating: 0, count: ideals.count)
     var pool = max(0, budget)
-    while !remaining.isEmpty {
-      let share = pool / Double(remaining.count)
-      let small = remaining.filter { ideals[$0] <= share + 1e-6 }
-      if small.isEmpty {
-        for index in remaining { allocated[index] = share }
-        break
+    let tiers = Array(Set(priorities)).sorted(by: >)
+    for tier in tiers {
+      var remaining = ideals.indices.filter { priorities[$0] == tier }
+      guard !remaining.isEmpty else { continue }
+      if pool <= 1e-6 {
+        for idx in remaining { allocated[idx] = 0 }
+        continue
       }
-      for index in small {
-        allocated[index] = ideals[index]
-        pool = max(0, pool - ideals[index])
+      while !remaining.isEmpty {
+        let share = pool / Double(remaining.count)
+        let small = remaining.filter { ideals[$0] <= share + 1e-6 }
+        if small.isEmpty {
+          for index in remaining { allocated[index] = share }
+          pool = 0
+          break
+        }
+        for index in small {
+          allocated[index] = ideals[index]
+          pool = max(0, pool - ideals[index])
+        }
+        remaining.removeAll { ideals[$0] <= share + 1e-6 }
       }
-      remaining.removeAll { ideals[$0] <= share + 1e-6 }
     }
     return allocated
   }

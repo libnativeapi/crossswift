@@ -222,6 +222,11 @@ public struct NodeProps: Equatable {
   public var borderColor: Color = .clear
   public var borderWidth: Double = 0
   public var opacity: Double = 1
+  public var blurRadius: Double = 0
+  public var brightness: Double = 0
+  public var contrast: Double = 1
+  public var compositingGroup: Bool = false
+  public var layoutPriority: Double = 0
   public var shadows: [Shadow] = []
   public var animation: Animation? = nil
   package var animationDisabled = false
@@ -249,6 +254,8 @@ public struct NodeProps: Equatable {
   public var verticalAlignment: VerticalAlignment = .center
   /// Main-axis share for `Spacer`; 0 means fixed.
   public var flex: Double = 0
+  /// Minimum main-axis length for `Spacer(minLength:)`.
+  public var spacerMinLength: Double = 0
   /// Optional semantic control metadata used by native platform hosts (e.g. Android Compose).
   public var semanticControl: SemanticControl? = nil
 
@@ -346,6 +353,17 @@ public struct Element {
   var textAction: ((String) -> Void)? = nil
   var submitAction: (() -> Void)? = nil
   var dragAction: ((DragGesture.Value, Bool) -> Void)? = nil
+  var highPriorityAction: (() -> Void)? = nil
+  var simultaneousActions: [() -> Void] = []
+  var highPriorityDragAction: ((DragGesture.Value, Bool) -> Void)? = nil
+  var simultaneousDragActions: [(DragGesture.Value, Bool) -> Void] = []
+  struct LongPressConfig {
+    let minimumDuration: Double
+    let maximumDistance: Double
+    let onPressingChanged: ((Bool) -> Void)?
+    let onEnded: () -> Void
+  }
+  var longPressAction: LongPressConfig? = nil
   var tapLocationAction: ((CGPoint) -> Void)?
   var doubleTapLocationAction: ((CGPoint) -> Void)?
   var doubleTapAction: (() -> Void)? = nil
@@ -585,9 +603,15 @@ func resolveEnvironment(
   element.props.borderColor = element.props.borderColor.resolved(in: effectiveScheme)
   if let grad = element.props.gradient {
     element.props.gradient = LinearGradient.Data(
+      kind: grad.kind,
       colors: grad.colors.map { $0.resolved(in: effectiveScheme) },
+      locations: grad.locations,
       start: grad.start,
-      end: grad.end
+      end: grad.end,
+      startRadius: grad.startRadius,
+      endRadius: grad.endRadius,
+      startAngle: grad.startAngle,
+      endAngle: grad.endAngle
     )
   }
   element.props.enabled = !disabled

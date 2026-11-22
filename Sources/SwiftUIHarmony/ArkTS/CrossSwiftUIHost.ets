@@ -41,6 +41,7 @@ interface GalleryNode {
   borderWidth: number;
   radius: number;
   opacity: number;
+  blurRadius?: number;
   clip: boolean;
   scrollIndicators: boolean;
   scrollDirection: string;
@@ -808,6 +809,7 @@ struct GalleryElement {
     .rotate({ angle: this.model.snapshot.rotation })
     .scale({ x: this.model.snapshot.scaleX, y: this.model.snapshot.scaleY })
     .opacity(this.parentOpacity > 0 ? Math.min(1, this.model.snapshot.opacity / this.parentOpacity) : 0)
+    .blur(this.model.snapshot.blurRadius ?? 0)
     .enabled(this.model.snapshot.enabled)
     .hitTestBehavior(this.model.snapshot.hitTesting ? HitTestMode.Transparent : HitTestMode.None)
   }

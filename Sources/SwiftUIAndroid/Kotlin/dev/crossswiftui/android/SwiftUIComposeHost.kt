@@ -46,6 +46,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
@@ -269,6 +270,9 @@ class SwiftUIComposeHost(
                 }
             }
             baseModifier = baseModifier.clip(clipShape)
+        }
+        if (control.blurRadius > 0.1f) {
+            baseModifier = baseModifier.blur(control.blurRadius.dp)
         }
         baseModifier = baseModifier.alpha(control.opacity).semantics {
             if (control.accessibilityLabel.isNotEmpty()) contentDescription = control.accessibilityLabel
@@ -1079,6 +1083,7 @@ class SwiftUIComposeHost(
         val lineLimit: Int?,
         val enabled: Boolean,
         val opacity: Float,
+        val blurRadius: Float,
         val rotation: Double,
         val scaleX: Double,
         val scaleY: Double,
@@ -1162,6 +1167,7 @@ class SwiftUIComposeHost(
             lineLimit = if (node.has("lineLimit") && !node.isNull("lineLimit")) node.getInt("lineLimit") else null,
             enabled = node.optBoolean("enabled", true),
             opacity = node.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
+            blurRadius = node.optDouble("blurRadius", 0.0).toFloat().coerceAtLeast(0f),
             rotation = node.optDouble("rotation", 0.0),
             scaleX = node.optDouble("scaleX", 1.0),
             scaleY = node.optDouble("scaleY", 1.0),

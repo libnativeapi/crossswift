@@ -73,6 +73,15 @@ void sui_surface_transform(void *surface, double cx, double cy, double rotation,
 void sui_surface_gradient(void *surface, double x, double y, double width,
                           double height, double sx, double sy, double ex,
                           double ey, const uint32_t *colors, int count);
+void sui_surface_gradient_ex(void *surface, int kind, double x, double y,
+                             double width, double height, double sx, double sy,
+                             double ex, double ey, double start_param,
+                             double end_param, const uint32_t *colors,
+                             const double *locations, int count);
+void sui_surface_layer_begin(void *surface, double x, double y, double width,
+                             double height, double opacity, double blur_radius,
+                             double brightness, double contrast);
+void sui_surface_layer_end(void *surface);
 void sui_surface_image(void *surface, const char *file, double x, double y,
                        double width, double height);
 void sui_surface_clip(void *surface, double x, double y, double width,
@@ -108,6 +117,8 @@ void sui_surface_remove_button(void *surface, void *button);
 void sui_button_update(void *surface, void *button, double radius,
                        const char *help, double x, double y, double width,
                        double height);
+void sui_button_set_accessibility(void *button, const char *label,
+                                  const char *description);
 void sui_surface_focus_next(void *surface, void *current, int backward);
 sui_size sui_measure_text(const char *text, const char *family, double size,
                           double weight);

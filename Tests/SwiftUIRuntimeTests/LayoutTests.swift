@@ -94,7 +94,7 @@ final class LayoutTests: XCTestCase {
     XCTAssertEqual(tree.children[0].frame.height, 30)
   }
 
-  func testHiddenChildDoesNotOccupyStackSpace() {
+  func testHiddenChildPreservesStackSpace() {
     let tree = makeTree(
       VStack(spacing: 0) {
         Text("A")
@@ -105,8 +105,8 @@ final class LayoutTests: XCTestCase {
     )
 
     XCTAssertEqual(tree.children[1].props.visible, false)
-    XCTAssertEqual(tree.children[1].frame, .zero)
-    XCTAssertEqual(tree.children[2].frame, Rect(x: 46, y: 20, width: 8, height: 20))
+    XCTAssertEqual(tree.children[1].frame, Rect(x: 46, y: 20, width: 8, height: 20))
+    XCTAssertEqual(tree.children[2].frame, Rect(x: 46, y: 40, width: 8, height: 20))
   }
 
   func testForegroundColorIsInherited() {

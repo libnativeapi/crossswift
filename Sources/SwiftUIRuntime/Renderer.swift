@@ -42,9 +42,30 @@ import Foundation
   private var contentSize: Size
   private var hoveredNodeIDs: [NodeID] = []
   private var focused: NodeID?
-  private var dragging: (id: NodeID, start: CGPoint, origin: CGPoint)?
+  private var dragging: (id: NodeID, isHighPriority: Bool, start: CGPoint, origin: CGPoint, simultaneousIDs: [NodeID])?
   private var scrollDrag: (id: NodeID, start: CGPoint, offset: Point, ratio: Double)?
   private var pointerDown: NodeID?
+  private var pointerDownHighPriority = false
+  private var pointerDownSimultaneous: [NodeID] = []
+  private final class PendingLongPress {
+    let nodeID: NodeID
+    let startPoint: CGPoint
+    let startTime: TimeInterval
+    let config: Element.LongPressConfig
+    var fired = false
+    var timerTask: Task<Void, Never>?
+    init(nodeID: NodeID, startPoint: CGPoint, startTime: TimeInterval, config: Element.LongPressConfig) {
+      self.nodeID = nodeID
+      self.startPoint = startPoint
+      self.startTime = startTime
+      self.config = config
+    }
+    func cancelTimer() {
+      timerTask?.cancel()
+      timerTask = nil
+    }
+  }
+  private var pendingLongPress: PendingLongPress?
   private var unpublishedOffsets: [NodeID: Point] = [:]
   private var hoverPending = false
   private var hoverPoint: CGPoint?
@@ -96,7 +117,28 @@ import Foundation
     }
   }
 
-  deinit { StateRegistry.shared.removeObserver(rootPath) }
+  deinit {
+    pendingLongPress?.cancelTimer()
+    StateRegistry.shared.removeObserver(rootPath)
+  }
+
+  /// Checks whether an active `LongPressGesture` has reached its `minimumDuration`
+  /// against the current `clock()` timestamp and fires its completion if so.
+  @discardableResult
+  public func checkLongPressTimeout() -> Bool {
+    guard let lp = pendingLongPress, !lp.fired else { return false }
+    guard clock() - lp.startTime >= lp.config.minimumDuration else { return false }
+    lp.fired = true
+    lp.cancelTimer()
+    pointerDown = nil
+    pointerDownHighPriority = false
+    pointerDownSimultaneous.removeAll()
+    transactionDepth += 1
+    defer { finishTransaction() }
+    lp.config.onEnded()
+    lp.config.onPressingChanged?(false)
+    return true
+  }
 
   /// Builds and mounts the initial tree.
   public func mount() {
@@ -486,43 +528,146 @@ import Foundation
       return true
     }
     if event == 2 {
-      pointerDown = chain.first(where: { $0.action != nil })?.id
+      pendingLongPress?.cancelTimer()
+      pendingLongPress = nil
+      if let high = chain.reversed().first(where: { $0.highPriorityAction != nil }) {
+        pointerDown = high.id
+        pointerDownHighPriority = true
+      } else {
+        pointerDown = chain.first(where: { $0.action != nil })?.id
+        pointerDownHighPriority = false
+      }
+      pointerDownSimultaneous = chain.filter { !$0.simultaneousActions.isEmpty }.map(\.id)
       if updatesPressedState, let pointerDown { interact(pointerDown, .pressed(true)) }
-      if let node = chain.first(where: { $0.dragAction != nil }) {
-        dragging = (node.id, point, CGPoint(x: node.frame.minX, y: node.frame.minY))
+
+      if let lpNode = chain.first(where: { $0.longPressAction != nil }),
+         let lpConfig = lpNode.longPressAction
+      {
+        let lp = PendingLongPress(
+          nodeID: lpNode.id, startPoint: point, startTime: clock(), config: lpConfig)
+        pendingLongPress = lp
+        lpConfig.onPressingChanged?(true)
+        if lpConfig.minimumDuration <= 0 {
+          _ = checkLongPressTimeout()
+        } else {
+          let delayNs = UInt64(max(1.0, lpConfig.minimumDuration * 1_000_000_000.0))
+          lp.timerTask = Task { @MainActor [weak self, weak lp] in
+            try? await Task.sleep(nanoseconds: delayNs)
+            guard let self, let lp, self.pendingLongPress === lp, !lp.fired else { return }
+            _ = self.checkLongPressTimeout()
+          }
+        }
+      }
+
+      let simDrags = chain.filter { !$0.simultaneousDragActions.isEmpty }.map(\.id)
+      if let highDrag = chain.reversed().first(where: { $0.highPriorityDragAction != nil }) {
+        dragging = (highDrag.id, true, point, CGPoint(x: highDrag.frame.minX, y: highDrag.frame.minY), simDrags)
+      } else if let node = chain.first(where: { $0.dragAction != nil }) {
+        dragging = (node.id, false, point, CGPoint(x: node.frame.minX, y: node.frame.minY), simDrags)
+      } else if let firstSim = simDrags.first, let node = find(firstSim, in: tree) {
+        dragging = (node.id, false, point, CGPoint(x: node.frame.minX, y: node.frame.minY), simDrags)
       }
       if let node = chain.first(where: { $0.props.focusable || $0.focusAction != nil }) {
         focused = node.id
         interact(node.id, .focus(true))
       }
     }
+    if event == 1, let lp = pendingLongPress, !lp.fired {
+      let moved = hypot(Double(point.x - lp.startPoint.x), Double(point.y - lp.startPoint.y))
+      if moved > lp.config.maximumDistance {
+        lp.cancelTimer()
+        pendingLongPress = nil
+        lp.config.onPressingChanged?(false)
+      } else if clock() - lp.startTime >= lp.config.minimumDuration {
+        _ = checkLongPressTimeout()
+      }
+    }
     if event == 3, updatesPressedState, let pointerDown {
       interact(pointerDown, .pressed(false))
+    }
+    if event == 3, let lp = pendingLongPress {
+      let alreadyFired = lp.fired
+      if !alreadyFired && clock() - lp.startTime >= lp.config.minimumDuration {
+        lp.fired = true
+        lp.cancelTimer()
+        pendingLongPress = nil
+        pointerDown = nil
+        pointerDownHighPriority = false
+        pointerDownSimultaneous.removeAll()
+        lp.config.onEnded()
+        lp.config.onPressingChanged?(false)
+        return true
+      }
+      lp.cancelTimer()
+      pendingLongPress = nil
+      if !alreadyFired {
+        lp.config.onPressingChanged?(false)
+      } else {
+        pointerDown = nil
+        pointerDownHighPriority = false
+        pointerDownSimultaneous.removeAll()
+        return true
+      }
     }
     if event == 1 || event == 2 || event == 3, let drag = dragging {
       let location = CGPoint(x: point.x - drag.origin.x, y: point.y - drag.origin.y)
       let start = CGPoint(x: drag.start.x - drag.origin.x, y: drag.start.y - drag.origin.y)
-      find(drag.id, in: tree)?.dragAction?(
-        DragGesture.Value(
-          location: location, startLocation: start,
-          translation: CGSize(width: point.x - drag.start.x, height: point.y - drag.start.y),
-          time: Date()), event == 3)
+      let dragVal = DragGesture.Value(
+        location: location, startLocation: start,
+        translation: CGSize(width: point.x - drag.start.x, height: point.y - drag.start.y),
+        time: Date())
+      if let node = find(drag.id, in: tree) {
+        if drag.isHighPriority {
+          node.highPriorityDragAction?(dragVal, event == 3)
+        } else {
+          node.dragAction?(dragVal, event == 3)
+        }
+      }
+      for simID in drag.simultaneousIDs {
+        if let simNode = find(simID, in: tree) {
+          for handler in simNode.simultaneousDragActions {
+            handler(dragVal, event == 3)
+          }
+        }
+      }
       if event == 3 {
         dragging = nil
         pointerDown = nil
+        pointerDownHighPriority = false
+        pointerDownSimultaneous.removeAll()
       }
       return true
     }
     if event == 3 {
-      defer { pointerDown = nil }
-      if let down = pointerDown, chain.contains(where: { $0.id == down }) {
-        if let node = find(down, in: tree), let action = node.tapLocationAction {
-          action(CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY))
-        } else {
-          performTap(down)
-        }
-        return true
+      let simIDs = pointerDownSimultaneous
+      let isHigh = pointerDownHighPriority
+      defer {
+        pointerDown = nil
+        pointerDownHighPriority = false
+        pointerDownSimultaneous.removeAll()
       }
+      var handledTap = false
+      if let down = pointerDown, chain.contains(where: { $0.id == down }) {
+        if let node = find(down, in: tree) {
+          if isHigh, let highAction = node.highPriorityAction {
+            highAction()
+          } else if let action = node.tapLocationAction {
+            action(CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY))
+          } else {
+            performTap(down)
+          }
+          handledTap = true
+        }
+      }
+      for simID in simIDs where chain.contains(where: { $0.id == simID }) {
+        if let simNode = find(simID, in: tree), simNode.props.enabled, simNode.props.visible {
+          for cb in simNode.simultaneousActions {
+            cb()
+          }
+          handledTap = true
+        }
+      }
+      if handledTap { return true }
     }
     if event == 9, let node = chain.first(where: { $0.secondaryAction != nil }) {
       node.secondaryAction?(CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY))
@@ -671,7 +816,9 @@ import Foundation
     // Layout-only containers, especially an empty overlay, do not occlude
     // interactive content underneath them.
     let interactive =
-      node.action != nil || node.dragAction != nil || node.scrollAction != nil
+      node.action != nil || node.highPriorityAction != nil || !node.simultaneousActions.isEmpty
+      || node.dragAction != nil || node.highPriorityDragAction != nil || !node.simultaneousDragActions.isEmpty
+      || node.longPressAction != nil || node.scrollAction != nil
       || node.secondaryAction != nil || node.doubleTapAction != nil || node.hoverAction != nil
       || node.focusAction != nil || node.props.focusable
     let painted: Bool
@@ -691,6 +838,10 @@ import Foundation
 
   package func cancelPointer() {
     pointerDown = nil
+    pointerDownHighPriority = false
+    pointerDownSimultaneous.removeAll()
+    pendingLongPress?.cancelTimer()
+    pendingLongPress = nil
     dragging = nil
     scrollDrag = nil
   }

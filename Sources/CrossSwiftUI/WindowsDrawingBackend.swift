@@ -67,6 +67,9 @@
     private let shadowCache = ShadowCache<NativeShadowMask>()
     private struct AnimatedValues: Equatable {
       let rotation, scaleX, scaleY, opacity, offsetX, offsetY: Double
+      let background: SwiftUIRuntime.Color?
+      let foreground: SwiftUIRuntime.Color?
+      let borderColor: SwiftUIRuntime.Color
       init(_ p: NodeProps) {
         rotation = p.rotation
         scaleX = p.scaleX
@@ -74,10 +77,16 @@
         opacity = p.opacity
         offsetX = p.offsetX
         offsetY = p.offsetY
+        background = p.background
+        foreground = p.foreground
+        borderColor = p.borderColor
       }
       init(
         rotation: Double, scaleX: Double, scaleY: Double,
-        opacity: Double, offsetX: Double, offsetY: Double
+        opacity: Double, offsetX: Double, offsetY: Double,
+        background: SwiftUIRuntime.Color? = nil,
+        foreground: SwiftUIRuntime.Color? = nil,
+        borderColor: SwiftUIRuntime.Color = .clear
       ) {
         self.rotation = rotation
         self.scaleX = scaleX
@@ -85,6 +94,9 @@
         self.opacity = opacity
         self.offsetX = offsetX
         self.offsetY = offsetY
+        self.background = background
+        self.foreground = foreground
+        self.borderColor = borderColor
       }
     }
     private struct Motion {
@@ -98,13 +110,25 @@
       func interpolated(to target: AnimatedValues, at now: TimeInterval) -> AnimatedValues {
         let fraction = animation.progress(at: now, start: start)
         func mix(_ a: Double, _ b: Double) -> Double { a + (b - a) * fraction }
+        func mixColor(_ a: SwiftUIRuntime.Color?, _ b: SwiftUIRuntime.Color?) -> SwiftUIRuntime.Color? {
+          guard let a, let b else { return b }
+          return SwiftUIRuntime.Color(
+            red: mix(a.red, b.red),
+            green: mix(a.green, b.green),
+            blue: mix(a.blue, b.blue),
+            opacity: mix(a.opacity, b.opacity)
+          )
+        }
         return AnimatedValues(
           rotation: mix(from.rotation, target.rotation),
           scaleX: mix(from.scaleX, target.scaleX),
           scaleY: mix(from.scaleY, target.scaleY),
           opacity: mix(from.opacity, target.opacity),
           offsetX: mix(from.offsetX, target.offsetX),
-          offsetY: mix(from.offsetY, target.offsetY))
+          offsetY: mix(from.offsetY, target.offsetY),
+          background: mixColor(from.background, target.background),
+          foreground: mixColor(from.foreground, target.foreground),
+          borderColor: mixColor(from.borderColor, target.borderColor) ?? target.borderColor)
       }
     }
     private var motions: [NodeID: Motion] = [:]
@@ -780,14 +804,17 @@
           }
         }
         buttons[node.id] = entry
-        if let surface, let handle = button.nativeObject {
-          sui_control_tab_visible(surface, handle, inViewport ? 1 : 0)
-          let visible =
-            node.props.visible && controlAllowed ? r.intersection(nativeClip ?? clip) : .zero
-          sui_button_update(
-            surface, handle, entry.hitRadius, node.props.help,
-            visible.minX - r.minX, visible.minY - r.minY, visible.width, visible.height)
-        }
+          if let surface, let handle = button.nativeObject {
+            sui_control_tab_visible(surface, handle, inViewport ? 1 : 0)
+            let visible =
+              node.props.visible && controlAllowed ? r.intersection(nativeClip ?? clip) : .zero
+            sui_button_update(
+              surface, handle, entry.hitRadius, node.props.help,
+              visible.minX - r.minX, visible.minY - r.minY, visible.width, visible.height)
+            if !node.props.accessibilityValue.isEmpty || !node.props.accessibilityLabel.isEmpty {
+              sui_button_set_accessibility(handle, label(node), node.props.accessibilityValue)
+            }
+          }
         if wantsFocus && !button.isFocused && node.props.enabled && inViewport {
           button.focus()
         }
@@ -992,7 +1019,9 @@
       }
       button.view.dispose()
     }
-    private func draw(_ node: Element, clip: Rect, transformedAncestor: Bool = false) {
+    private func draw(
+      _ node: Element, clip: Rect, transformedAncestor: Bool = false, inheritedOpacity: Double = 1.0
+    ) {
       guard let surface, node.props.visible else { return }
       var p = node.props
       let r = node.frame
@@ -1004,6 +1033,9 @@
         p.scaleX = current.scaleX
         p.scaleY = current.scaleY
         p.opacity = current.opacity
+        p.background = current.background
+        p.foreground = current.foreground
+        p.borderColor = current.borderColor
         let dx = current.offsetX - p.offsetX
         let dy = current.offsetY - p.offsetY
         if dx != 0 || dy != 0 {
@@ -1011,8 +1043,18 @@
           translated = true
         }
       }
+      guard p.opacity > 0 else { return }
+      let relOpacity = inheritedOpacity > 1e-6 ? min(1.0, p.opacity / inheritedOpacity) : p.opacity
+      let hasPixelFilter =
+        p.blurRadius > 0.1 || abs(p.brightness) > 0.001 || abs(p.contrast - 1.0) > 0.001
+      let canFoldOpacity =
+        relOpacity < 0.999 && !p.compositingGroup && !hasPixelFilter
+        && node.children.isEmpty && node.kind != .gradient && node.kind != .image
+        && !((p.background?.opacity ?? 0) > 0 && p.borderWidth > 0 && p.borderColor.opacity > 0)
+      let needsLayer =
+        hasPixelFilter || (relOpacity < 0.999 && !canFoldOpacity && r.width > 0 && r.height > 0)
       let transformed = p.rotation != 0 || p.scaleX != 1 || p.scaleY != 1
-      let canCull = !transformedAncestor && !transformed && !translated
+      let canCull = !transformedAncestor && !transformed && !translated && !needsLayer
       let clip = p.clipped && canCull ? clip.intersection(r) : clip
       if canCull && p.clipped && (clip.width <= 0 || clip.height <= 0) { return }
       if canCull && !node.hasOverflow && p.shadows.isEmpty && !node.children.isEmpty {
@@ -1033,14 +1075,15 @@
         sui_surface_transform(
           surface, r.minX + r.width / 2, r.minY + r.height / 2, p.rotation, p.scaleX, p.scaleY)
       }
+      let localAlpha = needsLayer ? 1.0 : relOpacity
       func vector(
         _ path: Path, fill: SwiftUIRuntime.Color = .clear, stroke: SwiftUIRuntime.Color = .clear,
         width: Double = 0, clip: Bool = false
       ) {
         path.commands.withUnsafeBufferPointer { buffer in
           sui_surface_path(
-            surface, buffer.baseAddress, Int32(buffer.count), fill.opacity(p.opacity).argb,
-            stroke.opacity(p.opacity).argb, width, clip ? 1 : 0)
+            surface, buffer.baseAddress, Int32(buffer.count), fill.opacity(localAlpha).argb,
+            stroke.opacity(localAlpha).argb, width, clip ? 1 : 0)
         }
       }
       let bounds = CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height)
@@ -1050,14 +1093,14 @@
           if shadow.radius <= 0 {
             sui_surface_shape(
               surface, r.minX + shadow.x, r.minY + shadow.y, r.width, r.height,
-              shadowCorner, shadow.color.opacity(p.opacity).argb, 0, 0)
+              shadowCorner, shadow.color.opacity(relOpacity).argb, 0, 0)
           } else if let (mask, native) = shadowCache.value(
             width: r.width, height: r.height, corner: shadowCorner, radius: shadow.radius,
             scale: sui_surface_scale(surface), create: { NativeShadowMask($0) }) {
             sui_surface_mask(
               surface, native.handle, r.minX + shadow.x - mask.inset, r.minY + shadow.y - mask.inset,
               Double(mask.width) / mask.scale, Double(mask.height) / mask.scale,
-              shadow.color.opacity(p.opacity).argb)
+              shadow.color.opacity(relOpacity).argb)
           }
         }
       }
@@ -1066,6 +1109,11 @@
         vector(
           clip(CGRect(origin: .zero, size: bounds.size)).transformed(x: r.minX, y: r.minY),
           clip: true)
+      }
+      if needsLayer {
+        sui_surface_layer_begin(
+          surface, r.minX, r.minY, r.width, r.height,
+          relOpacity, p.blurRadius, p.brightness, p.contrast)
       }
       if let shape = node.pathBuilder {
         vector(
@@ -1077,15 +1125,23 @@
       } else if p.background != nil || (p.borderWidth > 0 && p.borderColor.opacity > 0) {
         sui_surface_shape(
           surface, r.minX, r.minY, r.width, r.height, p.cornerRadius,
-          (p.background ?? .clear).opacity(p.opacity).argb, p.borderColor.opacity(p.opacity).argb,
+          (p.background ?? .clear).opacity(localAlpha).argb, p.borderColor.opacity(localAlpha).argb,
           p.borderWidth)
       }
       if node.kind == .gradient, let gradient = p.gradient {
-        let colors = gradient.colors.map { $0.opacity(p.opacity).argb }
-        colors.withUnsafeBufferPointer { buffer in
-          sui_surface_gradient(
-            surface, r.minX, r.minY, r.width, r.height, gradient.start.x, gradient.start.y,
-            gradient.end.x, gradient.end.y, buffer.baseAddress, Int32(buffer.count))
+        let colors = gradient.colors.map { $0.opacity(localAlpha).argb }
+        let startParam = gradient.kind == .radial ? gradient.startRadius : gradient.startAngle
+        let endParam = gradient.kind == .radial ? gradient.endRadius : gradient.endAngle
+        colors.withUnsafeBufferPointer { colorBuf in
+          gradient.locations.withUnsafeBufferPointer { locBuf in
+            sui_surface_gradient_ex(
+              surface, Int32(gradient.kind.rawValue), r.minX, r.minY, r.width, r.height,
+              gradient.start.x, gradient.start.y, gradient.end.x, gradient.end.y,
+              startParam, endParam,
+              colorBuf.baseAddress,
+              locBuf.count == colorBuf.count ? locBuf.baseAddress : nil,
+              Int32(colorBuf.count))
+          }
         }
       }
       if node.kind == .image {
@@ -1100,7 +1156,7 @@
           let sx = r.width / image.bounds.width
           let sy = r.height / image.bounds.height
           let scale = min(sx, sy)
-          let inkColor = (p.foreground ?? .black).opacity(p.opacity)
+          let inkColor = (p.foreground ?? .black).opacity(localAlpha)
           let weightBoost = ((p.font?.weight.value ?? 400) - 400) / 500 * 0.45
           let isTemplate = p.imageTemplate || p.imagePath.hasPrefix("sf://")
           for layer in image.layers {
@@ -1116,8 +1172,8 @@
               strokeColor = layer.stroke != nil ? inkColor : .clear
               sw = layer.strokeWidth > 0 ? max(1.1, (layer.strokeWidth + weightBoost) * scale) : 0
             } else {
-              fillColor = (layer.fill ?? .clear).opacity(p.opacity)
-              strokeColor = (layer.stroke ?? .clear).opacity(p.opacity)
+              fillColor = (layer.fill ?? .clear).opacity(localAlpha)
+              strokeColor = (layer.stroke ?? .clear).opacity(localAlpha)
               sw = layer.strokeWidth > 0 ? max(1.0, layer.strokeWidth * scale) : 0
             }
             if fillColor.opacity > 0 || sw > 0 {
@@ -1134,7 +1190,7 @@
         sui_surface_text(
           surface, r.minX, r.minY, r.width, r.height, text, font.family,
           Double(font.size), font.weight.value, p.lineSpacing,
-          (p.foreground ?? .black).opacity(p.opacity).argb)
+          (p.foreground ?? .black).opacity(localAlpha).argb)
       }
       let cacheScroll =
         node.kind == .scroll && canCull && p.clipped && p.cornerRadius == 0
@@ -1146,9 +1202,12 @@
           surface, Int64(node.id.rawValue), 0,
           clip.minX, clip.minY, clip.width, clip.height, child.frame.minX, child.frame.minY)
       }
+      let nextInheritedOpacity = needsLayer ? node.props.opacity : inheritedOpacity
       forEachOrderedChild(node) { child in
         draw(
-          child, clip: clip, transformedAncestor: transformedAncestor || transformed || translated)
+          child, clip: clip,
+          transformedAncestor: transformedAncestor || transformed || translated || needsLayer,
+          inheritedOpacity: nextInheritedOpacity)
       }
       if node.kind == .scroll, p.showsScrollIndicators, let child = node.children.first {
         let color = (p.foreground ?? .gray).opacity(0.3).argb
@@ -1164,6 +1223,7 @@
         }
       }
       if cacheScroll { sui_surface_scroll_end(surface) }
+      if needsLayer { sui_surface_layer_end(surface) }
       if node.clipPathBuilder != nil { sui_surface_restore(surface) }
       if p.clipped { sui_surface_restore(surface) }
       if transformed { sui_surface_restore(surface) }

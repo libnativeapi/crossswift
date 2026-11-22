@@ -53,13 +53,25 @@ final class LinuxDrawing {
     func interpolated(to target: DrawingValues, now: TimeInterval) -> DrawingValues {
       let progress = animation.progress(at: now, start: start)
       func mix(_ from: Double, _ to: Double) -> Double { from + (to - from) * progress }
+      func mixColor(_ a: Color?, _ b: Color?) -> Color? {
+        guard let a, let b else { return b }
+        return Color(
+          red: mix(a.red, b.red),
+          green: mix(a.green, b.green),
+          blue: mix(a.blue, b.blue),
+          opacity: mix(a.opacity, b.opacity)
+        )
+      }
       return DrawingValues(
         rotation: mix(from.rotation, target.rotation),
         scaleX: mix(from.scaleX, target.scaleX),
         scaleY: mix(from.scaleY, target.scaleY),
         opacity: mix(from.opacity, target.opacity),
         offsetX: mix(from.offsetX, target.offsetX),
-        offsetY: mix(from.offsetY, target.offsetY))
+        offsetY: mix(from.offsetY, target.offsetY),
+        background: mixColor(from.background, target.background),
+        foreground: mixColor(from.foreground, target.foreground),
+        borderColor: mixColor(from.borderColor, target.borderColor) ?? target.borderColor)
     }
 
     func apply(to props: inout NodeProps, now: TimeInterval) -> CGPoint {
@@ -68,6 +80,9 @@ final class LinuxDrawing {
       props.scaleX = current.scaleX
       props.scaleY = current.scaleY
       props.opacity = current.opacity
+      props.background = current.background
+      props.foreground = current.foreground
+      props.borderColor = current.borderColor
       return CGPoint(x: current.offsetX - props.offsetX,
                      y: current.offsetY - props.offsetY)
     }
@@ -75,6 +90,9 @@ final class LinuxDrawing {
 
   struct DrawingValues: Equatable {
     let rotation, scaleX, scaleY, opacity, offsetX, offsetY: Double
+    let background: Color?
+    let foreground: Color?
+    let borderColor: Color
 
     init(_ props: NodeProps) {
       rotation = props.rotation
@@ -83,11 +101,15 @@ final class LinuxDrawing {
       opacity = props.opacity
       offsetX = props.offsetX
       offsetY = props.offsetY
+      background = props.background
+      foreground = props.foreground
+      borderColor = props.borderColor
     }
 
     init(
       rotation: Double, scaleX: Double, scaleY: Double,
-      opacity: Double, offsetX: Double, offsetY: Double
+      opacity: Double, offsetX: Double, offsetY: Double,
+      background: Color? = nil, foreground: Color? = nil, borderColor: Color = .clear
     ) {
       self.rotation = rotation
       self.scaleX = scaleX
@@ -95,6 +117,9 @@ final class LinuxDrawing {
       self.opacity = opacity
       self.offsetX = offsetX
       self.offsetY = offsetY
+      self.background = background
+      self.foreground = foreground
+      self.borderColor = borderColor
     }
   }
 
@@ -157,10 +182,13 @@ final class LinuxDrawing {
     let transformed = translation != .zero || props.rotation != 0 || props.scaleX != 1 || props.scaleY != 1
     if !transformed && props.shadows.isEmpty && frame.intersection(damage).isEmpty
       && (props.clipped || !node.hasOverflow || node.children.isEmpty) { return }
+    let hasPixelFilter =
+      props.blurRadius > 0.1 || abs(props.brightness) > 0.001 || abs(props.contrast - 1.0) > 0.001
     let canFoldOpacity =
-      opacity < 1 && node.children.isEmpty && node.kind != .gradient && node.kind != .image
+      opacity < 1 && !props.compositingGroup && !hasPixelFilter
+      && node.children.isEmpty && node.kind != .gradient && node.kind != .image
       && !((props.background?.opacity ?? 0) > 0 && props.borderWidth > 0 && props.borderColor.opacity > 0)
-    let needsGroup = opacity < 1 && !canFoldOpacity
+    let needsGroup = !hasPixelFilter && ((opacity < 1 && !canFoldOpacity) || (props.compositingGroup && opacity < 1))
     let tightGroupClip = needsGroup && !props.clipped && !node.hasOverflow
     let usesClip = props.clipped || node.clipPathBuilder != nil || tightGroupClip
     if transformed || usesClip { cairo_save(context) }
@@ -214,6 +242,13 @@ final class LinuxDrawing {
       cairo_clip(context)
     }
 
+    if hasPixelFilter {
+      paintFilteredSubtree(
+        node, props: props, in: context, clip: clip, damage: damage,
+        motions: motions, now: now, opacity: opacity, isScaled: isScaled)
+      return
+    }
+
     if needsGroup { cairo_push_group(context) }
     let leafAlpha = canFoldOpacity ? opacity : 1.0
     if let builder = node.pathBuilder {
@@ -230,19 +265,7 @@ final class LinuxDrawing {
                stroke: props.borderColor.opacity(leafAlpha), width: props.borderWidth)
     }
     if node.kind == .gradient, let gradient = props.gradient {
-      let pattern = cairo_pattern_create_linear(
-        frame.minX + gradient.start.x * frame.width, frame.minY + gradient.start.y * frame.height,
-        frame.minX + gradient.end.x * frame.width, frame.minY + gradient.end.y * frame.height)
-      if let pattern {
-        for (index, color) in gradient.colors.enumerated() {
-          cairo_pattern_add_color_stop_rgba(pattern, Double(index) / Double(max(1, gradient.colors.count - 1)),
-                                           color.red, color.green, color.blue, color.opacity)
-        }
-        cairo_set_source(context, pattern)
-        cairo_rectangle(context, frame.minX, frame.minY, frame.width, frame.height)
-        cairo_fill(context)
-        cairo_pattern_destroy(pattern)
-      }
+      paintGradient(gradient, in: frame, context: context)
     }
     let scaled = isScaled || props.rotation != 0 || props.scaleX != 1 || props.scaleY != 1
     if node.kind == .image { image(node, in: context) }
@@ -442,6 +465,261 @@ final class LinuxDrawing {
 
   private func source(_ context: OpaquePointer, _ color: Color) {
     cairo_set_source_rgba(context, color.red, color.green, color.blue, color.opacity)
+  }
+
+  private func sampleGradient(_ gradient: LinearGradient.Data, at t: Double) -> Color {
+    guard !gradient.colors.isEmpty else { return .clear }
+    if gradient.colors.count == 1 { return gradient.colors[0] }
+    let clamped = max(0.0, min(1.0, t))
+    let locs: [Double] = gradient.locations.count == gradient.colors.count
+      ? gradient.locations
+      : (0..<gradient.colors.count).map { Double($0) / Double(gradient.colors.count - 1) }
+    if clamped <= locs[0] { return gradient.colors[0] }
+    if clamped >= locs[locs.count - 1] { return gradient.colors[locs.count - 1] }
+    for i in 0..<(locs.count - 1) {
+      if clamped >= locs[i] && clamped <= locs[i + 1] {
+        let span = locs[i + 1] - locs[i]
+        let f = span > 1e-6 ? (clamped - locs[i]) / span : 0.0
+        let a = gradient.colors[i]
+        let b = gradient.colors[i + 1]
+        return Color(
+          red: a.red + (b.red - a.red) * f,
+          green: a.green + (b.green - a.green) * f,
+          blue: a.blue + (b.blue - a.blue) * f,
+          opacity: a.opacity + (b.opacity - a.opacity) * f
+        )
+      }
+    }
+    return gradient.colors.last ?? .clear
+  }
+
+  private func paintGradient(_ gradient: LinearGradient.Data, in frame: Rect, context: OpaquePointer) {
+    guard !gradient.colors.isEmpty, frame.width > 0, frame.height > 0 else { return }
+    switch gradient.kind {
+    case .linear:
+      guard let pattern = cairo_pattern_create_linear(
+        frame.minX + gradient.start.x * frame.width, frame.minY + gradient.start.y * frame.height,
+        frame.minX + gradient.end.x * frame.width, frame.minY + gradient.end.y * frame.height)
+      else { return }
+      defer { cairo_pattern_destroy(pattern) }
+      for (index, color) in gradient.colors.enumerated() {
+        let loc = index < gradient.locations.count
+          ? gradient.locations[index]
+          : Double(index) / Double(max(1, gradient.colors.count - 1))
+        cairo_pattern_add_color_stop_rgba(pattern, loc, color.red, color.green, color.blue, color.opacity)
+      }
+      cairo_set_source(context, pattern)
+      cairo_rectangle(context, frame.minX, frame.minY, frame.width, frame.height)
+      cairo_fill(context)
+
+    case .radial:
+      let cx = frame.minX + gradient.start.x * frame.width
+      let cy = frame.minY + gradient.start.y * frame.height
+      let fallbackR = max(1.0, hypot(frame.width, frame.height) * 0.5)
+      let r1 = gradient.endRadius > 0 ? gradient.endRadius : fallbackR
+      let r0 = max(0.0, min(gradient.startRadius, r1))
+      guard let pattern = cairo_pattern_create_radial(cx, cy, r0, cx, cy, r1) else { return }
+      defer { cairo_pattern_destroy(pattern) }
+      for (index, color) in gradient.colors.enumerated() {
+        let loc = index < gradient.locations.count
+          ? gradient.locations[index]
+          : Double(index) / Double(max(1, gradient.colors.count - 1))
+        cairo_pattern_add_color_stop_rgba(pattern, loc, color.red, color.green, color.blue, color.opacity)
+      }
+      cairo_set_source(context, pattern)
+      cairo_rectangle(context, frame.minX, frame.minY, frame.width, frame.height)
+      cairo_fill(context)
+
+    case .angular:
+      var sx = 1.0, sy = 1.0
+      cairo_surface_get_device_scale(cairo_get_target(context), &sx, &sy)
+      let scale = max(1.0, min(2.0, max(sx, sy)))
+      let pw = max(1, min(1024, Int(ceil(frame.width * scale))))
+      let ph = max(1, min(1024, Int(ceil(frame.height * scale))))
+      guard let surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, Int32(pw), Int32(ph)),
+        cairo_surface_status(surf) == CAIRO_STATUS_SUCCESS,
+        let raw = cairo_image_surface_get_data(surf)
+      else { return }
+      defer { cairo_surface_destroy(surf) }
+      let stride = Int(cairo_image_surface_get_stride(surf))
+      let cx = gradient.start.x * Double(pw)
+      let cy = gradient.start.y * Double(ph)
+      let startDeg = gradient.startAngle
+      let spanDeg = max(1e-4, gradient.endAngle - gradient.startAngle)
+      for py in 0..<ph {
+        let row = raw.advanced(by: py * stride)
+        let dy = Double(py) + 0.5 - cy
+        for px in 0..<pw {
+          let dx = Double(px) + 0.5 - cx
+          var deg = atan2(dy, dx) * 180.0 / .pi - startDeg
+          deg = deg.truncatingRemainder(dividingBy: 360.0)
+          if deg < 0 { deg += 360.0 }
+          let t = max(0.0, min(1.0, deg / spanDeg))
+          let col = sampleGradient(gradient, at: t)
+          let a = max(0.0, min(1.0, col.opacity))
+          let r = UInt8(max(0, min(255, Int((col.red * a * 255.0).rounded()))))
+          let g = UInt8(max(0, min(255, Int((col.green * a * 255.0).rounded()))))
+          let b = UInt8(max(0, min(255, Int((col.blue * a * 255.0).rounded()))))
+          let alpha = UInt8(max(0, min(255, Int((a * 255.0).rounded()))))
+          // Cairo ARGB32 on little-endian is B, G, R, A in byte order.
+          let off = px * 4
+          row[off] = b
+          row[off + 1] = g
+          row[off + 2] = r
+          row[off + 3] = alpha
+        }
+      }
+      cairo_surface_mark_dirty(surf)
+      cairo_save(context)
+      cairo_translate(context, frame.minX, frame.minY)
+      cairo_scale(context, frame.width / Double(pw), frame.height / Double(ph))
+      cairo_set_source_surface(context, surf, 0, 0)
+      cairo_paint(context)
+      cairo_restore(context)
+    }
+  }
+
+  private func paintFilteredSubtree(
+    _ node: Element, props: NodeProps, in context: OpaquePointer, clip: Rect, damage: Rect,
+    motions: [NodeID: Motion], now: TimeInterval, opacity: Double, isScaled: Bool
+  ) {
+    let frame = node.frame
+    guard frame.width > 0, frame.height > 0 else { return }
+    var sx = 1.0, sy = 1.0
+    cairo_surface_get_device_scale(cairo_get_target(context), &sx, &sy)
+    let scale = max(1.0, min(2.0, max(sx, sy)))
+    let pad = ceil(props.blurRadius * 2.5)
+    let originX = frame.minX - pad
+    let originY = frame.minY - pad
+    let logW = frame.width + pad * 2
+    let logH = frame.height + pad * 2
+    let pw = max(1, min(2048, Int(ceil(logW * scale))))
+    let ph = max(1, min(2048, Int(ceil(logH * scale))))
+    guard let surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, Int32(pw), Int32(ph)),
+      cairo_surface_status(surf) == CAIRO_STATUS_SUCCESS,
+      let offCtx = cairo_create(surf)
+    else { return }
+    defer {
+      cairo_destroy(offCtx)
+      cairo_surface_destroy(surf)
+    }
+    cairo_scale(offCtx, Double(pw) / logW, Double(ph) / logH)
+    cairo_translate(offCtx, -originX, -originY)
+
+    var cleaned = node
+    cleaned.props.blurRadius = 0
+    cleaned.props.brightness = 0
+    cleaned.props.contrast = 1
+    cleaned.props.opacity = 1
+    cleaned.props.shadows = []
+    cleaned.props.rotation = 0
+    cleaned.props.scaleX = 1
+    cleaned.props.scaleY = 1
+    let fullRect = Rect(x: originX, y: originY, width: logW, height: logH)
+    paint(cleaned, in: offCtx, clip: fullRect, damage: fullRect, motions: motions, now: now,
+          inheritedOpacity: 1, isScaled: isScaled)
+    cairo_surface_flush(surf)
+
+    if let raw = cairo_image_surface_get_data(surf) {
+      let stride = Int(cairo_image_surface_get_stride(surf))
+      if props.blurRadius > 0.1 {
+        let r = max(1, min(64, Int((props.blurRadius * scale).rounded())))
+        boxBlurBGRA3Pass(raw, width: pw, height: ph, stride: stride, radius: r)
+      }
+      if abs(props.brightness) > 0.001 || abs(props.contrast - 1.0) > 0.001 {
+        let br = props.brightness
+        let ct = props.contrast
+        for py in 0..<ph {
+          let row = raw.advanced(by: py * stride)
+          for px in 0..<pw {
+            let off = px * 4
+            let a = Double(row[off + 3]) / 255.0
+            if a <= 1e-5 { continue }
+            for ch in 0..<3 {
+              let unpremul = Double(row[off + ch]) / (255.0 * a)
+              var v = (unpremul - 0.5) * ct + 0.5 + br
+              v = max(0.0, min(1.0, v))
+              row[off + ch] = UInt8(max(0, min(255, Int((v * a * 255.0).rounded()))))
+            }
+          }
+        }
+      }
+      cairo_surface_mark_dirty(surf)
+    }
+
+    cairo_save(context)
+    cairo_translate(context, originX, originY)
+    cairo_scale(context, logW / Double(pw), logH / Double(ph))
+    cairo_set_source_surface(context, surf, 0, 0)
+    cairo_paint_with_alpha(context, opacity)
+    cairo_restore(context)
+  }
+
+  private func boxBlurBGRA3Pass(
+    _ data: UnsafeMutablePointer<UInt8>, width: Int, height: Int, stride: Int, radius: Int
+  ) {
+    guard width > 0, height > 0, radius > 0 else { return }
+    let count = width * height * 4
+    var buf = [UInt8](repeating: 0, count: count)
+    var tmp = [UInt8](repeating: 0, count: count)
+    for y in 0..<height {
+      memcpy(&buf[y * width * 4], data.advanced(by: y * stride), width * 4)
+    }
+    let span = 2 * radius + 1
+    for _ in 0..<3 {
+      // Horizontal pass
+      for y in 0..<height {
+        let rowOff = y * width * 4
+        var acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0
+        for dx in -radius...radius {
+          let sx = max(0, min(width - 1, dx))
+          let o = rowOff + sx * 4
+          acc0 += Int(buf[o]); acc1 += Int(buf[o + 1]); acc2 += Int(buf[o + 2]); acc3 += Int(buf[o + 3])
+        }
+        for x in 0..<width {
+          let dst = rowOff + x * 4
+          tmp[dst] = UInt8(acc0 / span)
+          tmp[dst + 1] = UInt8(acc1 / span)
+          tmp[dst + 2] = UInt8(acc2 / span)
+          tmp[dst + 3] = UInt8(acc3 / span)
+          let prevX = max(0, min(width - 1, x - radius))
+          let nextX = max(0, min(width - 1, x + radius + 1))
+          let po = rowOff + prevX * 4
+          let no = rowOff + nextX * 4
+          acc0 += Int(buf[no]) - Int(buf[po])
+          acc1 += Int(buf[no + 1]) - Int(buf[po + 1])
+          acc2 += Int(buf[no + 2]) - Int(buf[po + 2])
+          acc3 += Int(buf[no + 3]) - Int(buf[po + 3])
+        }
+      }
+      // Vertical pass
+      for x in 0..<width {
+        var acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0
+        for dy in -radius...radius {
+          let sy = max(0, min(height - 1, dy))
+          let o = (sy * width + x) * 4
+          acc0 += Int(tmp[o]); acc1 += Int(tmp[o + 1]); acc2 += Int(tmp[o + 2]); acc3 += Int(tmp[o + 3])
+        }
+        for y in 0..<height {
+          let dst = (y * width + x) * 4
+          buf[dst] = UInt8(acc0 / span)
+          buf[dst + 1] = UInt8(acc1 / span)
+          buf[dst + 2] = UInt8(acc2 / span)
+          buf[dst + 3] = UInt8(acc3 / span)
+          let prevY = max(0, min(height - 1, y - radius))
+          let nextY = max(0, min(height - 1, y + radius + 1))
+          let po = (prevY * width + x) * 4
+          let no = (nextY * width + x) * 4
+          acc0 += Int(tmp[no]) - Int(tmp[po])
+          acc1 += Int(tmp[no + 1]) - Int(tmp[po + 1])
+          acc2 += Int(tmp[no + 2]) - Int(tmp[po + 2])
+          acc3 += Int(tmp[no + 3]) - Int(tmp[po + 3])
+        }
+      }
+    }
+    for y in 0..<height {
+      memcpy(data.advanced(by: y * stride), &buf[y * width * 4], width * 4)
+    }
   }
 
   static func forEachOrderedChild(_ node: Element, _ body: (Element) -> Void) {

@@ -833,6 +833,8 @@ private final class Activation {
   private weak var backend: LinuxDrawingBackend?
   private var signals: [gulong] = []
   private var name: String?
+  private var descriptionText: String?
+  private var appliedTraits: Int = -1
   private var help: String?
   private var placement = Rect.zero
   private var isShown = false
@@ -909,6 +911,28 @@ private final class Activation {
     if name != label {
       name = label
       atk_object_set_name(gtk_widget_get_accessible(widget), label)
+    }
+    let desc = !node.props.accessibilityValue.isEmpty ? node.props.accessibilityValue : node.props.help
+    if descriptionText != desc {
+      descriptionText = desc
+      atk_object_set_description(gtk_widget_get_accessible(widget), desc)
+    }
+    if appliedTraits != node.props.accessibilityTraits {
+      appliedTraits = node.props.accessibilityTraits
+      let traits = AccessibilityTraits(rawValue: appliedTraits)
+      let role: AtkRole
+      if traits.contains(.isToggle) {
+        role = ATK_ROLE_TOGGLE_BUTTON
+      } else if traits.contains(.isLink) {
+        role = ATK_ROLE_LINK
+      } else if traits.contains(.isHeader) {
+        role = ATK_ROLE_HEADING
+      } else if traits.contains(.isImage) {
+        role = ATK_ROLE_IMAGE
+      } else {
+        role = ATK_ROLE_PUSH_BUTTON
+      }
+      atk_object_set_role(gtk_widget_get_accessible(widget), role)
     }
     if help != node.props.help {
       help = node.props.help
@@ -1024,6 +1048,15 @@ private final class Editor {
     if !multiline { field.setSecure(props.secure) }
     let name = label.isEmpty ? props.placeholder : label
     field.setAccessibilityLabel(name.isEmpty ? nil : name)
+    if let accessible = gtk_widget_get_accessible(input) {
+      if !name.isEmpty { atk_object_set_name(accessible, name) }
+      let desc = !props.accessibilityValue.isEmpty ? props.accessibilityValue : props.help
+      if !desc.isEmpty { atk_object_set_description(accessible, desc) }
+      let traits = AccessibilityTraits(rawValue: props.accessibilityTraits)
+      if traits.contains(.isSearchField) {
+        atk_object_set_role(accessible, ATK_ROLE_TEXT)
+      }
+    }
     let font = props.font ?? .body
     let fontFamily = font.family == "Consolas" ? "monospace" : font.family == "Segoe UI" ? "sans-serif" : font.family
     field.setFontFamily(fontFamily.isEmpty ? nil : fontFamily)

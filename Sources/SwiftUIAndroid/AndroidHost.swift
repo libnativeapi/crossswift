@@ -45,6 +45,7 @@ private struct RenderNode: Encodable {
   let lineLimit: Int?
   let enabled: Bool
   let opacity: Double
+  let blurRadius: Double
   let rotation: Double
   let scaleX: Double
   let scaleY: Double
@@ -131,13 +132,28 @@ private struct RenderNode: Encodable {
       case .gradient:
         resolvedKind = "gradient"
         if let grad = props.gradient {
-          resolvedGradKind = "linear"
+          switch grad.kind {
+          case .linear:
+            resolvedGradKind = "linear"
+            gSX = Double(grad.start.x)
+            gSY = Double(grad.start.y)
+            gEX = Double(grad.end.x)
+            gEY = Double(grad.end.y)
+          case .radial:
+            resolvedGradKind = "radial"
+            gSX = Double(grad.start.x)
+            gSY = Double(grad.start.y)
+            gEX = grad.endRadius
+            gEY = grad.startRadius
+          case .angular:
+            resolvedGradKind = "angular"
+            gSX = Double(grad.start.x)
+            gSY = Double(grad.start.y)
+            gEX = grad.startAngle
+            gEY = grad.endAngle
+          }
           resolvedGradColors = grad.colors.map(encodeARGB)
-          resolvedGradStops = nil
-          gSX = Double(grad.start.x)
-          gSY = Double(grad.start.y)
-          gEX = Double(grad.end.x)
-          gEY = Double(grad.end.y)
+          resolvedGradStops = grad.locations.isEmpty ? nil : grad.locations
         }
       case .path:
         resolvedKind = "vector"
@@ -146,7 +162,7 @@ private struct RenderNode: Encodable {
         resolvedVectorLayers = [
           EncodedVectorLayer(
             commands: props.path.commands,
-            fill: props.foreground.map(encodeARGB),
+            fill: (props.background ?? props.foreground).map(encodeARGB),
             stroke: props.borderWidth > 0 ? encodeARGB(props.borderColor) : nil,
             strokeWidth: props.borderWidth
           )
@@ -210,6 +226,7 @@ private struct RenderNode: Encodable {
     lineLimit = props.lineLimit
     enabled = inheritedEnabled && props.enabled && props.hitTesting
     opacity = props.opacity
+    blurRadius = props.blurRadius
     rotation = props.rotation
     scaleX = props.scaleX
     scaleY = props.scaleY

@@ -219,8 +219,25 @@ private struct GridContent<Content: View>: View, _PrimitiveView {
   var body: Never { fatalError("Grid content is primitive") }
 
   func _makeElement(path: ViewPath) -> Element {
-    var node = Element(kind: .customLayout, children: flattenChildren(_render(content, path: path)))
+    let stackKey = AnyHashable(path)
+    let savedCtx = EnvironmentValues.current.lazyContainerContext
+    let colEstimate: Int
+    if layout.columns.count == 1, case .adaptive(let minW, _) = layout.columns[0].size {
+      let vw = EnvironmentValues.current.scrollViewportContext?.viewportWidth ?? 600
+      colEstimate = max(1, Int((vw + Double(layout.spacing)) / (Double(minW) + Double(layout.spacing))))
+    } else {
+      colEstimate = max(1, layout.columns.count)
+    }
+    EnvironmentValues.current.lazyContainerContext = LazyContainerContext(
+      key: stackKey, axis: .verticalGrid(columns: colEstimate), spacing: Double(layout.spacing))
+    defer { EnvironmentValues.current.lazyContainerContext = savedCtx }
+    let contentElement = _render(content, path: path)
+    let children = flattenChildren(contentElement)
+    var props = NodeProps()
+    props.isLazyContainer = contentElement.props.isLazyContainer || children.count > 72
+    var node = Element(kind: .customLayout, props: props, children: children)
     node.layout = layout
+    node.lazyCacheKey = stackKey
     return node
   }
 }

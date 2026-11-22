@@ -2574,6 +2574,8 @@ public struct Link<Label: View>: View {
 // MARK: - LazyHGrid
 
 public struct LazyHGrid<Content: View>: View {
+  let rows: [GridItem]
+  let spacing: CGFloat
   let content: Content
   public init(
     rows: [GridItem],
@@ -2582,10 +2584,113 @@ public struct LazyHGrid<Content: View>: View {
     pinnedViews: PinnedScrollableViews = [],
     @ViewBuilder content: () -> Content
   ) {
+    self.rows = rows
+    self.spacing = spacing ?? 8
     self.content = content()
   }
   public var body: some View {
-    HStack { content }
+    HGridContent(layout: HGridLayout(rows: rows, spacing: spacing), content: content)
+  }
+}
+
+private struct HGridContent<Content: View>: View, _PrimitiveView {
+  typealias Body = Never
+  let layout: HGridLayout
+  let content: Content
+  var body: Never { fatalError("HGrid content is primitive") }
+
+  func _makeElement(path: ViewPath) -> Element {
+    let stackKey = AnyHashable(path)
+    let savedCtx = EnvironmentValues.current.lazyContainerContext
+    let rowEstimate: Int
+    if layout.rows.count == 1, case .adaptive(let minH, _) = layout.rows[0].size {
+      let vh = EnvironmentValues.current.scrollViewportContext?.viewportHeight ?? 400
+      rowEstimate = max(1, Int((vh + Double(layout.spacing)) / (Double(minH) + Double(layout.spacing))))
+    } else {
+      rowEstimate = max(1, layout.rows.count)
+    }
+    EnvironmentValues.current.lazyContainerContext = LazyContainerContext(
+      key: stackKey, axis: .horizontalGrid(rows: rowEstimate), spacing: Double(layout.spacing))
+    defer { EnvironmentValues.current.lazyContainerContext = savedCtx }
+    let contentElement = _render(content, path: path)
+    let children = flattenChildren(contentElement)
+    var props = NodeProps()
+    props.isLazyContainer = contentElement.props.isLazyContainer || children.count > 72
+    var node = Element(kind: .customLayout, props: props, children: children)
+    node.layout = layout
+    node.lazyCacheKey = stackKey
+    return node
+  }
+}
+
+private struct HGridLayout: _LayoutBridge {
+  var translatesWithBounds: Bool { true }
+  let rows: [GridItem]
+  let spacing: CGFloat
+
+  func heights(_ proposal: ProposedViewSize) -> [CGFloat] {
+    let height = proposal.height ?? 300
+    if rows.count == 1, case .adaptive(let minimum, let maximum) = rows[0].size {
+      let n = max(1, Int((height + spacing) / (minimum + spacing)))
+      return Array(
+        repeating: min(maximum, (height - CGFloat(n - 1) * spacing) / CGFloat(n)), count: n)
+    }
+    let flexible = rows.filter {
+      if case .fixed = $0.size { return false }
+      return true
+    }.count
+    let fixed = rows.reduce(CGFloat(0)) { sum, row in
+      if case .fixed(let h) = row.size { return sum + h }
+      return sum
+    }
+    let remaining =
+      max(0, height - fixed - CGFloat(max(0, rows.count - 1)) * spacing)
+      / CGFloat(max(1, flexible))
+    return rows.map {
+      switch $0.size {
+      case .fixed(let h): return h
+      case .flexible(let min, let max), .adaptive(let min, let max):
+        return Swift.min(max, Swift.max(min, remaining))
+      }
+    }
+  }
+
+  func frames(_ proposal: ProposedViewSize, children: [Element], engine: LayoutEngine) -> [CGRect] {
+    let heights = heights(proposal)
+    guard !heights.isEmpty else { return [] }
+    var frames: [CGRect] = []
+    var x: CGFloat = 0
+    frames.reserveCapacity(children.count)
+    for start in stride(from: 0, to: children.count, by: heights.count) {
+      let end = min(start + heights.count, children.count)
+      var width: CGFloat = 0
+      for i in start..<end {
+        let size = engine.sizeThatFits(
+          children[i], proposal: ProposedViewSize(width: nil, height: heights[i - start]))
+        width = max(width, size.width)
+      }
+      var y: CGFloat = 0
+      for i in start..<end {
+        let h = heights[i - start]
+        frames.append(CGRect(x: x, y: y, width: width, height: h))
+        y += h + spacing
+      }
+      x += width + spacing
+    }
+    return frames
+  }
+
+  func measure(_ proposal: ProposedViewSize, children: [Element], engine: LayoutEngine) -> CGSize {
+    let boxes = frames(proposal, children: children, engine: engine)
+    return CGSize(
+      width: boxes.map(\.maxX).max() ?? 0,
+      height: proposal.height ?? (boxes.map(\.maxY).max() ?? 0))
+  }
+
+  func placements(_ bounds: CGRect, children: [Element], engine: LayoutEngine) -> [CGRect] {
+    frames(ProposedViewSize(bounds.size), children: children, engine: engine).map {
+      $0.offsetBy(dx: bounds.minX, dy: bounds.minY)
+    }
   }
 }
 

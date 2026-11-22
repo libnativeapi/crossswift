@@ -10,9 +10,9 @@
 
 import Foundation
 
-public enum Edge {
+public enum Edge: Equatable, Hashable, Sendable {
   case top, leading, bottom, trailing
-  public struct Set: OptionSet, Hashable {
+  public struct Set: OptionSet, Hashable, Sendable {
     public let rawValue: Int
     public init(rawValue: Int) { self.rawValue = rawValue }
     public static let top = Set(rawValue: 1), leading = Set(rawValue: 2)

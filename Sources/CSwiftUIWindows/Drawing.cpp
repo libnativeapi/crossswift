@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <commctrl.h>
+#include <d2d1.h>
 #include <dwmapi.h>
+#include <dwrite.h>
 #include <windowsx.h>
 using std::max;
 using std::min;
@@ -36,13 +38,16 @@ struct AlphaMask {
 };
 using MaskHandle = std::shared_ptr<AlphaMask>;
 struct Command {
-  int kind = 0; // shape, text, clip, restore
+  int kind = 0; // 0=shape, 1=text, 2=clip, 3=restore, 4=path, 5=clipPath, 6=transform, 7=gradient, 8=image, 9=translate, 10=mask, 11=layerBegin
   RectF rect;
   float radius = 0, stroke_width = 0, size = 14, weight = 400, line_spacing = 0;
   uint32_t fill = 0, stroke = 0;
   std::wstring text, family;
   std::vector<double> path;
   std::vector<uint32_t> colors;
+  std::vector<float> locations;
+  int gradient_kind = 0;
+  float grad_p0 = 0, grad_p1 = 0;
   PointF start, end;
   MaskHandle mask;
   size_t clip_end = 0;
@@ -52,6 +57,8 @@ struct Command {
            weight == c.weight && line_spacing == c.line_spacing &&
            fill == c.fill && stroke == c.stroke && text == c.text &&
            family == c.family && path == c.path && colors == c.colors &&
+           locations == c.locations && gradient_kind == c.gradient_kind &&
+           grad_p0 == c.grad_p0 && grad_p1 == c.grad_p1 &&
            start.X == c.start.X && start.Y == c.start.Y && end.X == c.end.X &&
            end.Y == c.end.Y && mask == c.mask;
   }
@@ -839,8 +846,368 @@ const StringFormat &TypographicFormat() {
   }();
   return *format;
 }
+struct DWriteFormatKey {
+  std::wstring family;
+  uint32_t size_bits = 0;
+  int weight = 400;
+  bool operator==(const DWriteFormatKey &o) const {
+    return size_bits == o.size_bits && weight == o.weight && family == o.family;
+  }
+};
+struct DWriteFormatKeyHash {
+  size_t operator()(const DWriteFormatKey &k) const noexcept {
+    size_t h = std::hash<std::wstring>{}(k.family);
+    h ^= std::hash<uint32_t>{}(k.size_bits) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= std::hash<int>{}(k.weight) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    return h;
+  }
+};
+struct DirectWriteEngine {
+  bool attempted = false;
+  bool ready = false;
+  IDWriteFactory *dwrite = nullptr;
+  ID2D1Factory *d2d = nullptr;
+  ID2D1DCRenderTarget *rt = nullptr;
+  ID2D1SolidColorBrush *brush = nullptr;
+  std::unique_ptr<Framebuffer> scratch;
+  std::unordered_map<DWriteFormatKey, IDWriteTextFormat *, DWriteFormatKeyHash> formats;
+
+  bool Ensure() {
+    if (attempted) return ready;
+    attempted = true;
+    HRESULT hr = DWriteCreateFactory(
+        DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown **>(&dwrite));
+    if (FAILED(hr) || !dwrite) return false;
+    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d);
+    if (FAILED(hr) || !d2d) return false;
+    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.f, 96.f);
+    hr = d2d->CreateDCRenderTarget(&props, &rt);
+    if (FAILED(hr) || !rt) return false;
+    rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    hr = rt->CreateSolidColorBrush(D2D1::ColorF(0.f, 0.f, 0.f, 1.f), &brush);
+    if (FAILED(hr) || !brush) return false;
+    ready = true;
+    return true;
+  }
+
+  std::wstring ResolveFamily(const std::wstring &raw) const {
+    if (raw.empty() || raw == L"-apple-system" || raw == L"system-ui" || raw == L"Sans")
+      return L"Segoe UI";
+    return raw;
+  }
+
+  IDWriteTextFormat *Format(const std::wstring &raw_family, float size, float weight) {
+    if (!Ensure()) return nullptr;
+    const std::wstring fam = ResolveFamily(raw_family);
+    const int w = max(100, min(999, int(std::lround(weight))));
+    const float clamped_size = max(1.f, size);
+    DWriteFormatKey key{fam, FloatBits(clamped_size), w};
+    auto it = formats.find(key);
+    if (it != formats.end()) return it->second;
+    if (formats.size() >= 256) {
+      for (auto &kv : formats) {
+        if (kv.second) kv.second->Release();
+      }
+      formats.clear();
+    }
+    IDWriteTextFormat *fmt = nullptr;
+    HRESULT hr = dwrite->CreateTextFormat(
+        fam.c_str(), nullptr, static_cast<DWRITE_FONT_WEIGHT>(w),
+        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        clamped_size, L"", &fmt);
+    if (FAILED(hr) || !fmt) return nullptr;
+    fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    formats.emplace(std::move(key), fmt);
+    return fmt;
+  }
+
+  bool Measure(const std::wstring &text, const std::wstring &family,
+               float size, float weight, double &out_w, double &out_h) {
+    auto *fmt = Format(family, size, weight);
+    if (!fmt) return false;
+    const wchar_t *ptr = text.empty() ? L" " : text.c_str();
+    const UINT32 len = text.empty() ? 1u : UINT32(text.size());
+    IDWriteTextLayout *layout = nullptr;
+    HRESULT hr = dwrite->CreateTextLayout(ptr, len, fmt, 1e6f, 1e6f, &layout);
+    if (FAILED(hr) || !layout) return false;
+    DWRITE_TEXT_METRICS m{};
+    hr = layout->GetMetrics(&m);
+    layout->Release();
+    if (FAILED(hr)) return false;
+    out_w = text.empty() ? 0.0 : std::ceil(double(m.widthIncludingTrailingWhitespace));
+    out_h = std::ceil(double(m.height));
+    return true;
+  }
+
+  bool Draw(Graphics &g, UINT dpi, const Command &c) {
+    if (c.text.empty()) return true;
+    auto *fmt = Format(c.family, c.size, c.weight);
+    if (!fmt) return false;
+    const float scale = max(1.f, (dpi ? dpi : 96u) / 96.f);
+
+    struct LineItem {
+      IDWriteTextLayout *layout = nullptr;
+      float width = 0.f;
+      float height = 0.f;
+      float baseline = 0.f;
+    };
+    std::vector<LineItem> lines;
+    size_t pos = 0;
+    float max_w = 0.f;
+    float base_line_h = 0.f;
+    while (pos <= c.text.size()) {
+      const size_t nl = c.text.find(L'\n', pos);
+      const size_t len = (nl == std::wstring::npos) ? (c.text.size() - pos) : (nl - pos);
+      const wchar_t *src = len > 0 ? (c.text.c_str() + pos) : L" ";
+      const UINT32 ulen = len > 0 ? UINT32(len) : 1u;
+      IDWriteTextLayout *layout = nullptr;
+      if (FAILED(dwrite->CreateTextLayout(src, ulen, fmt, 1e6f, 1e6f, &layout)) || !layout) {
+        for (auto &li : lines) if (li.layout) li.layout->Release();
+        return false;
+      }
+      DWRITE_TEXT_METRICS tm{};
+      layout->GetMetrics(&tm);
+      DWRITE_LINE_METRICS lm{};
+      UINT32 line_count = 0;
+      layout->GetLineMetrics(&lm, 1, &line_count);
+      const float lh = line_count > 0 && lm.height > 0 ? lm.height : tm.height;
+      const float bl = line_count > 0 ? lm.baseline : lh * 0.8f;
+      if (base_line_h <= 0.f) base_line_h = lh;
+      const float lw = len > 0 ? max(tm.width, tm.widthIncludingTrailingWhitespace) : 0.f;
+      max_w = max(max_w, lw);
+      lines.push_back({len > 0 ? layout : nullptr, lw, lh, bl});
+      if (len == 0) layout->Release();
+      if (nl == std::wstring::npos) break;
+      pos = nl + 1;
+    }
+
+    const float pad = 4.f;
+    const float step = base_line_h + c.line_spacing;
+    const float total_h = lines.size() <= 1
+        ? base_line_h
+        : base_line_h + step * float(lines.size() - 1);
+    const float log_w = max(1.f, max_w) + pad * 2.f;
+    const float log_h = max(1.f, total_h) + pad * 2.f;
+    const UINT px_w = UINT(std::ceil(log_w * scale));
+    const UINT px_h = UINT(std::ceil(log_h * scale));
+    if (px_w == 0 || px_h == 0 || px_w > 4096 || px_h > 2048) {
+      for (auto &li : lines) if (li.layout) li.layout->Release();
+      return false;
+    }
+
+    if (!scratch || scratch->capacity_width < px_w || scratch->capacity_height < px_h) {
+      scratch = std::make_unique<Framebuffer>(max(px_w, 256u), max(px_h, 64u), true);
+    }
+    scratch->width = px_w;
+    scratch->height = px_h;
+    const size_t stride = size_t(scratch->stride_pixels);
+    for (UINT y = 0; y < px_h; ++y) {
+      std::fill_n(scratch->pixels + size_t(y) * stride, px_w, 0u);
+    }
+
+    RECT bind_rect{0, 0, LONG(px_w), LONG(px_h)};
+    if (FAILED(rt->BindDC(scratch->dc, &bind_rect))) {
+      for (auto &li : lines) if (li.layout) li.layout->Release();
+      return false;
+    }
+    const float a = ((c.fill >> 24) & 255u) / 255.f;
+    const float r = ((c.fill >> 16) & 255u) / 255.f;
+    const float gr = ((c.fill >> 8) & 255u) / 255.f;
+    const float b = (c.fill & 255u) / 255.f;
+    brush->SetColor(D2D1::ColorF(r, gr, b, a));
+
+    rt->BeginDraw();
+    rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
+    float cy = pad;
+    const auto draw_opts = static_cast<D2D1_DRAW_TEXT_OPTIONS>(0x00000004); // ENABLE_COLOR_FONT
+    for (auto &li : lines) {
+      if (li.layout) {
+        rt->DrawTextLayout(D2D1::Point2F(pad, cy), li.layout, brush, draw_opts);
+        li.layout->Release();
+      }
+      cy += step;
+    }
+    const HRESULT end_hr = rt->EndDraw();
+    if (FAILED(end_hr)) return false;
+    GdiFlush();
+
+    // Vertically center the text block inside c.rect.
+    const float draw_x = c.rect.X - pad;
+    const float draw_y = c.rect.Y + (c.rect.Height - total_h) * 0.5f - pad;
+    g.DrawImage(scratch->bitmap.get(), RectF(draw_x, draw_y, log_w, log_h),
+                0.f, 0.f, REAL(px_w), REAL(px_h), UnitPixel);
+    return true;
+  }
+};
+DirectWriteEngine &DWrite() {
+  static auto *engine = new DirectWriteEngine();
+  return *engine;
+}
+
+uint32_t SampleGradientARGB(const std::vector<uint32_t> &colors,
+                            const std::vector<float> &locations, float t) {
+  if (colors.empty()) return 0u;
+  if (colors.size() == 1) return colors[0];
+  t = max(0.f, min(1.f, t));
+  auto locAt = [&](size_t idx) -> float {
+    if (locations.size() == colors.size()) return locations[idx];
+    return float(idx) / float(colors.size() - 1);
+  };
+  if (t <= locAt(0)) return colors.front();
+  if (t >= locAt(colors.size() - 1)) return colors.back();
+  for (size_t i = 0; i + 1 < colors.size(); ++i) {
+    const float l0 = locAt(i), l1 = locAt(i + 1);
+    if (t >= l0 && t <= l1) {
+      const float span = l1 - l0;
+      const float f = span > 1e-6f ? (t - l0) / span : 0.f;
+      const uint32_t ca = colors[i], cb = colors[i + 1];
+      auto mix = [&](int shift) -> uint32_t {
+        const float a = float((ca >> shift) & 255u);
+        const float b = float((cb >> shift) & 255u);
+        return uint32_t(max(0, min(255, int(std::lround(a + (b - a) * f)))));
+      };
+      return (mix(24) << 24) | (mix(16) << 16) | (mix(8) << 8) | mix(0);
+    }
+  }
+  return colors.back();
+}
+
+void DrawRadialOrAngularGradient(Graphics &g, const Command &c, float scale) {
+  if (c.colors.empty() || c.rect.Width <= 0.f || c.rect.Height <= 0.f) return;
+  const float s = max(1.f, min(2.f, scale));
+  const int pw = max(1, min(1024, int(std::ceil(c.rect.Width * s))));
+  const int ph = max(1, min(1024, int(std::ceil(c.rect.Height * s))));
+  std::vector<uint32_t> pixels(size_t(pw) * ph, 0u);
+  const float cx = (c.start.X - c.rect.X) / max(1e-4f, c.rect.Width) * float(pw);
+  const float cy = (c.start.Y - c.rect.Y) / max(1e-4f, c.rect.Height) * float(ph);
+  if (c.gradient_kind == 1) {
+    // Radial gradient: grad_p0 = startRadius, grad_p1 = endRadius (logical px)
+    const float sx = float(pw) / max(1e-4f, c.rect.Width);
+    const float sy = float(ph) / max(1e-4f, c.rect.Height);
+    const float rscale = (sx + sy) * 0.5f;
+    const float fallback_r = std::hypot(float(pw), float(ph)) * 0.5f;
+    const float r1 = c.grad_p1 > 0.f ? c.grad_p1 * rscale : fallback_r;
+    const float r0 = max(0.f, min(c.grad_p0 * rscale, r1));
+    const float span = max(1e-4f, r1 - r0);
+    for (int py = 0; py < ph; ++py) {
+      const float dy = float(py) + 0.5f - cy;
+      uint32_t *row = pixels.data() + size_t(py) * pw;
+      for (int px = 0; px < pw; ++px) {
+        const float dx = float(px) + 0.5f - cx;
+        const float dist = std::hypot(dx, dy);
+        const float t = (dist - r0) / span;
+        const uint32_t argb = SampleGradientARGB(c.colors, c.locations, t);
+        const uint32_t a = argb >> 24;
+        const uint32_t r = (((argb >> 16) & 255u) * a + 127u) / 255u;
+        const uint32_t gr = (((argb >> 8) & 255u) * a + 127u) / 255u;
+        const uint32_t b = ((argb & 255u) * a + 127u) / 255u;
+        row[px] = (a << 24) | (r << 16) | (gr << 8) | b;
+      }
+    }
+  } else {
+    // Angular gradient: grad_p0 = startAngle deg, grad_p1 = endAngle deg
+    const float start_deg = c.grad_p0;
+    const float span_deg = max(1e-4f, c.grad_p1 - c.grad_p0);
+    const float rad_to_deg = 180.f / 3.14159265358979323846f;
+    for (int py = 0; py < ph; ++py) {
+      const float dy = float(py) + 0.5f - cy;
+      uint32_t *row = pixels.data() + size_t(py) * pw;
+      for (int px = 0; px < pw; ++px) {
+        const float dx = float(px) + 0.5f - cx;
+        float deg = std::atan2(dy, dx) * rad_to_deg - start_deg;
+        deg = std::fmod(deg, 360.f);
+        if (deg < 0.f) deg += 360.f;
+        const float t = max(0.f, min(1.f, deg / span_deg));
+        const uint32_t argb = SampleGradientARGB(c.colors, c.locations, t);
+        const uint32_t a = argb >> 24;
+        const uint32_t r = (((argb >> 16) & 255u) * a + 127u) / 255u;
+        const uint32_t gr = (((argb >> 8) & 255u) * a + 127u) / 255u;
+        const uint32_t b = ((argb & 255u) * a + 127u) / 255u;
+        row[px] = (a << 24) | (r << 16) | (gr << 8) | b;
+      }
+    }
+  }
+  Bitmap bmp(pw, ph, pw * 4, PixelFormat32bppPARGB, reinterpret_cast<BYTE *>(pixels.data()));
+  g.DrawImage(&bmp, c.rect, 0.f, 0.f, REAL(pw), REAL(ph), UnitPixel);
+}
+
+void BoxBlurPARGB3Pass(uint32_t *pixels, int w, int h, int stride, int radius) {
+  if (!pixels || w <= 0 || h <= 0 || radius <= 0) return;
+  const int r = min(64, radius);
+  const int span = 2 * r + 1;
+  std::vector<uint8_t> buf(size_t(w) * h * 4);
+  std::vector<uint8_t> tmp(size_t(w) * h * 4);
+  for (int y = 0; y < h; ++y) {
+    std::memcpy(buf.data() + size_t(y) * w * 4, pixels + size_t(y) * stride, size_t(w) * 4);
+  }
+  for (int pass = 0; pass < 3; ++pass) {
+    for (int y = 0; y < h; ++y) {
+      const size_t row = size_t(y) * w * 4;
+      int acc[4] = {0, 0, 0, 0};
+      for (int dx = -r; dx <= r; ++dx) {
+        const int sx = max(0, min(w - 1, dx));
+        const size_t o = row + size_t(sx) * 4;
+        for (int ch = 0; ch < 4; ++ch) acc[ch] += buf[o + ch];
+      }
+      for (int x = 0; x < w; ++x) {
+        const size_t dst = row + size_t(x) * 4;
+        for (int ch = 0; ch < 4; ++ch) tmp[dst + ch] = uint8_t(acc[ch] / span);
+        const int px0 = max(0, min(w - 1, x - r));
+        const int px1 = max(0, min(w - 1, x + r + 1));
+        const size_t o0 = row + size_t(px0) * 4;
+        const size_t o1 = row + size_t(px1) * 4;
+        for (int ch = 0; ch < 4; ++ch) acc[ch] += int(buf[o1 + ch]) - int(buf[o0 + ch]);
+      }
+    }
+    for (int x = 0; x < w; ++x) {
+      int acc[4] = {0, 0, 0, 0};
+      for (int dy = -r; dy <= r; ++dy) {
+        const int sy = max(0, min(h - 1, dy));
+        const size_t o = (size_t(sy) * w + x) * 4;
+        for (int ch = 0; ch < 4; ++ch) acc[ch] += tmp[o + ch];
+      }
+      for (int y = 0; y < h; ++y) {
+        const size_t dst = (size_t(y) * w + x) * 4;
+        for (int ch = 0; ch < 4; ++ch) buf[dst + ch] = uint8_t(acc[ch] / span);
+        const int py0 = max(0, min(h - 1, y - r));
+        const int py1 = max(0, min(h - 1, y + r + 1));
+        const size_t o0 = (size_t(py0) * w + x) * 4;
+        const size_t o1 = (size_t(py1) * w + x) * 4;
+        for (int ch = 0; ch < 4; ++ch) acc[ch] += int(tmp[o1 + ch]) - int(tmp[o0 + ch]);
+      }
+    }
+  }
+  for (int y = 0; y < h; ++y) {
+    std::memcpy(pixels + size_t(y) * stride, buf.data() + size_t(y) * w * 4, size_t(w) * 4);
+  }
+}
+
+void ApplyBrightnessContrastPARGB(uint32_t *pixels, int w, int h, int stride,
+                                  float brightness, float contrast) {
+  if (!pixels || w <= 0 || h <= 0) return;
+  for (int y = 0; y < h; ++y) {
+    uint8_t *row = reinterpret_cast<uint8_t *>(pixels + size_t(y) * stride);
+    for (int x = 0; x < w; ++x) {
+      uint8_t *px = row + size_t(x) * 4;
+      const float a = px[3] / 255.f;
+      if (a <= 1e-5f) continue;
+      for (int ch = 0; ch < 3; ++ch) {
+        const float u = px[ch] / (255.f * a);
+        const float v = max(0.f, min(1.f, (u - 0.5f) * contrast + 0.5f + brightness));
+        px[ch] = uint8_t(max(0, min(255, int(std::lround(v * a * 255.f)))));
+      }
+    }
+  }
+}
+
 void DrawTextCommand(Surface *s, Graphics &g, SolidBrush &brush,
                      const Command &c) {
+  if (DWrite().Draw(g, s->buffer_dpi, c))
+    return;
   FontKey key{c.family, FloatBits(c.size), c.weight >= 600.f};
   auto found = s->fonts.find(key);
   if (found == s->fonts.end()) {
@@ -1065,155 +1432,230 @@ void RenderFrame(Surface *s) {
     }
     return false;
   };
-  std::vector<GraphicsState> clips;
-  std::vector<bool> clip_transforms;
-  int transform_depth = 0;
-  auto IsRectVisible = [&](const RectF &bounds) -> bool {
-    if (!full && transform_depth == 0 && !IntersectsDamage(bounds))
-      return false;
-    return g.IsVisible(bounds) != FALSE;
-  };
-  for (size_t i = 0; i < s->commands.size(); ++i) {
-    const auto &c = s->commands[i];
-    if ((c.kind == 2 || c.kind == 5) && c.clip_end > i) {
-      auto bounds = c.rect;
-      bounds.Inflate(1, 1);
-      if (!IsRectVisible(bounds)) {
+  auto RenderRange = [&](auto &&self, Graphics &target_g, size_t range_begin,
+                         size_t range_end, bool is_full, int initial_depth) -> void {
+    SolidBrush local_brush(Color(s->background_argb));
+    std::vector<GraphicsState> clips;
+    std::vector<bool> clip_transforms;
+    int transform_depth = initial_depth;
+    auto IsRectVisible = [&](const RectF &bounds) -> bool {
+      if (!is_full && transform_depth == 0 && !IntersectsDamage(bounds))
+        return false;
+      return target_g.IsVisible(bounds) != FALSE;
+    };
+    for (size_t i = range_begin; i < range_end; ++i) {
+      const auto &c = s->commands[i];
+      if ((c.kind == 2 || c.kind == 5) && c.clip_end > i && c.clip_end < range_end) {
+        auto bounds = c.rect;
+        bounds.Inflate(1, 1);
+        if (!IsRectVisible(bounds)) {
+          i = c.clip_end;
+          continue;
+        }
+      }
+      if (c.kind == 11 && c.clip_end > i && c.clip_end < range_end) {
+        const float blur_r = max(0.f, c.radius);
+        const float pad = blur_r > 0.1f ? std::ceil(blur_r * 2.5f) : 2.f;
+        auto bounds = c.rect;
+        bounds.Inflate(pad, pad);
+        if (!IsRectVisible(bounds) || bounds.Width <= 0.f || bounds.Height <= 0.f) {
+          i = c.clip_end;
+          continue;
+        }
+        const float layer_scale = max(1.f, min(2.f, scale));
+        const UINT pw = UINT(max(1, min(2048, int(std::ceil(bounds.Width * layer_scale)))));
+        const UINT ph = UINT(max(1, min(2048, int(std::ceil(bounds.Height * layer_scale)))));
+        Framebuffer layer_buf(pw, ph, false);
+        if (layer_buf.pixels) {
+          std::fill_n(layer_buf.pixels, size_t(layer_buf.stride_pixels) * ph, 0u);
+          {
+            Graphics off_g(layer_buf.bitmap.get());
+            off_g.SetSmoothingMode(SmoothingModeAntiAlias);
+            off_g.SetPixelOffsetMode(PixelOffsetModeHalf);
+            off_g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+            off_g.ScaleTransform(REAL(pw) / bounds.Width, REAL(ph) / bounds.Height);
+            off_g.TranslateTransform(-bounds.X, -bounds.Y);
+            self(self, off_g, i + 1, c.clip_end, true, 1);
+            off_g.Flush(FlushIntentionSync);
+          }
+          if (blur_r > 0.1f) {
+            const int r_px = max(1, int(std::lround(blur_r * (float(pw) / bounds.Width))));
+            BoxBlurPARGB3Pass(layer_buf.pixels, int(pw), int(ph), int(layer_buf.stride_pixels), r_px);
+          }
+          if (std::abs(c.weight) > 0.001f || std::abs(c.line_spacing - 1.f) > 0.001f) {
+            ApplyBrightnessContrastPARGB(
+                layer_buf.pixels, int(pw), int(ph), int(layer_buf.stride_pixels),
+                c.weight, c.line_spacing);
+          }
+          const float alpha = max(0.f, min(1.f, c.size));
+          if (alpha < 0.999f) {
+            ColorMatrix cm{};
+            cm.m[0][0] = 1.f; cm.m[1][1] = 1.f; cm.m[2][2] = 1.f;
+            cm.m[3][3] = alpha; cm.m[4][4] = 1.f;
+            ImageAttributes attrs;
+            attrs.SetColorMatrix(&cm);
+            target_g.DrawImage(layer_buf.bitmap.get(), bounds, 0.f, 0.f, REAL(pw), REAL(ph),
+                               UnitPixel, &attrs);
+          } else {
+            target_g.DrawImage(layer_buf.bitmap.get(), bounds, 0.f, 0.f, REAL(pw), REAL(ph),
+                               UnitPixel);
+          }
+        }
         i = c.clip_end;
         continue;
       }
-    }
-    if (c.kind == 3) {
-      if (!clips.empty()) {
-        g.Restore(clips.back());
-        clips.pop_back();
-        if (!clip_transforms.empty()) {
-          if (clip_transforms.back())
-            --transform_depth;
-          clip_transforms.pop_back();
+      if (c.kind == 3) {
+        if (!clips.empty()) {
+          target_g.Restore(clips.back());
+          clips.pop_back();
+          if (!clip_transforms.empty()) {
+            if (clip_transforms.back())
+              --transform_depth;
+            clip_transforms.pop_back();
+          }
         }
-      }
-    } else if (c.kind == 4 || c.kind == 5) {
-      auto bounds = c.rect;
-      bounds.Inflate(1 + c.stroke_width / 2, 1 + c.stroke_width / 2);
-      if (c.kind == 4 && !IsRectVisible(bounds))
-        continue;
-      GraphicsPath path;
-      VectorPath(path, c.path);
-      if (c.kind == 5) {
-        path.SetFillMode(FillModeWinding);
-        clips.push_back(g.Save());
+      } else if (c.kind == 4 || c.kind == 5) {
+        auto bounds = c.rect;
+        bounds.Inflate(1 + c.stroke_width / 2, 1 + c.stroke_width / 2);
+        if (c.kind == 4 && !IsRectVisible(bounds))
+          continue;
+        GraphicsPath path;
+        VectorPath(path, c.path);
+        if (c.kind == 5) {
+          path.SetFillMode(FillModeWinding);
+          clips.push_back(target_g.Save());
+          clip_transforms.push_back(false);
+          target_g.SetClip(&path, CombineModeIntersect);
+        } else {
+          if (c.fill >> 24) {
+            local_brush.SetColor(Color(c.fill));
+            target_g.FillPath(&local_brush, &path);
+          }
+          if (c.stroke_width > 0 && c.stroke >> 24) {
+            Pen pen(Color(c.stroke), c.stroke_width);
+            pen.SetStartCap(LineCapRound);
+            pen.SetEndCap(LineCapRound);
+            pen.SetLineJoin(LineJoinRound);
+            target_g.DrawPath(&pen, &path);
+          }
+        }
+      } else if (c.kind == 6) {
+        clips.push_back(target_g.Save());
+        clip_transforms.push_back(true);
+        ++transform_depth;
+        target_g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+        target_g.TranslateTransform(c.rect.X, c.rect.Y);
+        target_g.RotateTransform(c.radius);
+        target_g.ScaleTransform(c.size, c.weight);
+        target_g.TranslateTransform(-c.rect.X, -c.rect.Y);
+      } else if (c.kind == 7 && c.colors.size() >= 2) {
+        if (!IsRectVisible(c.rect))
+          continue;
+        if (c.gradient_kind == 1 || c.gradient_kind == 2) {
+          DrawRadialOrAngularGradient(target_g, c, scale);
+        } else {
+          LinearGradientBrush brush(c.start, c.end, Color(c.colors.front()),
+                                    Color(c.colors.back()));
+          std::vector<Color> colors;
+          std::vector<REAL> stops;
+          for (size_t j = 0; j < c.colors.size(); ++j) {
+            const float pos = (c.locations.size() == c.colors.size())
+                                  ? max(0.f, min(1.f, c.locations[j]))
+                                  : REAL(j) / REAL(c.colors.size() - 1);
+            if (j == 0 && pos > 0.001f) {
+              colors.emplace_back(c.colors[0]);
+              stops.push_back(0.f);
+            }
+            colors.emplace_back(c.colors[j]);
+            stops.push_back(pos);
+          }
+          if (!stops.empty() && stops.back() < 0.999f) {
+            colors.emplace_back(c.colors.back());
+            stops.push_back(1.f);
+          }
+          if (!stops.empty()) {
+            stops.front() = 0.f;
+            stops.back() = 1.f;
+          }
+          brush.SetInterpolationColors(colors.data(), stops.data(),
+                                       int(colors.size()));
+          target_g.FillRectangle(&brush, c.rect);
+        }
+      } else if (c.kind == 9) {
+        clips.push_back(target_g.Save());
+        clip_transforms.push_back(true);
+        ++transform_depth;
+        target_g.TranslateTransform(c.rect.X, c.rect.Y);
+      } else if (c.kind == 10 && c.mask) {
+        if (!IsRectVisible(c.rect))
+          continue;
+        ColorMatrix tint{};
+        tint.m[0][0] = ((c.fill >> 16) & 255) / 255.f;
+        tint.m[1][1] = ((c.fill >> 8) & 255) / 255.f;
+        tint.m[2][2] = (c.fill & 255) / 255.f;
+        tint.m[3][3] = (c.fill >> 24) / 255.f;
+        tint.m[4][4] = 1;
+        ImageAttributes attributes;
+        attributes.SetColorMatrix(&tint);
+        target_g.DrawImage(&c.mask->bitmap, c.rect, 0, 0,
+                           REAL(c.mask->bitmap.GetWidth()), REAL(c.mask->bitmap.GetHeight()),
+                           UnitPixel, &attributes);
+      } else if (c.kind == 8) {
+        if (!IsRectVisible(c.rect))
+          continue;
+        auto it = s->images.find(c.text);
+        if (it == s->images.end()) {
+          if (s->images.size() >= 64)
+            s->images.clear();
+          it = s->images.emplace(c.text, std::make_unique<Image>(c.text.c_str())).first;
+        }
+        if (it->second)
+          target_g.DrawImage(it->second.get(), c.rect);
+      } else if (c.kind == 2) {
+        clips.push_back(target_g.Save());
         clip_transforms.push_back(false);
-        g.SetClip(&path, CombineModeIntersect);
-      } else {
+        if (c.radius < 0.01f) {
+          target_g.SetClip(c.rect, CombineModeIntersect);
+        } else {
+          GraphicsPath path;
+          RoundedPath(path, c.rect, c.radius);
+          target_g.SetClip(&path, CombineModeIntersect);
+        }
+      } else if (c.rect.Width > 0 && c.rect.Height > 0 && IsRectVisible(c.rect)) {
+        if (c.kind == 1) {
+          DrawTextCommand(s, target_g, local_brush, c);
+          continue;
+        }
+        const bool plain_rect = c.radius < 0.01f;
         if (c.fill >> 24) {
-          solid_brush.SetColor(Color(c.fill));
-          g.FillPath(&solid_brush, &path);
+          local_brush.SetColor(Color(c.fill));
+          if (plain_rect) {
+            target_g.FillRectangle(&local_brush, c.rect);
+          } else {
+            GraphicsPath fill;
+            RoundedPath(fill, c.rect, c.radius);
+            target_g.FillPath(&local_brush, &fill);
+          }
         }
         if (c.stroke_width > 0 && c.stroke >> 24) {
-          Pen pen(Color(c.stroke), c.stroke_width);
-          pen.SetStartCap(LineCapRound);
-          pen.SetEndCap(LineCapRound);
-          pen.SetLineJoin(LineJoinRound);
-          g.DrawPath(&pen, &path);
-        }
-      }
-    } else if (c.kind == 6) {
-      clips.push_back(g.Save());
-      clip_transforms.push_back(true);
-      ++transform_depth;
-      g.SetTextRenderingHint(TextRenderingHintAntiAlias);
-      g.TranslateTransform(c.rect.X, c.rect.Y);
-      g.RotateTransform(c.radius);
-      g.ScaleTransform(c.size, c.weight);
-      g.TranslateTransform(-c.rect.X, -c.rect.Y);
-    } else if (c.kind == 7 && c.colors.size() >= 2) {
-      if (!IsRectVisible(c.rect))
-        continue;
-      LinearGradientBrush brush(c.start, c.end, Color(c.colors.front()),
-                                Color(c.colors.back()));
-      std::vector<Color> colors;
-      std::vector<REAL> stops;
-      for (size_t j = 0; j < c.colors.size(); ++j) {
-        colors.emplace_back(c.colors[j]);
-        stops.push_back(REAL(j) / REAL(c.colors.size() - 1));
-      }
-      brush.SetInterpolationColors(colors.data(), stops.data(),
-                                   int(colors.size()));
-      g.FillRectangle(&brush, c.rect);
-    } else if (c.kind == 9) {
-      clips.push_back(g.Save());
-      clip_transforms.push_back(true);
-      ++transform_depth;
-      g.TranslateTransform(c.rect.X, c.rect.Y);
-    } else if (c.kind == 10 && c.mask) {
-      if (!IsRectVisible(c.rect))
-        continue;
-      ColorMatrix tint{};
-      tint.m[0][0] = ((c.fill >> 16) & 255) / 255.f;
-      tint.m[1][1] = ((c.fill >> 8) & 255) / 255.f;
-      tint.m[2][2] = (c.fill & 255) / 255.f;
-      tint.m[3][3] = (c.fill >> 24) / 255.f;
-      tint.m[4][4] = 1;
-      ImageAttributes attributes;
-      attributes.SetColorMatrix(&tint);
-      g.DrawImage(&c.mask->bitmap, c.rect, 0, 0,
-                  REAL(c.mask->bitmap.GetWidth()), REAL(c.mask->bitmap.GetHeight()),
-                  UnitPixel, &attributes);
-    } else if (c.kind == 8) {
-      if (!IsRectVisible(c.rect))
-        continue;
-      auto it = s->images.find(c.text);
-      if (it == s->images.end()) {
-        if (s->images.size() >= 64)
-          s->images.clear();
-        it = s->images.emplace(c.text, std::make_unique<Image>(c.text.c_str())).first;
-      }
-      if (it->second)
-        g.DrawImage(it->second.get(), c.rect);
-    } else if (c.kind == 2) {
-      clips.push_back(g.Save());
-      clip_transforms.push_back(false);
-      if (c.radius < 0.01f) {
-        g.SetClip(c.rect, CombineModeIntersect);
-      } else {
-        GraphicsPath path;
-        RoundedPath(path, c.rect, c.radius);
-        g.SetClip(&path, CombineModeIntersect);
-      }
-    } else if (c.rect.Width > 0 && c.rect.Height > 0 && IsRectVisible(c.rect)) {
-      if (c.kind == 1) {
-        DrawTextCommand(s, g, solid_brush, c);
-        continue;
-      }
-      const bool plain_rect = c.radius < 0.01f;
-      if (c.fill >> 24) {
-        solid_brush.SetColor(Color(c.fill));
-        if (plain_rect) {
-          g.FillRectangle(&solid_brush, c.rect);
-        } else {
-          GraphicsPath fill;
-          RoundedPath(fill, c.rect, c.radius);
-          g.FillPath(&solid_brush, &fill);
-        }
-      }
-      if (c.stroke_width > 0 && c.stroke >> 24) {
-        auto r = c.rect;
-        r.Inflate(-c.stroke_width / 2, -c.stroke_width / 2);
-        if (r.Width > 0 && r.Height > 0) {
-          Pen pen(Color(c.stroke), c.stroke_width);
-          const float inner_r = max(0.f, c.radius - c.stroke_width / 2);
-          if (inner_r < 0.01f) {
-            g.DrawRectangle(&pen, r);
-          } else {
-            GraphicsPath edge;
-            RoundedPath(edge, r, inner_r);
-            g.DrawPath(&pen, &edge);
+          auto r = c.rect;
+          r.Inflate(-c.stroke_width / 2, -c.stroke_width / 2);
+          if (r.Width > 0 && r.Height > 0) {
+            Pen pen(Color(c.stroke), c.stroke_width);
+            const float inner_r = max(0.f, c.radius - c.stroke_width / 2);
+            if (inner_r < 0.01f) {
+              target_g.DrawRectangle(&pen, r);
+            } else {
+              GraphicsPath edge;
+              RoundedPath(edge, r, inner_r);
+              target_g.DrawPath(&pen, &edge);
+            }
           }
         }
       }
     }
-  }
+  };
+  RenderRange(RenderRange, g, 0, s->commands.size(), full, 0);
   g.Flush(FlushIntentionSync);
   UpdateSurfaceWindowShadow(s);
   const double elapsed = ClockMilliseconds() - started;
@@ -1887,10 +2329,14 @@ RectF InkBounds(const Command &c) {
   auto bounds = c.rect;
   if (c.kind == 4)
     bounds.Inflate(c.stroke_width / 2, c.stroke_width / 2);
+  else if (c.kind == 11) {
+    const float pad = c.radius > 0.1f ? std::ceil(c.radius * 2.5f) : 2.f;
+    bounds.Inflate(pad, pad);
+  }
   return bounds;
 }
 bool SavesGraphics(int kind) {
-  return kind == 2 || kind == 5 || kind == 6 || kind == 9;
+  return kind == 2 || kind == 5 || kind == 6 || kind == 9 || kind == 11;
 }
 bool Contains(RectF outer, RectF inner) {
   return outer.X <= inner.X && outer.Y <= inner.Y &&
@@ -1907,6 +2353,8 @@ bool Translates(const Command &a, const Command &b, double dx, double dy,
       a.weight != b.weight || a.line_spacing != b.line_spacing ||
       (!allow_color_change && (a.fill != b.fill || a.stroke != b.stroke)) ||
       a.text != b.text || a.family != b.family || a.colors != b.colors ||
+      a.locations != b.locations || a.gradient_kind != b.gradient_kind ||
+      a.grad_p0 != b.grad_p0 || a.grad_p1 != b.grad_p1 ||
       a.path.size() != b.path.size() || a.mask != b.mask)
     return false;
   if (a.kind == 7 &&
@@ -1937,7 +2385,7 @@ struct InkIterator {
   const Command *next() {
     while (position < end) {
       const auto &c = commands[position++];
-      if (c.kind == 6 || c.kind == 9) {
+      if (c.kind == 6 || c.kind == 9 || c.kind == 11) {
         valid = false;
         return nullptr;
       }
@@ -2027,7 +2475,7 @@ bool ScrollBackdrop(Surface *s, const ScrollDrawing &scroll, RectF copy_area) {
       continue;
     }
     const auto &c = s->pending[i];
-    if (c.kind == 6 || c.kind == 9)
+    if (c.kind == 6 || c.kind == 9 || c.kind == 11)
       return false;
     if (c.kind == 2 || c.kind == 5) {
       auto scope = scopes.back();
@@ -2150,7 +2598,7 @@ RECT ChangedScope(Surface *s, RECT client) {
                   LONG(std::ceil((r.GetBottom() + oy) * scale))};
         IntersectRect(&next.clip, &next.clip, &clip);
       }
-      next.transformed |= c.kind == 6 || c.kind == 9;
+      next.transformed |= c.kind == 6 || c.kind == 9 || c.kind == 11;
       scopes.push_back(next);
     } else if (c.kind == 3 && scopes.size() > 1) {
       scopes.pop_back();
@@ -2231,7 +2679,7 @@ RECT Damage(Surface *s, std::vector<RECT> &out_rects) {
     const auto &a = s->commands[i], &b = s->pending[i];
     if (!(a == b)) {
       if (a.kind != b.kind || transformed || a.kind == 2 || a.kind == 3 ||
-          a.kind == 5 || a.kind == 6 || a.kind == 9) {
+          a.kind == 5 || a.kind == 6 || a.kind == 9 || a.kind == 11) {
         out_rects.clear();
         RECT r = ChangedScope(s, client);
         AddDamageRect(out_rects, r);
@@ -2255,8 +2703,8 @@ RECT Damage(Surface *s, std::vector<RECT> &out_rects) {
         }
       }
     }
-    if (b.kind == 2 || b.kind == 5 || b.kind == 6 || b.kind == 9) {
-      bool transform = b.kind == 6 || b.kind == 9;
+    if (b.kind == 2 || b.kind == 5 || b.kind == 6 || b.kind == 9 || b.kind == 11) {
+      bool transform = b.kind == 6 || b.kind == 9 || b.kind == 11;
       transforms.push_back(transform);
       transformed += transform;
     } else if (b.kind == 3 && !transforms.empty()) {
@@ -2897,14 +3345,46 @@ void sui_surface_transform(void *h, double cx, double cy, double rotation,
   c.weight = float(sy);
   static_cast<Surface *>(h)->pending.push_back(std::move(c));
 }
+void sui_surface_gradient_ex(void *h, int kind, double x, double y,
+                             double width, double height, double sx, double sy,
+                             double ex, double ey, double start_param,
+                             double end_param, const uint32_t *colors,
+                             const double *locations, int count) {
+  auto c = Box(7, x, y, width, height, 0);
+  c.gradient_kind = kind;
+  c.start = PointF(float(x + sx * width), float(y + sy * height));
+  c.end = PointF(float(x + ex * width), float(y + ey * height));
+  c.grad_p0 = float(start_param);
+  c.grad_p1 = float(end_param);
+  if (colors && count > 0) {
+    c.colors.assign(colors, colors + count);
+  }
+  if (locations && count > 0) {
+    c.locations.reserve(size_t(count));
+    for (int i = 0; i < count; ++i)
+      c.locations.push_back(float(locations[i]));
+  }
+  static_cast<Surface *>(h)->pending.push_back(std::move(c));
+}
 void sui_surface_gradient(void *h, double x, double y, double width,
                           double height, double sx, double sy, double ex,
                           double ey, const uint32_t *colors, int count) {
-  auto c = Box(7, x, y, width, height, 0);
-  c.start = PointF(float(x + sx * width), float(y + sy * height));
-  c.end = PointF(float(x + ex * width), float(y + ey * height));
-  c.colors.assign(colors, colors + count);
+  sui_surface_gradient_ex(h, 0, x, y, width, height, sx, sy, ex, ey, 0.0, 0.0,
+                          colors, nullptr, count);
+}
+void sui_surface_layer_begin(void *h, double x, double y, double width,
+                             double height, double opacity, double blur_radius,
+                             double brightness, double contrast) {
+  auto c = Box(11, x, y, width, height, blur_radius);
+  c.size = float(opacity);
+  c.weight = float(brightness);
+  c.line_spacing = float(contrast);
   static_cast<Surface *>(h)->pending.push_back(std::move(c));
+}
+void sui_surface_layer_end(void *h) {
+  Command c;
+  c.kind = 3;
+  static_cast<Surface *>(h)->pending.push_back(c);
 }
 void sui_surface_image(void *h, const char *file, double x, double y,
                        double width, double height) {
@@ -3309,6 +3789,26 @@ void sui_button_update(void *h, void *button, double radius, const char *help,
                    reinterpret_cast<LPARAM>(&tool));
   }
 }
+void sui_button_set_accessibility(void *button, const char *label,
+                                  const char *description) {
+  if (!button) return;
+  HWND hwnd = static_cast<HWND>(button);
+  if (label && *label) {
+    std::wstring next = Wide(label);
+    if (description && *description) {
+      next += L" — ";
+      next += Wide(description);
+    }
+    int cur_len = GetWindowTextLengthW(hwnd);
+    std::wstring cur(size_t(max(0, cur_len)) + 1, L'\0');
+    GetWindowTextW(hwnd, cur.data(), int(cur.size()));
+    cur.resize(size_t(max(0, cur_len)));
+    if (cur != next) {
+      SetWindowTextW(hwnd, next.c_str());
+      NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, hwnd, OBJID_CLIENT, CHILDID_SELF);
+    }
+  }
+}
 void sui_surface_focus_next(void *h, void *current, int backward) {
   auto *s = static_cast<Surface *>(h);
   const auto count = int(s->focus_order.size());
@@ -3334,6 +3834,12 @@ void sui_surface_focus_next(void *h, void *current, int backward) {
 sui_size sui_measure_text(const char *text, const char *family_name,
                           double size, double weight) {
   InitializeGraphics();
+  auto text_w = Wide(text);
+  std::wstring family_w = (family_name && *family_name) ? Wide(family_name) : std::wstring();
+  double dw_w = 0.0, dw_h = 0.0;
+  if (DWrite().Measure(text_w, family_w, float(size), float(weight), dw_w, dw_h)) {
+    return {dw_w, dw_h};
+  }
   struct TextMeasureCache {
     Bitmap bitmap;
     Graphics graphics;
@@ -3345,14 +3851,12 @@ sui_size sui_measure_text(const char *text, const char *family_name,
     }
   };
   static TextMeasureCache *cache = new TextMeasureCache();
-  auto text_w = Wide(text);
-  std::wstring family_w;
   if (family_name && *family_name) {
     auto fit = cache->wide_families.find(family_name);
     if (fit == cache->wide_families.end()) {
       if (cache->wide_families.size() >= 64)
         cache->wide_families.clear();
-      fit = cache->wide_families.emplace(family_name, Wide(family_name)).first;
+      fit = cache->wide_families.emplace(family_name, family_w).first;
     }
     family_w = fit->second;
   }

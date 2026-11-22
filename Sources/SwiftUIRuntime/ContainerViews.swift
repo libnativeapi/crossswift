@@ -42,9 +42,23 @@ final class LazyHeightCache {
 }
 
 struct ScrollViewportContext: Equatable {
-  var offsetY: Double
-  var viewportHeight: Double
+  var offsetX: Double = 0
+  var offsetY: Double = 0
+  var viewportWidth: Double = 800
+  var viewportHeight: Double = 600
   var targetID: AnyHashable?
+}
+
+struct LazyContainerContext: Equatable {
+  enum AxisKind: Equatable {
+    case verticalStack
+    case horizontalStack
+    case verticalGrid(columns: Int)
+    case horizontalGrid(rows: Int)
+  }
+  var key: AnyHashable
+  var axis: AxisKind
+  var spacing: Double
 }
 
 private enum ScrollViewportContextKey: EnvironmentKey {
@@ -55,6 +69,10 @@ private enum LazyStackKeyKey: EnvironmentKey {
   static let defaultValue: AnyHashable? = nil
 }
 
+private enum LazyContainerContextKey: EnvironmentKey {
+  static let defaultValue: LazyContainerContext? = nil
+}
+
 extension EnvironmentValues {
   var scrollViewportContext: ScrollViewportContext? {
     get { self[ScrollViewportContextKey.self] }
@@ -63,6 +81,10 @@ extension EnvironmentValues {
   var lazyStackKey: AnyHashable? {
     get { self[LazyStackKeyKey.self] }
     set { self[LazyStackKeyKey.self] = newValue }
+  }
+  var lazyContainerContext: LazyContainerContext? {
+    get { self[LazyContainerContextKey.self] }
+    set { self[LazyContainerContextKey.self] = newValue }
   }
 }
 
@@ -103,37 +125,123 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
   public var body: Never { fatalError() }
   func _makeElement(path: ViewPath) -> Element {
     let env = EnvironmentValues.current
-    if let stackKey = env.lazyStackKey, let viewport = env.scrollViewportContext, data.count > 72 {
-      let minVisibleY = viewport.offsetY - 480
-      let maxVisibleY = viewport.offsetY + max(600, viewport.viewportHeight) + 600
-      var runningY = 0.0
+    let lazyCtx: LazyContainerContext? =
+      env.lazyContainerContext
+      ?? env.lazyStackKey.map { LazyContainerContext(key: $0, axis: .verticalStack, spacing: 8) }
+    if let lazyCtx, let viewport = env.scrollViewportContext, data.count > 72 {
+      let stackKey = lazyCtx.key
+      let spacing = lazyCtx.spacing
       var children: [Element] = []
       children.reserveCapacity(data.count)
-      for (index, item) in data.enumerated() {
-        let itemID = AnyHashable(item[keyPath: id])
-        let estH = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
-        let inWindow = (runningY + estH >= minVisibleY && runningY <= maxVisibleY)
-          || index < 14
-          || itemID == viewport.targetID
-        runningY += estH
-        if inWindow {
-          let itemView: Content
-          if let graph = EvaluationGraph.active {
-            itemView = graph.trackObservation { content(item) }
+
+      switch lazyCtx.axis {
+      case .verticalStack:
+        let minVisibleY = viewport.offsetY - 480
+        let maxVisibleY = viewport.offsetY + max(600, viewport.viewportHeight) + 600
+        var runningY = 0.0
+        for (index, item) in data.enumerated() {
+          let itemID = AnyHashable(item[keyPath: id])
+          let estH = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
+          let inWindow = (runningY + estH >= minVisibleY && runningY <= maxVisibleY)
+            || index < 14
+            || itemID == viewport.targetID
+          runningY += estH + spacing
+          if inWindow {
+            let itemView: Content =
+              EvaluationGraph.active?.trackObservation { content(item) } ?? content(item)
+            var child = _render(itemView, path: path.appending(id: itemID))
+            child.explicitID = itemID
+            children.append(child)
           } else {
-            itemView = content(item)
+            var placeholder = NodeProps()
+            placeholder.frameHeight = estH
+            placeholder.fillWidth = true
+            children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
           }
-          var child = _render(itemView, path: path.appending(id: itemID))
-          child.explicitID = itemID
-          children.append(child)
-        } else {
-          var placeholder = NodeProps()
-          placeholder.frameHeight = estH
-          placeholder.fillWidth = true
-          children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
+        }
+
+      case .horizontalStack:
+        let minVisibleX = viewport.offsetX - 480
+        let maxVisibleX = viewport.offsetX + max(800, viewport.viewportWidth) + 600
+        var runningX = 0.0
+        for (index, item) in data.enumerated() {
+          let itemID = AnyHashable(item[keyPath: id])
+          let estW = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
+          let inWindow = (runningX + estW >= minVisibleX && runningX <= maxVisibleX)
+            || index < 14
+            || itemID == viewport.targetID
+          runningX += estW + spacing
+          if inWindow {
+            let itemView: Content =
+              EvaluationGraph.active?.trackObservation { content(item) } ?? content(item)
+            var child = _render(itemView, path: path.appending(id: itemID))
+            child.explicitID = itemID
+            children.append(child)
+          } else {
+            var placeholder = NodeProps()
+            placeholder.frameWidth = estW
+            placeholder.fillHeight = true
+            children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
+          }
+        }
+
+      case .verticalGrid(let columns):
+        let cols = max(1, columns)
+        let minVisibleY = viewport.offsetY - 480
+        let maxVisibleY = viewport.offsetY + max(600, viewport.viewportHeight) + 600
+        let sampleRowH = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: AnyHashable("__grid_row"))
+        for (index, item) in data.enumerated() {
+          let itemID = AnyHashable(item[keyPath: id])
+          let row = index / cols
+          let estH = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
+          let rowTop = Double(row) * (sampleRowH + spacing)
+          let inWindow = (rowTop + estH >= minVisibleY && rowTop <= maxVisibleY)
+            || row < 6
+            || itemID == viewport.targetID
+          if inWindow {
+            let itemView: Content =
+              EvaluationGraph.active?.trackObservation { content(item) } ?? content(item)
+            var child = _render(itemView, path: path.appending(id: itemID))
+            child.explicitID = itemID
+            children.append(child)
+          } else {
+            var placeholder = NodeProps()
+            placeholder.frameHeight = estH
+            placeholder.fillWidth = true
+            children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
+          }
+        }
+
+      case .horizontalGrid(let rows):
+        let rowCount = max(1, rows)
+        let minVisibleX = viewport.offsetX - 480
+        let maxVisibleX = viewport.offsetX + max(800, viewport.viewportWidth) + 600
+        let sampleColW = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: AnyHashable("__grid_col"))
+        for (index, item) in data.enumerated() {
+          let itemID = AnyHashable(item[keyPath: id])
+          let col = index / rowCount
+          let estW = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
+          let colLeft = Double(col) * (sampleColW + spacing)
+          let inWindow = (colLeft + estW >= minVisibleX && colLeft <= maxVisibleX)
+            || col < 6
+            || itemID == viewport.targetID
+          if inWindow {
+            let itemView: Content =
+              EvaluationGraph.active?.trackObservation { content(item) } ?? content(item)
+            var child = _render(itemView, path: path.appending(id: itemID))
+            child.explicitID = itemID
+            children.append(child)
+          } else {
+            var placeholder = NodeProps()
+            placeholder.frameWidth = estW
+            placeholder.fillHeight = true
+            children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
+          }
         }
       }
-      return Element(kind: .fragment, children: children)
+      var fragProps = NodeProps()
+      fragProps.isLazyContainer = true
+      return Element(kind: .fragment, props: fragProps, children: children)
     }
 
     return Element(
@@ -222,7 +330,9 @@ public struct ScrollView<Content: View>: View, _PrimitiveView {
     p.fillHeight = axes.contains(.vertical)
     let savedViewport = EnvironmentValues.current.scrollViewportContext
     EnvironmentValues.current.scrollViewportContext = ScrollViewportContext(
+      offsetX: offset.x,
       offsetY: offset.y,
+      viewportWidth: 800,
       viewportHeight: 600,
       targetID: scrollTarget?.id
     )
@@ -393,17 +503,24 @@ public struct LazyVStack<Content: View>: View, _PrimitiveView {
   func _makeElement(path: ViewPath) -> Element {
     let stackKey = AnyHashable(path)
     let saved = EnvironmentValues.current.lazyStackKey
+    let savedCtx = EnvironmentValues.current.lazyContainerContext
     EnvironmentValues.current.lazyStackKey = stackKey
-    defer { EnvironmentValues.current.lazyStackKey = saved }
+    EnvironmentValues.current.lazyContainerContext = LazyContainerContext(
+      key: stackKey, axis: .verticalStack, spacing: spacing)
+    defer {
+      EnvironmentValues.current.lazyStackKey = saved
+      EnvironmentValues.current.lazyContainerContext = savedCtx
+    }
     let contentElement = _render(content, path: path)
+    let children = flattenChildren(contentElement)
     var props = NodeProps()
     props.spacing = spacing
     props.horizontalAlignment = alignment
-    props.isLazyContainer = true
+    props.isLazyContainer = contentElement.props.isLazyContainer || children.count > 72
     var el = Element(
       kind: .container(.vertical),
       props: props,
-      children: flattenChildren(contentElement)
+      children: children
     )
     el.lazyCacheKey = stackKey
     return el
@@ -432,16 +549,29 @@ public struct LazyHStack<Content: View>: View, _PrimitiveView {
   public var body: Never { fatalError("LazyHStack is primitive") }
 
   func _makeElement(path: ViewPath) -> Element {
+    let stackKey = AnyHashable(path)
+    let saved = EnvironmentValues.current.lazyStackKey
+    let savedCtx = EnvironmentValues.current.lazyContainerContext
+    EnvironmentValues.current.lazyStackKey = stackKey
+    EnvironmentValues.current.lazyContainerContext = LazyContainerContext(
+      key: stackKey, axis: .horizontalStack, spacing: spacing)
+    defer {
+      EnvironmentValues.current.lazyStackKey = saved
+      EnvironmentValues.current.lazyContainerContext = savedCtx
+    }
     let contentElement = _render(content, path: path)
+    let children = flattenChildren(contentElement)
     var props = NodeProps()
     props.spacing = spacing
     props.verticalAlignment = alignment
-    props.isLazyContainer = true
-    return Element(
+    props.isLazyContainer = contentElement.props.isLazyContainer || children.count > 72
+    var el = Element(
       kind: .container(.horizontal),
       props: props,
-      children: flattenChildren(contentElement)
+      children: children
     )
+    el.lazyCacheKey = stackKey
+    return el
   }
 }
 public struct ProposedViewSize {

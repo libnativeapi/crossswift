@@ -15,20 +15,113 @@ public struct ViewDimensions {
 public enum LayoutDirection { case leftToRight, rightToLeft }
 public enum ContentMode { case fit, fill }
 public struct AnyTransition: Equatable, Sendable {
-  public var opacity: Double = 1, scale: Double = 1
+  public struct Phase: Equatable, Sendable {
+    public var opacity: Double = 1
+    public var scale: Double = 1
+    public var offsetX: Double = 0
+    public var offsetY: Double = 0
+    public var edge: Edge? = nil
+
+    public init(
+      opacity: Double = 1,
+      scale: Double = 1,
+      offsetX: Double = 0,
+      offsetY: Double = 0,
+      edge: Edge? = nil
+    ) {
+      self.opacity = opacity
+      self.scale = scale
+      self.offsetX = offsetX
+      self.offsetY = offsetY
+      self.edge = edge
+    }
+
+    public var isIdentity: Bool {
+      opacity == 1 && scale == 1 && offsetX == 0 && offsetY == 0 && edge == nil
+    }
+
+    func combined(with other: Phase) -> Phase {
+      Phase(
+        opacity: opacity * other.opacity,
+        scale: scale * other.scale,
+        offsetX: offsetX + other.offsetX,
+        offsetY: offsetY + other.offsetY,
+        edge: other.edge ?? edge
+      )
+    }
+  }
+
+  public var insertion: Phase
+  public var removal: Phase
+  public var animationOverride: Animation? = nil
+
+  public var opacity: Double { insertion.opacity }
+  public var scale: Double { insertion.scale }
+
+  public init(
+    opacity: Double = 1,
+    scale: Double = 1,
+    offsetX: Double = 0,
+    offsetY: Double = 0,
+    edge: Edge? = nil
+  ) {
+    let phase = Phase(opacity: opacity, scale: scale, offsetX: offsetX, offsetY: offsetY, edge: edge)
+    self.insertion = phase
+    self.removal = phase
+  }
+
+  public init(insertion: Phase, removal: Phase, animationOverride: Animation? = nil) {
+    self.insertion = insertion
+    self.removal = removal
+    self.animationOverride = animationOverride
+  }
+
   public static let opacity = AnyTransition(opacity: 0)
   public static let identity = AnyTransition()
-  public static let slide = AnyTransition(opacity: 0)
-  public static func scale(scale: Double = 0, anchor: UnitPoint = .center) -> Self { Self(scale: scale) }
-  public static func move(edge: Edge) -> Self { Self(opacity: 0) }
-  public static func push(from edge: Edge) -> Self { Self(opacity: 0) }
-  public static func offset(x: CGFloat = 0, y: CGFloat = 0) -> Self { Self(opacity: 0) }
-  public static func asymmetric(insertion: Self, removal: Self) -> Self { insertion }
+  public static let slide = AnyTransition(
+    insertion: Phase(edge: .leading),
+    removal: Phase(edge: .trailing)
+  )
+  public static func scale(scale: Double = 0, anchor: UnitPoint = .center) -> Self {
+    Self(scale: scale)
+  }
+  public static func move(edge: Edge) -> Self {
+    Self(edge: edge)
+  }
+  public static func push(from edge: Edge) -> Self {
+    let opposite: Edge
+    switch edge {
+    case .top: opposite = .bottom
+    case .bottom: opposite = .top
+    case .leading: opposite = .trailing
+    case .trailing: opposite = .leading
+    }
+    return Self(insertion: Phase(edge: edge), removal: Phase(edge: opposite))
+  }
+  public static func offset(x: CGFloat = 0, y: CGFloat = 0) -> Self {
+    Self(offsetX: Double(x), offsetY: Double(y))
+  }
+  public static func offset(_ offset: CGSize) -> Self {
+    Self(offsetX: Double(offset.width), offsetY: Double(offset.height))
+  }
+  public static func asymmetric(insertion: Self, removal: Self) -> Self {
+    Self(
+      insertion: insertion.insertion,
+      removal: removal.removal,
+      animationOverride: insertion.animationOverride ?? removal.animationOverride
+    )
+  }
   public func combined(with other: Self) -> Self {
-    Self(opacity: opacity * other.opacity, scale: scale * other.scale)
+    Self(
+      insertion: insertion.combined(with: other.insertion),
+      removal: removal.combined(with: other.removal),
+      animationOverride: other.animationOverride ?? animationOverride
+    )
   }
   public func animation(_ animation: Animation?) -> Self {
-    self
+    var copy = self
+    copy.animationOverride = animation
+    return copy
   }
 }
 extension Font {

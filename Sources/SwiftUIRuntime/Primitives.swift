@@ -222,6 +222,7 @@ extension Spacer: _PrimitiveView {
   func _makeElement(path: ViewPath) -> Element {
     var props = NodeProps()
     props.flex = 1
+    props.spacerMinLength = max(0, minLength)
     return Element(kind: .spacer, props: props)
   }
 }

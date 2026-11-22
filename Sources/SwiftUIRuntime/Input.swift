@@ -180,10 +180,25 @@ extension View {
     TransformView(content: self) { $0.submitAction = action }
   }
   public func gesture<G: Gesture>(_ gesture: G, isEnabled: Bool = true) -> some View {
-    TransformView(content: self) {
+    TransformView(content: self) { el in
       guard isEnabled else { return }
-      $0.dragAction = { value, ended in
-        if ended { gesture.ended?(value) } else { gesture.changed?(value) }
+      if let lp = gesture as? LongPressGesture {
+        el.longPressAction = Element.LongPressConfig(
+          minimumDuration: lp.minimumDuration,
+          maximumDistance: Double(lp.maximumDistance),
+          onPressingChanged: lp.pressingChanged,
+          onEnded: { lp.ended?(DragGesture.Value(location: .zero, startLocation: .zero, translation: .zero, time: Date())) }
+        )
+      } else if let tap = gesture as? TapGesture, let cb = tap.tapCallback {
+        if tap.count == 2 {
+          el.doubleTapAction = cb
+        } else {
+          el.action = cb
+        }
+      } else {
+        el.dragAction = { value, ended in
+          if ended { gesture.ended?(value) } else { gesture.changed?(value) }
+        }
       }
     }
   }

@@ -71,6 +71,27 @@ extension WebBackend {
     style.transform = .string(
       props.rotation == 0 && props.scaleX == 1 && props.scaleY == 1
         ? "" : "rotate(\(props.rotation)deg) scale(\(props.scaleX), \(props.scaleY))")
+    var filters: [String] = []
+    if props.blurRadius > 0.01 { filters.append("blur(\(px(props.blurRadius)))") }
+    if abs(props.brightness) > 0.001 { filters.append("brightness(\(max(0.0, 1.0 + props.brightness)))") }
+    if abs(props.contrast - 1.0) > 0.001 { filters.append("contrast(\(max(0.0, props.contrast)))") }
+    style.filter = .string(filters.joined(separator: " "))
+    if props.gradient?.kind == .angular, let gradient = props.gradient, gradient.colors.count >= 2 {
+      let cx = gradient.start.x * 100
+      let cy = gradient.start.y * 100
+      let span = max(1.0, gradient.endAngle - gradient.startAngle)
+      let stops = gradient.colors.enumerated().map { idx, color -> String in
+        let loc = idx < gradient.locations.count
+          ? gradient.locations[idx]
+          : Double(idx) / Double(max(1, gradient.colors.count - 1))
+        let deg = loc * span
+        return "\(color.css) \(deg)deg"
+      }.joined(separator: ", ")
+      style.backgroundImage = .string(
+        "conic-gradient(from \(gradient.startAngle + 90)deg at \(cx)% \(cy)%, \(stops))")
+    } else if !props.imageTemplate {
+      style.backgroundImage = .string("")
+    }
     style.color = .string(props.foreground?.css ?? "")
     let effectiveCorner =
       props.shadows.isEmpty ? props.cornerRadius : max(props.cornerRadius, element.shadowCornerRadius)
@@ -263,23 +284,63 @@ extension WebBackend {
 
     _ = svg.replaceChildren!(shape)
     if let gradient = props.gradient, !gradient.colors.isEmpty {
-      if gradient.colors.count == 1 || gradient.start == gradient.end {
+      if gradient.colors.count == 1 {
         _ = shape.setAttribute!("fill", gradient.colors.last!.css)
         return
       }
-      let fill = svgElement("linearGradient")
+      if gradient.kind == .angular {
+        // Rendered via native CSS conic-gradient on the element box.
+        _ = shape.setAttribute!("fill", "none")
+        return
+      }
       let id = "swiftui-gradient-\(node.id.rawValue)"
-      _ = fill.setAttribute!("id", id)
-      _ = fill.setAttribute!("gradientUnits", "userSpaceOnUse")
-      _ = fill.setAttribute!("x1", gradient.start.x * node.frame.width)
-      _ = fill.setAttribute!("y1", gradient.start.y * node.frame.height)
-      _ = fill.setAttribute!("x2", gradient.end.x * node.frame.width)
-      _ = fill.setAttribute!("y2", gradient.end.y * node.frame.height)
-      for (index, color) in gradient.colors.enumerated() {
-        let stop = svgElement("stop")
-        _ = stop.setAttribute!("offset", Double(index) / Double(gradient.colors.count - 1))
-        _ = stop.setAttribute!("stop-color", color.css)
-        _ = fill.appendChild!(stop)
+      let fill: JSObject
+      if gradient.kind == .radial {
+        fill = svgElement("radialGradient")
+        _ = fill.setAttribute!("id", id)
+        _ = fill.setAttribute!("gradientUnits", "userSpaceOnUse")
+        let cx = gradient.start.x * node.frame.width
+        let cy = gradient.start.y * node.frame.height
+        let fallbackR = max(1.0, hypot(node.frame.width, node.frame.height) * 0.5)
+        let r1 = gradient.endRadius > 0 ? gradient.endRadius : fallbackR
+        let r0 = max(0.0, min(gradient.startRadius, r1))
+        _ = fill.setAttribute!("cx", cx)
+        _ = fill.setAttribute!("cy", cy)
+        _ = fill.setAttribute!("fx", cx)
+        _ = fill.setAttribute!("fy", cy)
+        _ = fill.setAttribute!("r", r1)
+        let innerRatio = r1 > 1e-6 ? r0 / r1 : 0.0
+        for (index, color) in gradient.colors.enumerated() {
+          let stop = svgElement("stop")
+          let rawLoc = index < gradient.locations.count
+            ? gradient.locations[index]
+            : Double(index) / Double(gradient.colors.count - 1)
+          let offset = innerRatio + rawLoc * (1.0 - innerRatio)
+          _ = stop.setAttribute!("offset", offset)
+          _ = stop.setAttribute!("stop-color", color.css)
+          _ = fill.appendChild!(stop)
+        }
+      } else {
+        if gradient.start == gradient.end {
+          _ = shape.setAttribute!("fill", gradient.colors.last!.css)
+          return
+        }
+        fill = svgElement("linearGradient")
+        _ = fill.setAttribute!("id", id)
+        _ = fill.setAttribute!("gradientUnits", "userSpaceOnUse")
+        _ = fill.setAttribute!("x1", gradient.start.x * node.frame.width)
+        _ = fill.setAttribute!("y1", gradient.start.y * node.frame.height)
+        _ = fill.setAttribute!("x2", gradient.end.x * node.frame.width)
+        _ = fill.setAttribute!("y2", gradient.end.y * node.frame.height)
+        for (index, color) in gradient.colors.enumerated() {
+          let stop = svgElement("stop")
+          let offset = index < gradient.locations.count
+            ? gradient.locations[index]
+            : Double(index) / Double(gradient.colors.count - 1)
+          _ = stop.setAttribute!("offset", offset)
+          _ = stop.setAttribute!("stop-color", color.css)
+          _ = fill.appendChild!(stop)
+        }
       }
       let definitions = svgElement("defs")
       _ = definitions.appendChild!(fill)

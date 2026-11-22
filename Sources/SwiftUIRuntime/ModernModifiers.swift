@@ -1343,10 +1343,22 @@ public struct SpatialTapGesture: Gesture {
 }
 
 public struct LongPressGesture: Gesture {
+  public let minimumDuration: Double
+  public let maximumDistance: CGFloat
   public var changed: ((DragGesture.Value) -> Void)? { nil }
   public var ended: ((DragGesture.Value) -> Void)?
+  var pressingChanged: ((Bool) -> Void)?
 
-  public init(minimumDuration: Double = 0.5, maximumDistance: CGFloat = 10) {}
+  public init(minimumDuration: Double = 0.5, maximumDistance: CGFloat = 10) {
+    self.minimumDuration = max(0, minimumDuration)
+    self.maximumDistance = max(0, maximumDistance)
+  }
+
+  public func onChanged(_ action: @escaping (Bool) -> Void) -> LongPressGesture {
+    var copy = self
+    copy.pressingChanged = action
+    return copy
+  }
 
   public func onEnded(_ action: @escaping (Bool) -> Void) -> LongPressGesture {
     var copy = self
@@ -1490,15 +1502,21 @@ extension View {
   }
 
   public func blur(radius: CGFloat, opaque: Bool = false) -> some View {
-    opacity(radius > 1.5 ? 0.55 : 1.0)
+    TransformView(content: self) { el in
+      el.props.blurRadius = max(0, Double(radius))
+    }
   }
 
   public func brightness(_ amount: Double) -> some View {
-    self
+    TransformView(content: self) { el in
+      el.props.brightness = amount
+    }
   }
 
   public func contrast(_ amount: Double) -> some View {
-    self
+    TransformView(content: self) { el in
+      el.props.contrast = amount
+    }
   }
 
   public func grayscale(_ amount: Double) -> some View {
@@ -1517,11 +1535,15 @@ extension View {
   }
 
   public func drawingGroup(opaque: Bool = false, colorMode: ColorRenderingMode = .nonLinear) -> some View {
-    self
+    TransformView(content: self) { el in
+      el.props.compositingGroup = true
+    }
   }
 
   public func compositingGroup() -> some View {
-    self
+    TransformView(content: self) { el in
+      el.props.compositingGroup = true
+    }
   }
 
   public func symbolRenderingMode(_ mode: SymbolRenderingMode?) -> some View {
@@ -1566,7 +1588,9 @@ extension View {
   }
 
   public func layoutPriority(_ value: Double) -> some View {
-    self
+    TransformView(content: self) { el in
+      el.props.layoutPriority = value
+    }
   }
 
   public func position(x: CGFloat = 0, y: CGFloat = 0) -> some View {
@@ -1594,28 +1618,53 @@ extension View {
   public func simultaneousGesture<T: Gesture>(_ gesture: T, isEnabled: Bool = true) -> some View {
     TransformView(content: self) { el in
       guard isEnabled else { return }
-      if let tap = gesture as? TapGesture, let cb = tap.tapCallback {
+      if let lp = gesture as? LongPressGesture {
+        el.longPressAction = Element.LongPressConfig(
+          minimumDuration: lp.minimumDuration,
+          maximumDistance: Double(lp.maximumDistance),
+          onPressingChanged: lp.pressingChanged,
+          onEnded: { lp.ended?(DragGesture.Value(location: .zero, startLocation: .zero, translation: .zero, time: Date())) }
+        )
+      } else if let tap = gesture as? TapGesture, let cb = tap.tapCallback {
         if tap.count == 2 {
-          el.doubleTapAction = cb
-        } else {
-          let prev = el.action
-          el.action = {
+          let prev = el.doubleTapAction
+          el.doubleTapAction = {
             cb()
             prev?()
           }
+        } else {
+          el.simultaneousActions.append(cb)
         }
       } else {
-        let prev = el.dragAction
-        el.dragAction = { val, ended in
+        el.simultaneousDragActions.append { val, ended in
           if ended { gesture.ended?(val) } else { gesture.changed?(val) }
-          prev?(val, ended)
         }
       }
     }
   }
 
   public func highPriorityGesture<T: Gesture>(_ gesture: T, isEnabled: Bool = true) -> some View {
-    self.gesture(gesture, isEnabled: isEnabled)
+    TransformView(content: self) { el in
+      guard isEnabled else { return }
+      if let lp = gesture as? LongPressGesture {
+        el.longPressAction = Element.LongPressConfig(
+          minimumDuration: lp.minimumDuration,
+          maximumDistance: Double(lp.maximumDistance),
+          onPressingChanged: lp.pressingChanged,
+          onEnded: { lp.ended?(DragGesture.Value(location: .zero, startLocation: .zero, translation: .zero, time: Date())) }
+        )
+      } else if let tap = gesture as? TapGesture, let cb = tap.tapCallback {
+        if tap.count == 2 {
+          el.doubleTapAction = cb
+        } else {
+          el.highPriorityAction = cb
+        }
+      } else {
+        el.highPriorityDragAction = { val, ended in
+          if ended { gesture.ended?(val) } else { gesture.changed?(val) }
+        }
+      }
+    }
   }
 
   public func dropDestination<T>(

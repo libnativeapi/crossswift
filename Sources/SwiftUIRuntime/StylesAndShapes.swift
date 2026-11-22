@@ -95,7 +95,15 @@ public struct Gradient: Equatable, Sendable {
 
 extension LinearGradient {
   nonisolated public init(gradient: Gradient, startPoint: UnitPoint, endPoint: UnitPoint) {
-    self.init(colors: gradient.sampledColors(), startPoint: startPoint, endPoint: endPoint)
+    let sorted = gradient.stops.sorted { $0.location < $1.location }
+    let data = LinearGradient.Data(
+      kind: .linear,
+      colors: sorted.map(\.color),
+      locations: sorted.map { Double($0.location) },
+      start: startPoint,
+      end: endPoint
+    )
+    self.init(data: data)
   }
 
   nonisolated public init(stops: [Gradient.Stop], startPoint: UnitPoint, endPoint: UnitPoint) {
@@ -103,7 +111,8 @@ extension LinearGradient {
   }
 }
 
-public struct RadialGradient: View, ShapeStyle, Sendable {
+public struct RadialGradient: View, _PrimitiveView, ShapeStyle, Sendable {
+  public typealias Body = Never
   public let gradient: Gradient
   public let center: UnitPoint
   public let startRadius: CGFloat
@@ -124,8 +133,14 @@ public struct RadialGradient: View, ShapeStyle, Sendable {
     self.init(gradient: Gradient(stops: stops), center: center, startRadius: startRadius, endRadius: endRadius)
   }
 
-  public var body: some View {
-    LinearGradient(gradient: gradient, startPoint: .topLeading, endPoint: .bottomTrailing)
+  public var body: Never { fatalError() }
+
+  func _makeElement(path: ViewPath) -> Element {
+    var p = NodeProps()
+    p.gradient = _resolveGradientData()
+    p.fillWidth = true
+    p.fillHeight = true
+    return Element(kind: .gradient, props: p)
   }
 
   public func _resolvePrimaryColor(in env: EnvironmentValues) -> Color {
@@ -133,25 +148,53 @@ public struct RadialGradient: View, ShapeStyle, Sendable {
   }
 
   public func _resolveGradientData() -> LinearGradient.Data? {
-    LinearGradient.Data(colors: gradient.sampledColors(), start: .topLeading, end: .bottomTrailing)
+    let sorted = gradient.stops.sorted { $0.location < $1.location }
+    return LinearGradient.Data(
+      kind: .radial,
+      colors: sorted.map(\.color),
+      locations: sorted.map { Double($0.location) },
+      start: center,
+      end: UnitPoint(x: Double(endRadius), y: Double(startRadius)),
+      startRadius: Double(startRadius),
+      endRadius: Double(endRadius)
+    )
   }
 }
 
-public struct AngularGradient: View, ShapeStyle, Sendable {
+public struct AngularGradient: View, _PrimitiveView, ShapeStyle, Sendable {
+  public typealias Body = Never
   public let gradient: Gradient
   public let center: UnitPoint
+  public let startAngle: Angle
+  public let endAngle: Angle
 
   nonisolated public init(gradient: Gradient, center: UnitPoint, startAngle: Angle = .zero, endAngle: Angle = .degrees(360)) {
     self.gradient = gradient
     self.center = center
+    self.startAngle = startAngle
+    self.endAngle = endAngle
   }
 
   nonisolated public init(colors: [Color], center: UnitPoint, startAngle: Angle = .zero, endAngle: Angle = .degrees(360)) {
     self.init(gradient: Gradient(colors: colors), center: center, startAngle: startAngle, endAngle: endAngle)
   }
 
-  public var body: some View {
-    LinearGradient(gradient: gradient, startPoint: .leading, endPoint: .trailing)
+  nonisolated public init(stops: [Gradient.Stop], center: UnitPoint, startAngle: Angle = .zero, endAngle: Angle = .degrees(360)) {
+    self.init(gradient: Gradient(stops: stops), center: center, startAngle: startAngle, endAngle: endAngle)
+  }
+
+  nonisolated public init(gradient: Gradient, center: UnitPoint, angle: Angle = .zero) {
+    self.init(gradient: gradient, center: center, startAngle: angle, endAngle: .degrees(angle.degrees + 360))
+  }
+
+  public var body: Never { fatalError() }
+
+  func _makeElement(path: ViewPath) -> Element {
+    var p = NodeProps()
+    p.gradient = _resolveGradientData()
+    p.fillWidth = true
+    p.fillHeight = true
+    return Element(kind: .gradient, props: p)
   }
 
   public func _resolvePrimaryColor(in env: EnvironmentValues) -> Color {
@@ -159,7 +202,16 @@ public struct AngularGradient: View, ShapeStyle, Sendable {
   }
 
   public func _resolveGradientData() -> LinearGradient.Data? {
-    LinearGradient.Data(colors: gradient.sampledColors(), start: .leading, end: .trailing)
+    let sorted = gradient.stops.sorted { $0.location < $1.location }
+    return LinearGradient.Data(
+      kind: .angular,
+      colors: sorted.map(\.color),
+      locations: sorted.map { Double($0.location) },
+      start: center,
+      end: .trailing,
+      startAngle: startAngle.degrees,
+      endAngle: endAngle.degrees
+    )
   }
 }
 
@@ -210,7 +262,17 @@ extension ShapeStyle {
       colorResolver: { env in self._resolvePrimaryColor(in: env).opacity(opacity) },
       gradientResolver: {
         guard let g = self._resolveGradientData() else { return nil }
-        return LinearGradient.Data(colors: g.colors.map { $0.opacity(opacity) }, start: g.start, end: g.end)
+        return LinearGradient.Data(
+          kind: g.kind,
+          colors: g.colors.map { $0.opacity(opacity) },
+          locations: g.locations,
+          start: g.start,
+          end: g.end,
+          startRadius: g.startRadius,
+          endRadius: g.endRadius,
+          startAngle: g.startAngle,
+          endAngle: g.endAngle
+        )
       }
     )
   }

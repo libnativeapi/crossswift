@@ -137,7 +137,12 @@ if buildDesktopNative {
     .target(
       name: "CSwiftUIWindows", dependencies: [.product(name: "CNativeAPI", package: "NativeAPI")],
       publicHeadersPath: "include",
-      linkerSettings: [.linkedLibrary("gdiplus"), .linkedLibrary("comctl32")]))
+      linkerSettings: [
+        .linkedLibrary("gdiplus"),
+        .linkedLibrary("comctl32"),
+        .linkedLibrary("dwrite"),
+        .linkedLibrary("d2d1"),
+      ]))
   targets.append(
     .target(
       name: "CSwiftUIWindowsTestSupport",

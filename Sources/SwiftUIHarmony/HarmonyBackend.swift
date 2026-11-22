@@ -241,6 +241,7 @@ public final class HarmonyBackend: RenderBackend {
     var borderWidth: Double
     var radius: Double
     var opacity: Double
+    var blurRadius: Double
     var clip: Bool
     var scrollIndicators: Bool
     var scrollDirection: String
@@ -315,7 +316,11 @@ public final class HarmonyBackend: RenderBackend {
       case .gradient:
         kind = "gradient"
         if let grad = props.gradient {
-          resolvedGradientKind = "linear"
+          switch grad.kind {
+          case .linear: resolvedGradientKind = "linear"
+          case .radial: resolvedGradientKind = "radial"
+          case .angular: resolvedGradientKind = "angular"
+          }
           resolvedGradient = grad.colors.compactMap { color($0) }
         }
       case .image:
@@ -379,7 +384,7 @@ public final class HarmonyBackend: RenderBackend {
       background: resolvedBg, border: resolvedBorder,
       borderWidth: resolvedBorderWidth,
       radius: number(min(props.cornerRadius, frame.width / 2, frame.height / 2)),
-      opacity: number(props.opacity), clip: props.clipped,
+      opacity: number(props.opacity), blurRadius: number(props.blurRadius), clip: props.clipped,
       scrollIndicators: props.showsScrollIndicators,
       scrollDirection: props.scrollAxes.contains(.horizontal)
         ? (props.scrollAxes.contains(.vertical) ? "both" : "horizontal") : "vertical",
