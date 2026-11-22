@@ -460,4 +460,76 @@ import Carbon
       }
     }
   #endif
+
+  // MARK: - Localization & UserDefaults Domain Helpers on Non-Darwin
+
+  extension Locale {
+    public static var crossSystemPreferredLanguages: [String] {
+      #if os(Windows)
+        if let raw = cak_preferred_ui_languages_newline() {
+          defer { cak_free(raw) }
+          let list = String(cString: raw)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+          if !list.isEmpty {
+            return list
+          }
+        }
+      #endif
+      return Locale.preferredLanguages
+    }
+  }
+
+  extension Bundle {
+    public static func crossPreferredLocalizations(
+      from possibleLocalizations: [String],
+      forPreferences preferencesArray: [String]?
+    ) -> [String] {
+      if XCStringsCatalog.shared.systemLanguagesProvider == nil {
+        XCStringsCatalog.shared.systemLanguagesProvider = { Locale.crossSystemPreferredLanguages }
+      }
+      return XCStringsCatalog.preferredLocalizations(
+        from: possibleLocalizations,
+        forPreferences: preferencesArray
+      )
+    }
+
+    public var crossPreferredLocalizations: [String] {
+      if XCStringsCatalog.shared.systemLanguagesProvider == nil {
+        XCStringsCatalog.shared.systemLanguagesProvider = { Locale.crossSystemPreferredLanguages }
+      }
+      if self == Bundle.main {
+        return [XCStringsCatalog.shared.activeLaunchLanguage]
+      }
+      let locs = self.localizations.isEmpty ? XCStringsCatalog.shared.localizations : self.localizations
+      return Self.crossPreferredLocalizations(from: locs, forPreferences: nil)
+    }
+  }
+
+  extension UserDefaults {
+    public func crossStringArray(inPersistentDomain domainName: String, forKey key: String) -> [String]? {
+      func extract(from domain: [String: Any]?) -> [String]? {
+        guard let raw = domain?[key] else { return nil }
+        if let arr = raw as? [String], !arr.isEmpty {
+          return arr
+        }
+        if let arr = raw as? [Any] {
+          let strs = arr.compactMap { $0 as? String }
+          if !strs.isEmpty { return strs }
+        }
+        return nil
+      }
+      if !domainName.isEmpty, let found = extract(from: persistentDomain(forName: domainName)) {
+        return found
+      }
+      let procName = ProcessInfo.processInfo.processName
+      if !procName.isEmpty, procName != domainName,
+        let found = extract(from: persistentDomain(forName: procName))
+      {
+        return found
+      }
+      return nil
+    }
+  }
 #endif

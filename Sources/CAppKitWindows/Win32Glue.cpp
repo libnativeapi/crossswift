@@ -2532,5 +2532,32 @@ void cak_single_instance_release(void) {
   }
 }
 
+char *cak_preferred_ui_languages_newline(void) {
+  std::string joined;
+  ULONG num_langs = 0;
+  ULONG buf_len = 0;
+  if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &num_langs, nullptr, &buf_len) && buf_len > 0) {
+    std::vector<wchar_t> buf(buf_len, L'\0');
+    if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &num_langs, buf.data(), &buf_len)) {
+      const wchar_t *p = buf.data();
+      while (*p) {
+        std::wstring item(p);
+        if (!item.empty()) {
+          if (!joined.empty()) joined.push_back('\n');
+          joined += ToUtf8(item);
+        }
+        p += item.size() + 1;
+      }
+    }
+  }
+  if (joined.empty()) {
+    wchar_t loc[LOCALE_NAME_MAX_LENGTH] = {};
+    if (GetUserDefaultLocaleName(loc, LOCALE_NAME_MAX_LENGTH) > 0 && loc[0]) {
+      joined = ToUtf8(loc);
+    }
+  }
+  return joined.empty() ? nullptr : DupString(joined);
+}
+
 } // extern "C"
 #endif

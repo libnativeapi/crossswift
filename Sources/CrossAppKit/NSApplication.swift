@@ -238,6 +238,22 @@ open class NSApplication: NSResponder, @unchecked Sendable {
   public func registerForRemoteNotifications() {}
   public func unregisterForRemoteNotifications() {}
 
+  nonisolated public static var _systemPreferredLanguages: [String] {
+    #if os(Windows)
+      if let raw = cak_preferred_ui_languages_newline() {
+        defer { cak_free(raw) }
+        let list = String(cString: raw)
+          .split(whereSeparator: \.isNewline)
+          .map(String.init)
+          .filter { !$0.isEmpty }
+        if !list.isEmpty {
+          return list
+        }
+      }
+    #endif
+    return Locale.preferredLanguages
+  }
+
   nonisolated internal static func _parseOpenURLs<S: Sequence>(from rawArgs: S) -> [URL]
   where S.Element == String {
     var urls: [URL] = []

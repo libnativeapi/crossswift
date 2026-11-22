@@ -9,7 +9,11 @@ public final class XCStringsCatalog: @unchecked Sendable {
   private let lock = NSLock()
   private var sourceLanguage: String = "en"
   private var entries: [String: Entry] = [:]
+  private var availableLanguages: [String] = []
   private var languageOverride: String?
+  private var latchedLaunchLanguage: String?
+  private var systemLanguagesHook: (@Sendable () -> [String])?
+  private var didAttemptAutoBootstrap = false
 
   struct PluralSet {
     var zero: String?
@@ -44,6 +48,102 @@ public final class XCStringsCatalog: @unchecked Sendable {
     }
   }
 
+  public var systemLanguagesProvider: (@Sendable () -> [String])? {
+    get {
+      lock.lock()
+      defer { lock.unlock() }
+      return systemLanguagesHook
+    }
+    set {
+      lock.lock()
+      systemLanguagesHook = newValue
+      lock.unlock()
+    }
+  }
+
+  public var localizations: [String] {
+    ensureBootstrappedIfNeeded()
+    lock.lock()
+    defer { lock.unlock() }
+    return availableLanguages.isEmpty ? [sourceLanguage] : availableLanguages
+  }
+
+  public var activeLaunchLanguage: String {
+    ensureBootstrappedIfNeeded()
+    lock.lock()
+    let override = languageOverride
+    let latched = latchedLaunchLanguage
+    let src = sourceLanguage
+    let locs = availableLanguages.isEmpty ? [sourceLanguage] : availableLanguages
+    let hook = systemLanguagesHook
+    lock.unlock()
+
+    if let override, !override.isEmpty {
+      return Self.preferredLocalizations(from: locs, forPreferences: [override]).first ?? override
+    }
+    if let latched, !latched.isEmpty {
+      return latched
+    }
+    let prefs = Self.effectiveUserPreferences(systemHook: hook)
+    return Self.preferredLocalizations(from: locs, forPreferences: prefs).first ?? src
+  }
+
+  public func latchLaunchLanguageIfNeeded() {
+    ensureBootstrappedIfNeeded()
+    lock.lock()
+    if latchedLaunchLanguage != nil {
+      lock.unlock()
+      return
+    }
+    let locs = availableLanguages.isEmpty ? [sourceLanguage] : availableLanguages
+    let src = sourceLanguage
+    let hook = systemLanguagesHook
+    lock.unlock()
+
+    let prefs = Self.effectiveUserPreferences(systemHook: hook)
+    let matched = Self.preferredLocalizations(from: locs, forPreferences: prefs).first ?? src
+    lock.lock()
+    if latchedLaunchLanguage == nil {
+      latchedLaunchLanguage = matched
+    }
+    lock.unlock()
+  }
+
+  private func ensureBootstrappedIfNeeded() {
+    guard self === XCStringsCatalog.shared else { return }
+    lock.lock()
+    let shouldTry = !didAttemptAutoBootstrap && entries.isEmpty
+    if shouldTry {
+      didAttemptAutoBootstrap = true
+    }
+    lock.unlock()
+    guard shouldTry else { return }
+
+    let fm = FileManager.default
+    let exeDir = URL(fileURLWithPath: CommandLine.arguments.first ?? ".").deletingLastPathComponent()
+    let cwd = URL(fileURLWithPath: fm.currentDirectoryPath)
+    var roots: [URL] = [exeDir, cwd]
+    var cursor = exeDir
+    for _ in 0..<4 {
+      cursor = cursor.deletingLastPathComponent()
+      roots.append(cursor)
+    }
+    for root in roots {
+      let infoCat = root.appendingPathComponent("Resources/InfoPlist.xcstrings")
+      let mainCat = root.appendingPathComponent("Resources/Localizable.xcstrings")
+      var loadedAny = false
+      if fm.fileExists(atPath: infoCat.path), let data = try? Data(contentsOf: infoCat) {
+        loadedAny = load(data: data, merge: true) || loadedAny
+      }
+      if fm.fileExists(atPath: mainCat.path), let data = try? Data(contentsOf: mainCat) {
+        loadedAny = load(data: data, merge: true) || loadedAny
+      }
+      if loadedAny {
+        break
+      }
+    }
+  }
+
   @discardableResult
   public func load(from url: URL) -> Bool {
     guard let data = try? Data(contentsOf: url) else {
@@ -62,6 +162,7 @@ public final class XCStringsCatalog: @unchecked Sendable {
     let srcLang = (root["sourceLanguage"] as? String) ?? "en"
     var parsed: [String: Entry] = [:]
     parsed.reserveCapacity(stringsDict.count)
+    var langSet: Set<String> = [srcLang]
 
     for (key, rawEntry) in stringsDict {
       guard let entryDict = rawEntry as? [String: Any],
@@ -72,6 +173,7 @@ public final class XCStringsCatalog: @unchecked Sendable {
       var entry = Entry()
       for (lang, rawLoc) in locsDict {
         guard let locDict = rawLoc as? [String: Any] else { continue }
+        langSet.insert(lang)
         var unit = LocalizationUnit()
         if let su = locDict["stringUnit"] as? [String: Any],
            let val = su["value"] as? String
@@ -107,8 +209,11 @@ public final class XCStringsCatalog: @unchecked Sendable {
       for (key, entry) in parsed {
         self.entries[key] = entry
       }
+      let combined = Set(self.availableLanguages).union(langSet)
+      self.availableLanguages = [srcLang] + combined.filter { $0 != srcLang }.sorted()
     } else {
       self.entries = parsed
+      self.availableLanguages = [srcLang] + langSet.filter { $0 != srcLang }.sorted()
     }
     lock.unlock()
     return true
@@ -125,24 +230,145 @@ public final class XCStringsCatalog: @unchecked Sendable {
     return Self.formatTemplate(template, arguments: arguments)
   }
 
+  private static func readAppleLanguages() -> [String]? {
+    if let arr = UserDefaults.standard.stringArray(forKey: "AppleLanguages"), !arr.isEmpty {
+      return arr
+    }
+    if let raw = UserDefaults.standard.object(forKey: "AppleLanguages") as? [Any] {
+      let strs = raw.compactMap { $0 as? String }
+      if !strs.isEmpty { return strs }
+    }
+    return nil
+  }
+
+  private static func effectiveUserPreferences(systemHook: (@Sendable () -> [String])?) -> [String] {
+    if let apple = readAppleLanguages(), !apple.isEmpty {
+      return apple
+    }
+    if let sys = systemHook?(), !sys.isEmpty {
+      return sys
+    }
+    return [Locale.current.identifier]
+  }
+
+  public static func preferredLocalizations(
+    from possibleLocalizations: [String],
+    forPreferences preferencesArray: [String]?
+  ) -> [String] {
+    guard !possibleLocalizations.isEmpty else { return [] }
+    let prefs: [String]
+    if let preferencesArray {
+      prefs = preferencesArray
+    } else {
+      XCStringsCatalog.shared.lock.lock()
+      let hook = XCStringsCatalog.shared.systemLanguagesHook
+      XCStringsCatalog.shared.lock.unlock()
+      prefs = effectiveUserPreferences(systemHook: hook)
+    }
+
+    var matches: [String] = []
+    for pref in prefs {
+      let forms = expandedLanguageForms(for: pref)
+      for form in forms {
+        for loc in possibleLocalizations {
+          let locNorm = loc.replacingOccurrences(of: "_", with: "-").lowercased()
+          let locPrimary = expandedLanguageForms(for: loc).first ?? locNorm
+          if locNorm == form || locPrimary == form {
+            if !matches.contains(loc) {
+              matches.append(loc)
+            }
+          }
+        }
+        if !matches.isEmpty {
+          break
+        }
+      }
+    }
+
+    if !matches.isEmpty {
+      return matches
+    }
+    if let en = possibleLocalizations.first(where: { $0.caseInsensitiveCompare("en") == .orderedSame }) {
+      return [en]
+    }
+    if let base = possibleLocalizations.first(where: { $0.caseInsensitiveCompare("Base") == .orderedSame }) {
+      return [base]
+    }
+    return [possibleLocalizations[0]]
+  }
+
+  private static func expandedLanguageForms(for identifier: String) -> [String] {
+    let clean = identifier
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: "_", with: "-")
+    guard !clean.isEmpty else { return [] }
+    let lower = clean.lowercased()
+    var forms: [String] = []
+    func add(_ s: String) {
+      if !s.isEmpty && !forms.contains(s) { forms.append(s) }
+    }
+    add(lower)
+    if lower.hasPrefix("zh-hans") || lower == "zh-cn" || lower == "zh-sg" || lower == "zh" {
+      add("zh-hans")
+      add("zh-cn")
+      add("zh")
+    } else if lower.hasPrefix("zh-hant") || lower == "zh-tw" || lower == "zh-hk" || lower == "zh-mo" {
+      add("zh-hant")
+      add("zh-tw")
+      add("zh-hk")
+      add("zh")
+    }
+    let parts = lower.split(separator: "-").map(String.init)
+    if parts.count >= 2 {
+      add("\(parts[0])-\(parts[1])")
+    }
+    if let base = parts.first {
+      add(base)
+      if base == "nb" { add("no") }
+      if base == "no" { add("nb") }
+    }
+    return forms
+  }
+
   private func lookupTemplate(
     key: String,
     defaultValue: String?,
     arguments: [LocalizationArg],
     locale: Locale?
   ) -> String {
+    ensureBootstrappedIfNeeded()
     lock.lock()
-    let lang = languageOverride
-      ?? locale?.identifier
-      ?? Locale.current.identifier
+    let override = languageOverride
+    let latched = latchedLaunchLanguage
     let entry = entries[key]
     let src = sourceLanguage
+    let hook = systemLanguagesHook
     lock.unlock()
 
     let fallback = defaultValue ?? key
     guard let entry else { return fallback }
 
-    let candidates = Self.languageCandidates(for: lang, sourceLanguage: src)
+    let preferences: [String]
+    if let locale, locale.identifier != Locale.current.identifier {
+      preferences = [locale.identifier]
+    } else if let override, !override.isEmpty {
+      preferences = [override]
+    } else if let latched, !latched.isEmpty {
+      preferences = [latched]
+    } else {
+      preferences = Self.effectiveUserPreferences(systemHook: hook)
+    }
+
+    var candidates: [String] = []
+    for pref in preferences {
+      for c in Self.languageCandidates(for: pref, sourceLanguage: src) where !candidates.contains(c) {
+        candidates.append(c)
+      }
+    }
+    if !candidates.contains(src) {
+      candidates.append(src)
+    }
+
     for candidate in candidates {
       if let unit = entry.localizations[candidate] {
         if let plural = unit.plural {
@@ -160,14 +386,17 @@ public final class XCStringsCatalog: @unchecked Sendable {
   private static func languageCandidates(for identifier: String, sourceLanguage: String) -> [String] {
     let normalized = identifier.replacingOccurrences(of: "_", with: "-")
     var list: [String] = [normalized]
-    if normalized.lowercased().hasPrefix("zh-hans") || normalized.lowercased() == "zh-cn" {
-      list.append("zh-Hans")
-    } else if normalized.lowercased().hasPrefix("zh-hant") || normalized.lowercased() == "zh-tw" || normalized.lowercased() == "zh-hk" {
-      list.append("zh-Hant")
+    let lower = normalized.lowercased()
+    if lower.hasPrefix("zh-hans") || lower == "zh-cn" || lower == "zh-sg" || lower == "zh" {
+      if !list.contains("zh-Hans") { list.append("zh-Hans") }
+    } else if lower.hasPrefix("zh-hant") || lower == "zh-tw" || lower == "zh-hk" || lower == "zh-mo" {
+      if !list.contains("zh-Hant") { list.append("zh-Hant") }
     }
     if let dash = normalized.firstIndex(of: "-") {
       let base = String(normalized[..<dash])
       if !list.contains(base) { list.append(base) }
+      if base.lowercased() == "nb" && !list.contains("no") { list.append("no") }
+      if base.lowercased() == "no" && !list.contains("nb") { list.append("nb") }
     }
     if !list.contains(sourceLanguage) {
       list.append(sourceLanguage)

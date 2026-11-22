@@ -1134,6 +1134,10 @@ internal func installAssetResolversOnce() {
       candidates.append(cursor)
     }
     var searchPaths = CrossAppKit.NSImage.resourceSearchPaths
+    var didLoadStringsCatalog = false
+    if XCStringsCatalog.shared.systemLanguagesProvider == nil {
+      XCStringsCatalog.shared.systemLanguagesProvider = { NSApplication._systemPreferredLanguages }
+    }
     for root in candidates {
       var bases: [URL] = [root]
       if let children = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
@@ -1156,12 +1160,23 @@ internal func installAssetResolversOnce() {
         if hasCatalog, !searchPaths.contains(base.path) {
           searchPaths.append(base.path)
         }
-        let xcstrings = base.appendingPathComponent("Resources/Localizable.xcstrings")
-        if fm.fileExists(atPath: xcstrings.path) {
-          XCStringsCatalog.shared.load(from: xcstrings)
+        if !didLoadStringsCatalog {
+          let infoStrings = base.appendingPathComponent("Resources/InfoPlist.xcstrings")
+          let mainStrings = base.appendingPathComponent("Resources/Localizable.xcstrings")
+          var loadedHere = false
+          if fm.fileExists(atPath: infoStrings.path), let data = try? Data(contentsOf: infoStrings) {
+            loadedHere = XCStringsCatalog.shared.load(data: data, merge: true) || loadedHere
+          }
+          if fm.fileExists(atPath: mainStrings.path), let data = try? Data(contentsOf: mainStrings) {
+            loadedHere = XCStringsCatalog.shared.load(data: data, merge: true) || loadedHere
+          }
+          if loadedHere {
+            didLoadStringsCatalog = true
+          }
         }
       }
     }
+    XCStringsCatalog.shared.latchLaunchLanguageIfNeeded()
     CrossAppKit.NSImage.resourceSearchPaths = searchPaths
   }
 #endif

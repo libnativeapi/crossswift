@@ -200,6 +200,7 @@ int cak_single_instance_acquire(
     cak_single_instance_callback callback
 );
 void cak_single_instance_release(void);
+char *cak_preferred_ui_languages_newline(void);
 
 #ifdef __cplusplus
 }
