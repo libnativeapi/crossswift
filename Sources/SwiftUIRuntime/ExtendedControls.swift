@@ -1,6 +1,6 @@
 import Foundation
 
-#if canImport(FoundationNetworking)
+#if canImport(FoundationNetworking) && !CROSS_SWIFTUI_HARMONY && !os(Android)
   import FoundationNetworking
 #endif
 #if (os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)) && canImport(CoreGraphics)
@@ -853,8 +853,8 @@ public struct AsyncImage<Content: View>: View {
           phase = .success(Image(cached))
           return
         }
-        #if os(WASI)
-          // Browsers load remote URLs directly through <img src="...">.
+        #if os(WASI) || CROSS_SWIFTUI_HARMONY || os(Android)
+          // Browsers, ArkUI Image(), and Android hosts load remote URLs directly without libcurl/OpenSSL.
           phase = .success(Image(url.absoluteString))
         #else
           do {

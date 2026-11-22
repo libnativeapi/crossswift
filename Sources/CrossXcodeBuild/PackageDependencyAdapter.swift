@@ -597,7 +597,19 @@ public enum PackageDependencyAdapter {
         import Foundation
 
         extension Foundation.Bundle {
-          static var module: Foundation.Bundle { .main }
+          static var module: Foundation.Bundle {
+            #if CROSS_SWIFTUI_HARMONY || os(Android)
+              for path in [
+                FileManager.default.currentDirectoryPath,
+                FileManager.default.temporaryDirectory.path,
+                "/data/storage/el1/bundle",
+                "/",
+              ] {
+                if let bundle = Foundation.Bundle(path: path) { return bundle }
+              }
+            #endif
+            return .main
+          }
         }
         #endif
         """
