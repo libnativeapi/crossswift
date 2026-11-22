@@ -387,6 +387,9 @@ open class NSImage: NSObject, @unchecked Sendable {
   /// Registered by CrossSwiftUI to rasterize `NSImage(size:flipped:drawingHandler:)` to PNG.
   nonisolated(unsafe) public static var offscreenRenderer: (@Sendable (NSSize, Bool, [_OffscreenDrawOp]) -> Data?)?
 
+  /// Registered by CrossSwiftUI to rasterize `.svg`, `.pdf`, and `sf://` vector assets to PNG.
+  nonisolated(unsafe) public static var vectorRasterizer: (@Sendable (String, NSSize) -> Data?)?
+
   /// Optional resource directory paths searched by `NSImage(named:)` for `.imageset` / PNG / SVG files.
   nonisolated(unsafe) public static var resourceSearchPaths: [String] = []
 
@@ -453,13 +456,30 @@ open class NSImage: NSObject, @unchecked Sendable {
   public init?(contentsOfFile fileName: String) {
     guard FileManager.default.fileExists(atPath: fileName) else { return nil }
     self.filePath = fileName
-    self.imageData = try? Data(contentsOf: URL(fileURLWithPath: fileName))
+    let lower = fileName.lowercased()
+    let isVectorFile = lower.hasSuffix(".svg") || lower.hasSuffix(".pdf")
+    if !isVectorFile {
+      self.imageData = try? Data(contentsOf: URL(fileURLWithPath: fileName))
+    }
     var w: Int32 = 0, h: Int32 = 0
     #if os(Windows)
-      _ = cak_image_file_dimensions(fileName, &w, &h)
+      if !isVectorFile {
+        _ = cak_image_file_dimensions(fileName, &w, &h)
+      }
     #endif
     if w <= 0 || h <= 0 { w = 32; h = 32 }
     self.size = NSSize(width: CGFloat(w), height: CGFloat(h))
+    let parentURL = URL(fileURLWithPath: fileName).deletingLastPathComponent()
+    if parentURL.pathExtension.lowercased() == "imageset" {
+      let contentsURL = parentURL.appendingPathComponent("Contents.json")
+      if let cData = try? Data(contentsOf: contentsURL),
+         let json = try? JSONSerialization.jsonObject(with: cData) as? [String: Any],
+         let props = json["properties"] as? [String: Any],
+         (props["template-rendering-intent"] as? String) == "template"
+      {
+        self.isTemplate = true
+      }
+    }
     super.init()
     if let data = imageData, let rep = NSBitmapImageRep(data: data) {
       self.representations = [rep]
@@ -686,7 +706,41 @@ open class NSImage: NSObject, @unchecked Sendable {
   }
 
   #if !os(macOS)
+    private var cachedRasterizedPNG: Data?
+
     public func toNativeImage() -> NativeAPI.Image? {
+      if let cached = cachedRasterizedPNG {
+        return NativeAPI.Image.fromBase64(cached.base64EncodedString())
+      }
+      if let sym = symbolName {
+        let targetSide = max(32.0, max(size.width, size.height))
+        if let png = Self.vectorRasterizer?(
+          "sf://" + sym, NSSize(width: targetSide, height: targetSide)),
+          !png.isEmpty
+        {
+          cachedRasterizedPNG = png
+          return NativeAPI.Image.fromBase64(png.base64EncodedString())
+        }
+      }
+      if let fp = filePath {
+        let lower = fp.lowercased()
+        if lower.hasSuffix(".svg") || lower.hasSuffix(".pdf") {
+          let targetSide = max(32.0, max(size.width, size.height))
+          if let png = Self.vectorRasterizer?(
+            fp, NSSize(width: targetSide, height: targetSide)),
+            !png.isEmpty
+          {
+            cachedRasterizedPNG = png
+            return NativeAPI.Image.fromBase64(png.base64EncodedString())
+          }
+          #if os(Linux)
+            if lower.hasSuffix(".svg"), FileManager.default.fileExists(atPath: fp) {
+              return NativeAPI.Image.fromFile(fp)
+            }
+          #endif
+          return nil
+        }
+      }
       if let path = ensureTemporaryFilePath() {
         return NativeAPI.Image.fromFile(path)
       }

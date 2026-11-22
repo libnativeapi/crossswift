@@ -319,6 +319,42 @@ final class WindowsDrawingTests: XCTestCase {
 
     uiWindow.isHidden = true
   }
+
+  @MainActor
+  func testTemplateSVGImagesetAndSymbolStatusItemIconOnWindows() async throws {
+    _ = NSHostingView(rootView: SwiftUIRuntime.EmptyView())
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory.appendingPathComponent("CrossTraySVG-\(UUID().uuidString)")
+    let imageset = tmp.appendingPathComponent("Assets.xcassets/MenuBarIcon.imageset")
+    try fm.createDirectory(at: imageset, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: tmp) }
+
+    try """
+    {
+      "images": [{ "filename": "thunder.svg", "idiom": "universal" }],
+      "properties": { "template-rendering-intent": "template" }
+    }
+    """.write(to: imageset.appendingPathComponent("Contents.json"), atomically: true, encoding: .utf8)
+    let svgURL = imageset.appendingPathComponent("thunder.svg")
+    try """
+    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="14" viewBox="4.6 1.7 14.8 20.6"><path d="M18.82 9.18A2 2 0 0 0 17 8h-1.81l1.33-3.26a2 2 0 0 0-.19-1.84 2.06 2.06 0 0 0-1.71-.9h-4.34a2 2 0 0 0-1.91 1.27l-3.23 8a2 2 0 0 0 .2 1.83 2.06 2.06 0 0 0 1.71.9h2.76L8 20.74a1 1 0 0 0 .5 1.15A1.1 1.1 0 0 0 9 22a1 1 0 0 0 .76-.35l8.8-10.37a2 2 0 0 0 .26-2.1"/></svg>
+    """.write(to: svgURL, atomically: true, encoding: .utf8)
+
+    let nsImg = try XCTUnwrap(CrossAppKit.NSImage(contentsOfFile: svgURL.path))
+    XCTAssertTrue(nsImg.isTemplate)
+    XCTAssertNotNil(nsImg.toNativeImage())
+
+    let item = CrossAppKit.NSStatusBar.system.statusItem(withLength: CrossAppKit.NSStatusItem.variableLength)
+    defer { CrossAppKit.NSStatusBar.system.removeStatusItem(item) }
+    item.button?.image = nsImg
+    XCTAssertEqual(item.nativeTrayIcon?.isIconTemplate, true)
+    XCTAssertNotNil(item.nativeTrayIcon?.icon)
+
+    let symImg = try XCTUnwrap(CrossAppKit.NSImage(systemSymbolName: "calendar", accessibilityDescription: nil))
+    XCTAssertTrue(symImg.isTemplate)
+    item.button?.image = symImg
+    XCTAssertNotNil(item.nativeTrayIcon?.icon)
+  }
 }
 
 @Observable

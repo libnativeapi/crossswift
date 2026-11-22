@@ -272,6 +272,25 @@ open class NSMenu: NSObject {
 
 open class NSStatusBarButton: NSButton {
   public var appearsDisabled: Bool = false
+  @MainActor internal weak var ownerStatusItem: NSStatusItem?
+
+  public override var image: NSImage? {
+    didSet {
+      MainActor.assumeIsolated { ownerStatusItem?.syncButtonAppearance() }
+    }
+  }
+
+  public override var title: String {
+    didSet {
+      MainActor.assumeIsolated { ownerStatusItem?.syncButtonAppearance() }
+    }
+  }
+
+  public override var toolTip: String? {
+    didSet {
+      MainActor.assumeIsolated { ownerStatusItem?.syncButtonAppearance() }
+    }
+  }
 
   public override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -335,6 +354,7 @@ open class NSStatusItem: NSObject {
   public init(length: CGFloat) {
     self.length = length
     super.init()
+    self.button?.ownerStatusItem = self
     #if !os(macOS)
       if let tray = NativeAPI.TrayIcon.create() {
         self.nativeTrayIcon = tray
@@ -379,7 +399,8 @@ open class NSStatusItem: NSObject {
 
   public func syncButtonAppearance() {
     #if !os(macOS)
-      if let img = button?.image?.toNativeImage() {
+      if let nsImg = button?.image, let img = nsImg.toNativeImage() {
+        nativeTrayIcon?.setIconTemplate(nsImg.isTemplate)
         nativeTrayIcon?.setIcon(img)
       }
       if let tip = button?.toolTip, !tip.isEmpty {

@@ -1126,6 +1126,54 @@ internal func installAssetResolversOnce() {
       return data
     }
     CrossUIKit.UIImage.offscreenRenderer = CrossAppKit.NSImage.offscreenRenderer
+    CrossAppKit.NSImage.vectorRasterizer = { spec, size in
+      guard let vec = VectorImage.load(spec), vec.bounds.width > 0, vec.bounds.height > 0 else {
+        return nil
+      }
+      let pxSide = Int32(max(64, Int(ceil(Double(max(size.width, size.height)) * 2.0))))
+      guard let canvas = sui_offscreen_create(pxSide, pxSide) else { return nil }
+      let box = Double(pxSide)
+      let pad = box * 0.08
+      let avail = max(1.0, box - pad * 2.0)
+      let s = min(avail / vec.bounds.width, avail / vec.bounds.height)
+      let tx = pad + (avail - vec.bounds.width * s) * 0.5 - vec.bounds.minX * s
+      let ty = pad + (avail - vec.bounds.height * s) * 0.5 - vec.bounds.minY * s
+      func packARGB(_ c: SwiftUIRuntime.Color) -> UInt32 {
+        func byte(_ v: Double) -> UInt32 { UInt32(max(0, min(255, (v * 255).rounded()))) }
+        return (byte(c.opacity) << 24) | (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
+      }
+      for layer in vec.layers {
+        let tp = layer.path.transformed(x: tx, y: ty, sx: s, sy: s)
+        let fillARGB: UInt32
+        if let f = layer.fill, f.opacity > 0 {
+          fillARGB = packARGB(f)
+        } else if layer.stroke == nil && vec.strokeWidth == 0 {
+          fillARGB = 0xFF000000
+        } else {
+          fillARGB = 0
+        }
+        let strokeARGB: UInt32
+        let strokeW: Double
+        if let st = layer.stroke, st.opacity > 0 {
+          strokeARGB = packARGB(st)
+          strokeW = max(1.5, layer.strokeWidth * s)
+        } else if vec.strokeWidth > 0 && fillARGB == 0 {
+          strokeARGB = 0xFF000000
+          strokeW = max(1.5, vec.strokeWidth * s)
+        } else {
+          strokeARGB = 0
+          strokeW = 0
+        }
+        tp.commands.withUnsafeBufferPointer { buf in
+          sui_offscreen_path(canvas, buf.baseAddress, Int32(buf.count), fillARGB, strokeARGB, strokeW)
+        }
+      }
+      var outLen: Int32 = 0
+      guard let ptr = sui_offscreen_finish_png(canvas, &outLen), outLen > 0 else { return nil }
+      let data = Data(bytes: ptr, count: Int(outLen))
+      sui_free_bytes(ptr)
+      return data
+    }
   #endif
 }
 

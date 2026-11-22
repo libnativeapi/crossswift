@@ -429,8 +429,13 @@ private final class MenuBarExtraHost<A: App>: NSMenuDelegate {
 
     // Evaluate label view to extract icon or text
     let labelTree = evaluateDetachedTree(extra._makeLabelView())
-    if let imgPath = findFirstImagePath(in: labelTree), !imgPath.isEmpty, !imgPath.hasPrefix("sf://") {
-      if let nsImg = NSImage(contentsOfFile: imgPath) {
+    if let imgPath = findFirstImagePath(in: labelTree), !imgPath.isEmpty {
+      if imgPath.hasPrefix("sf://") {
+        let sym = String(imgPath.dropFirst(5))
+        if let nsImg = NSImage(systemSymbolName: sym, accessibilityDescription: nil) {
+          item.button?.image = nsImg
+        }
+      } else if let nsImg = NSImage(contentsOfFile: imgPath) {
         item.button?.image = nsImg
       }
     }
