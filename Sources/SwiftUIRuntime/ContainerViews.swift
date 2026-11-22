@@ -117,7 +117,13 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
           || itemID == viewport.targetID
         runningY += estH
         if inWindow {
-          var child = _render(content(item), path: path.appending(id: itemID))
+          let itemView: Content
+          if let graph = EvaluationGraph.active {
+            itemView = graph.trackObservation { content(item) }
+          } else {
+            itemView = content(item)
+          }
+          var child = _render(itemView, path: path.appending(id: itemID))
           child.explicitID = itemID
           children.append(child)
         } else {
@@ -133,8 +139,15 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
     return Element(
       kind: .fragment,
       children: data.map { item in
-        var child = _render(content(item), path: path.appending(id: AnyHashable(item[keyPath: id])))
-        child.explicitID = AnyHashable(item[keyPath: id])
+        let itemID = AnyHashable(item[keyPath: id])
+        let itemView: Content
+        if let graph = EvaluationGraph.active {
+          itemView = graph.trackObservation { content(item) }
+        } else {
+          itemView = content(item)
+        }
+        var child = _render(itemView, path: path.appending(id: itemID))
+        child.explicitID = itemID
         return child
       })
   }
@@ -336,8 +349,14 @@ public struct GeometryReader<Content: View>: View, _PrimitiveView {
       let snapshot =
         GeometrySnapshot.active
         ?? GeometrySnapshot(rect: rect, namedOrigins: GeometryContext.current)
-      return normalize(
-        _render(content(GeometryProxy(snapshot: snapshot)), path: path.appending(index: 0)))
+      let proxy = GeometryProxy(snapshot: snapshot)
+      let contentView: Content
+      if let graph = EvaluationGraph.active {
+        contentView = graph.trackObservation { content(proxy) }
+      } else {
+        contentView = content(proxy)
+      }
+      return _render(contentView, path: path.appending(index: 0))
     }
     return result
   }

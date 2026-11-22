@@ -10,6 +10,7 @@
 using std::max;
 using std::min;
 #include <cmath>
+#include <cstring>
 #include <gdiplus.h>
 #include <memory>
 #include <string>
@@ -89,25 +90,36 @@ struct EditHook {
 };
 struct Framebuffer {
   UINT width, height;
+  UINT capacity_width, capacity_height;
+  UINT stride_pixels;
   HDC dc = CreateCompatibleDC(nullptr);
   HBITMAP dib = nullptr;
   HGDIOBJ previous = nullptr;
   uint32_t *pixels = nullptr;
   std::unique_ptr<Bitmap> bitmap;
-  Framebuffer(UINT w, UINT h) : width(w), height(h) {
+  Framebuffer(UINT w, UINT h, bool round_capacity = false)
+      : width(w), height(h),
+        capacity_width(round_capacity ? ((w + 255u) & ~255u) : w),
+        capacity_height(round_capacity ? ((h + 255u) & ~255u) : h),
+        stride_pixels(capacity_width) {
     void *raw_pixels = nullptr;
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = LONG(w);
-    info.bmiHeader.biHeight = -LONG(h);
+    info.bmiHeader.biWidth = LONG(capacity_width);
+    info.bmiHeader.biHeight = -LONG(capacity_height);
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
     dib = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &raw_pixels, nullptr, 0);
     pixels = static_cast<uint32_t *>(raw_pixels);
     previous = SelectObject(dc, dib);
-    bitmap = std::make_unique<Bitmap>(w, h, INT(w * 4), PixelFormat32bppPARGB,
+    bitmap = std::make_unique<Bitmap>(capacity_width, capacity_height,
+                                      INT(capacity_width * 4), PixelFormat32bppPARGB,
                                       static_cast<BYTE *>(raw_pixels));
+  }
+  bool CanReuseFor(UINT w, UINT h) const {
+    return w <= capacity_width && h <= capacity_height &&
+           w * 2 >= capacity_width && h * 2 >= capacity_height;
   }
   ~Framebuffer() {
     bitmap.reset();
@@ -116,19 +128,49 @@ struct Framebuffer {
     DeleteDC(dc);
   }
 };
+struct FontKey {
+  std::wstring family;
+  uint32_t size_bits = 0;
+  bool bold = false;
+  bool operator==(const FontKey &other) const {
+    return size_bits == other.size_bits && bold == other.bold &&
+           family == other.family;
+  }
+};
+struct FontKeyHash {
+  size_t operator()(const FontKey &k) const noexcept {
+    size_t h = std::hash<std::wstring>{}(k.family);
+    h ^= std::hash<uint32_t>{}(k.size_bits) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= size_t(k.bold ? 1 : 0) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    return h;
+  }
+};
+inline uint32_t FloatBits(float v) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &v, sizeof(bits));
+  return bits;
+}
 struct TextFont {
   FontFamily family;
   Font font;
   float size;
   UINT cached_dpi = 0;
   float cached_center = 0;
-  TextFont(const Command &c)
-      : family(c.family.c_str()),
+  float cached_line_height = -1.f;
+  TextFont(const std::wstring &family_name, float font_size, bool bold)
+      : family(family_name.c_str()),
         font(family.GetLastStatus() == Ok ? &family
                                           : FontFamily::GenericSansSerif(),
-             c.size, c.weight >= 600 ? FontStyleBold : FontStyleRegular,
-             UnitPixel),
-        size(c.size) {}
+             font_size, bold ? FontStyleBold : FontStyleRegular, UnitPixel),
+        size(font_size) {}
+  TextFont(const Command &c)
+      : TextFont(c.family, c.size, c.weight >= 600.f) {}
+  float LineHeight(const Graphics &g) {
+    if (cached_line_height < 0.f) {
+      cached_line_height = font.GetHeight(&g);
+    }
+    return cached_line_height;
+  }
   float OpticalCenter(UINT dpi, float line_height) {
     if (dpi == 0)
       dpi = 96;
@@ -218,6 +260,7 @@ struct Surface {
   std::unique_ptr<Framebuffer> buffer;
   bool buffer_dirty = true;
   RECT damage{};
+  std::vector<RECT> damage_rects;
   UINT buffer_dpi = 0;
   std::vector<ControlContext> control_contexts;
   std::unordered_map<int64_t, ControlGroup> control_groups;
@@ -230,7 +273,9 @@ struct Surface {
   std::unordered_map<HWND, EditHook> edits;
   std::unordered_set<HWND> custom_views;
   uint32_t background_argb = 0xFFFFFFFFu;
-  std::unordered_map<std::wstring, std::unique_ptr<TextFont>> fonts;
+  std::unordered_map<FontKey, std::unique_ptr<TextFont>, FontKeyHash> fonts;
+  std::unordered_map<std::wstring, std::unique_ptr<Image>> images;
+  std::unordered_map<std::string, std::wstring> wide_families;
   std::unordered_map<HWND, native_view_t> native_views;
   std::unordered_map<HWND, HWND> native_parents;
   bool updating_views = false;
@@ -550,6 +595,7 @@ void UpdateSurfaceWindowShadow(Surface *s) {
   }
   const int bw = int(s->buffer->width);
   const int bh = int(s->buffer->height);
+  const size_t bstride = size_t(s->buffer->stride_pixels);
   if (int64_t(bw) * bh > 8000000) {
     if (s->defer_commit) {
       s->pending_shadow.Reset();
@@ -567,7 +613,7 @@ void UpdateSurfaceWindowShadow(Surface *s) {
   hash = (hash ^ uint64_t(s->window_shadow_dark ? 1 : 0)) * 1099511628211ULL;
   bool any_opaque = false;
   for (int y = 0; y < bh; y += 2) {
-    const uint32_t *row = s->buffer->pixels + size_t(y) * bw;
+    const uint32_t *row = s->buffer->pixels + size_t(y) * bstride;
     uint64_t bits = 0;
     for (int x = 0; x < bw; x += 4) {
       const uint32_t a = row[x] >> 24;
@@ -619,7 +665,7 @@ void UpdateSurfaceWindowShadow(Surface *s) {
   uint16_t *tmp_ptr = tmp_grid.data();
 
   for (int y = 0; y < bh; y += 2) {
-    const uint32_t *row = s->buffer->pixels + size_t(y) * bw;
+    const uint32_t *row = s->buffer->pixels + size_t(y) * bstride;
     const int fy = (y + margin + dy_far) / 2;
     const int ny = (y + margin + dy_near) / 2;
     for (int x = 0; x < bw; x += 2) {
@@ -666,7 +712,7 @@ void UpdateSurfaceWindowShadow(Surface *s) {
   for (int py = 0; py < sh; ++py) {
     uint32_t *dst_row = out + size_t(py) * sw;
     const int by = py - margin;
-    const uint32_t *src_row = (by >= 0 && by < bh) ? (s->buffer->pixels + size_t(by) * bw) : nullptr;
+    const uint32_t *src_row = (by >= 0 && by < bh) ? (s->buffer->pixels + size_t(by) * bstride) : nullptr;
     const int gy0 = min(dh - 1, py >> 1);
     const int gy1 = min(dh - 1, gy0 + (py & 1));
     const uint16_t *far_r0 = far_ptr + size_t(gy0) * dw;
@@ -784,33 +830,51 @@ void RoundedPath(GraphicsPath &path, RectF r, float radius) {
   path.AddArc(r.X, r.GetBottom() - d, d, d, 90, 90);
   path.CloseFigure();
 }
-void DrawTextCommand(Surface *s, Graphics &g, const Command &c) {
-  const auto key = c.family + L"\n" + std::to_wstring(c.size) + L":" +
-                   (c.weight >= 600 ? L"bold" : L"regular");
+const StringFormat &TypographicFormat() {
+  static const StringFormat *format = [] {
+    auto *f = new StringFormat(StringFormat::GenericTypographic());
+    f->SetFormatFlags(StringFormatFlagsNoWrap |
+                      StringFormatFlagsMeasureTrailingSpaces);
+    return f;
+  }();
+  return *format;
+}
+void DrawTextCommand(Surface *s, Graphics &g, SolidBrush &brush,
+                     const Command &c) {
+  FontKey key{c.family, FloatBits(c.size), c.weight >= 600.f};
   auto found = s->fonts.find(key);
   if (found == s->fonts.end()) {
     if (s->fonts.size() >= 256)
       s->fonts.clear();
-    found = s->fonts.emplace(key, std::make_unique<TextFont>(c)).first;
+    found = s->fonts.emplace(std::move(key), std::make_unique<TextFont>(c)).first;
   }
   auto &font = found->second->font;
-  StringFormat format(StringFormat::GenericTypographic());
-  format.SetFormatFlags(StringFormatFlagsNoWrap |
-                        StringFormatFlagsMeasureTrailingSpaces);
-  SolidBrush brush(Color(c.fill));
+  const auto &format = TypographicFormat();
+  brush.SetColor(Color(c.fill));
   // Explicit newlines and line spacing, without inventing a wrapping policy.
-  const float line_height = font.GetHeight(&g);
-  const float step = line_height + c.line_spacing;
-  size_t start = 0;
-  int lines = 1 + int(std::count(c.text.begin(), c.text.end(), L'\n'));
+  const float line_height = found->second->LineHeight(g);
   const float center = found->second->OpticalCenter(s->buffer_dpi, line_height);
+  const size_t first_nl = c.text.find(L'\n');
+  if (first_nl == std::wstring::npos) {
+    const float y = c.rect.Y + c.rect.Height * 0.5f - center;
+    g.DrawString(c.text.c_str(), int(c.text.size()), &font,
+                 PointF(c.rect.X, y), &format, &brush);
+    return;
+  }
+  const float step = line_height + c.line_spacing;
+  int lines = 2;
+  for (size_t pos = first_nl + 1; (pos = c.text.find(L'\n', pos)) != std::wstring::npos;
+       ++pos) {
+    ++lines;
+  }
   float y =
       c.rect.Y + c.rect.Height * 0.5f - center - step * (lines - 1) * 0.5f;
+  size_t start = 0;
   while (start <= c.text.size()) {
-    auto end = c.text.find(L'\n', start);
-    auto line =
-        c.text.substr(start, end == std::wstring::npos ? end : end - start);
-    g.DrawString(line.c_str(), int(line.size()), &font, PointF(c.rect.X, y),
+    const size_t end = c.text.find(L'\n', start);
+    const size_t len =
+        (end == std::wstring::npos) ? (c.text.size() - start) : (end - start);
+    g.DrawString(c.text.c_str() + start, int(len), &font, PointF(c.rect.X, y),
                  &format, &brush);
     if (end == std::wstring::npos)
       break;
@@ -884,8 +948,14 @@ void RenderFrame(Surface *s) {
     return;
   FrameTrace::Span raster_trace(s->trace, 6, 0, s->host);
   const double started = ClockMilliseconds();
-  if (!same_size)
-    s->buffer = std::make_unique<Framebuffer>(width, height);
+  if (!same_size) {
+    if (s->buffer && s->buffer->CanReuseFor(width, height)) {
+      s->buffer->width = width;
+      s->buffer->height = height;
+    } else {
+      s->buffer = std::make_unique<Framebuffer>(width, height, true);
+    }
+  }
   const bool full = !same_size || s->buffer_dpi != dpi || s->offset_changed_since_paint;
   s->offset_changed_since_paint = false;
   s->buffer_dpi = dpi;
@@ -908,24 +978,61 @@ void RenderFrame(Surface *s) {
   }
   s->scroll_copy = {};
   // Complete GDI access before opening GDI+ over the same DIB storage.
+  if (full && s->buffer->pixels) {
+    const uint32_t bg = s->background_argb;
+    const uint32_t bg_a = bg >> 24;
+    const uint32_t bg_premul =
+        bg_a == 255u ? bg
+        : bg_a == 0u ? 0u
+        : ((bg_a << 24) |
+           ((((((bg >> 16) & 255u) * bg_a + 127u) / 255u) & 255u) << 16) |
+           ((((((bg >> 8) & 255u) * bg_a + 127u) / 255u) & 255u) << 8) |
+           ((((bg & 255u) * bg_a + 127u) / 255u) & 255u));
+    const size_t stride = size_t(s->buffer->stride_pixels);
+    for (UINT y = 0; y < height; ++y) {
+      std::fill_n(s->buffer->pixels + size_t(y) * stride, width, bg_premul);
+    }
+  }
   Graphics g(s->buffer->bitmap.get());
+  RECT dirty_px = s->damage;
+  std::vector<RECT> active_damage_rects;
   if (!full) {
-    Region dirty(Rect(s->damage.left, s->damage.top,
-                      s->damage.right - s->damage.left,
-                      s->damage.bottom - s->damage.top));
+    Region dirty;
+    dirty.MakeEmpty();
+    if (!s->damage_rects.empty()) {
+      for (const auto &dr : s->damage_rects) {
+        if (!IsRectEmpty(&dr)) {
+          dirty.Union(Rect(dr.left, dr.top, dr.right - dr.left, dr.bottom - dr.top));
+          active_damage_rects.push_back(dr);
+        }
+      }
+    } else if (!IsRectEmpty(&s->damage)) {
+      dirty.Union(Rect(s->damage.left, s->damage.top,
+                       s->damage.right - s->damage.left,
+                       s->damage.bottom - s->damage.top));
+      active_damage_rects.push_back(s->damage);
+    }
     if (!IsRectEmpty(&copied))
       dirty.Exclude(Rect(copied.left, copied.top, copied.right - copied.left,
                          copied.bottom - copied.top));
-    if (!IsRectEmpty(&repaint))
+    if (!IsRectEmpty(&repaint)) {
       dirty.Union(Rect(repaint.left, repaint.top, repaint.right - repaint.left,
                        repaint.bottom - repaint.top));
+      UnionRect(&dirty_px, &dirty_px, &repaint);
+      active_damage_rects.push_back(repaint);
+    }
     g.SetClip(&dirty);
   }
-  g.SetCompositingMode(CompositingModeSourceCopy);
-  SolidBrush clear(Color(s->background_argb));
-  g.FillRectangle(&clear, 0, 0, INT(width), INT(height));
-  g.SetCompositingMode(CompositingModeSourceOver);
+  SolidBrush solid_brush(Color(s->background_argb));
+  if (!full) {
+    g.SetCompositingMode(CompositingModeSourceCopy);
+    g.FillRectangle(&solid_brush, 0, 0, INT(width), INT(height));
+    g.SetCompositingMode(CompositingModeSourceOver);
+  } else {
+    g.SetClip(Rect(0, 0, INT(width), INT(height)));
+  }
   s->damage = {};
+  s->damage_rects.clear();
   g.SetSmoothingMode(SmoothingModeAntiAlias);
   g.SetPixelOffsetMode(PixelOffsetModeHalf);
   g.SetTextRenderingHint((s->background_argb >> 24) < 255
@@ -938,13 +1045,40 @@ void RenderFrame(Surface *s) {
   if (surf_ox != 0.0 || surf_oy != 0.0) {
     g.TranslateTransform(float(surf_ox), float(surf_oy));
   }
+  struct LogicalBox { float l, t, r, b; };
+  std::vector<LogicalBox> dmg_boxes;
+  if (!full) {
+    dmg_boxes.reserve(active_damage_rects.size());
+    for (const auto &dr : active_damage_rects) {
+      dmg_boxes.push_back({
+          float(dr.left / scale - surf_ox) - 1.f,
+          float(dr.top / scale - surf_oy) - 1.f,
+          float(dr.right / scale - surf_ox) + 1.f,
+          float(dr.bottom / scale - surf_oy) + 1.f});
+    }
+  }
+  auto IntersectsDamage = [&](const RectF &r) -> bool {
+    const float rl = r.X, rt = r.Y, rr = r.X + r.Width, rb = r.Y + r.Height;
+    for (const auto &b : dmg_boxes) {
+      if (rr > b.l && rl < b.r && rb > b.t && rt < b.b)
+        return true;
+    }
+    return false;
+  };
   std::vector<GraphicsState> clips;
+  std::vector<bool> clip_transforms;
+  int transform_depth = 0;
+  auto IsRectVisible = [&](const RectF &bounds) -> bool {
+    if (!full && transform_depth == 0 && !IntersectsDamage(bounds))
+      return false;
+    return g.IsVisible(bounds) != FALSE;
+  };
   for (size_t i = 0; i < s->commands.size(); ++i) {
     const auto &c = s->commands[i];
     if ((c.kind == 2 || c.kind == 5) && c.clip_end > i) {
       auto bounds = c.rect;
       bounds.Inflate(1, 1);
-      if (!g.IsVisible(bounds)) {
+      if (!IsRectVisible(bounds)) {
         i = c.clip_end;
         continue;
       }
@@ -953,22 +1087,28 @@ void RenderFrame(Surface *s) {
       if (!clips.empty()) {
         g.Restore(clips.back());
         clips.pop_back();
+        if (!clip_transforms.empty()) {
+          if (clip_transforms.back())
+            --transform_depth;
+          clip_transforms.pop_back();
+        }
       }
     } else if (c.kind == 4 || c.kind == 5) {
       auto bounds = c.rect;
       bounds.Inflate(1 + c.stroke_width / 2, 1 + c.stroke_width / 2);
-      if (c.kind == 4 && !g.IsVisible(bounds))
+      if (c.kind == 4 && !IsRectVisible(bounds))
         continue;
       GraphicsPath path;
       VectorPath(path, c.path);
       if (c.kind == 5) {
         path.SetFillMode(FillModeWinding);
         clips.push_back(g.Save());
+        clip_transforms.push_back(false);
         g.SetClip(&path, CombineModeIntersect);
       } else {
         if (c.fill >> 24) {
-          SolidBrush brush(Color(c.fill));
-          g.FillPath(&brush, &path);
+          solid_brush.SetColor(Color(c.fill));
+          g.FillPath(&solid_brush, &path);
         }
         if (c.stroke_width > 0 && c.stroke >> 24) {
           Pen pen(Color(c.stroke), c.stroke_width);
@@ -980,30 +1120,34 @@ void RenderFrame(Surface *s) {
       }
     } else if (c.kind == 6) {
       clips.push_back(g.Save());
+      clip_transforms.push_back(true);
+      ++transform_depth;
       g.SetTextRenderingHint(TextRenderingHintAntiAlias);
       g.TranslateTransform(c.rect.X, c.rect.Y);
       g.RotateTransform(c.radius);
       g.ScaleTransform(c.size, c.weight);
       g.TranslateTransform(-c.rect.X, -c.rect.Y);
     } else if (c.kind == 7 && c.colors.size() >= 2) {
-      if (!g.IsVisible(c.rect))
+      if (!IsRectVisible(c.rect))
         continue;
       LinearGradientBrush brush(c.start, c.end, Color(c.colors.front()),
                                 Color(c.colors.back()));
       std::vector<Color> colors;
       std::vector<REAL> stops;
-      for (size_t i = 0; i < c.colors.size(); ++i) {
-        colors.emplace_back(c.colors[i]);
-        stops.push_back(REAL(i) / REAL(c.colors.size() - 1));
+      for (size_t j = 0; j < c.colors.size(); ++j) {
+        colors.emplace_back(c.colors[j]);
+        stops.push_back(REAL(j) / REAL(c.colors.size() - 1));
       }
       brush.SetInterpolationColors(colors.data(), stops.data(),
                                    int(colors.size()));
       g.FillRectangle(&brush, c.rect);
     } else if (c.kind == 9) {
       clips.push_back(g.Save());
+      clip_transforms.push_back(true);
+      ++transform_depth;
       g.TranslateTransform(c.rect.X, c.rect.Y);
     } else if (c.kind == 10 && c.mask) {
-      if (!g.IsVisible(c.rect))
+      if (!IsRectVisible(c.rect))
         continue;
       ColorMatrix tint{};
       tint.m[0][0] = ((c.fill >> 16) & 255) / 255.f;
@@ -1017,34 +1161,55 @@ void RenderFrame(Surface *s) {
                   REAL(c.mask->bitmap.GetWidth()), REAL(c.mask->bitmap.GetHeight()),
                   UnitPixel, &attributes);
     } else if (c.kind == 8) {
-      if (!g.IsVisible(c.rect))
+      if (!IsRectVisible(c.rect))
         continue;
-      Image bitmap(c.text.c_str());
-      g.DrawImage(&bitmap, c.rect);
+      auto it = s->images.find(c.text);
+      if (it == s->images.end()) {
+        if (s->images.size() >= 64)
+          s->images.clear();
+        it = s->images.emplace(c.text, std::make_unique<Image>(c.text.c_str())).first;
+      }
+      if (it->second)
+        g.DrawImage(it->second.get(), c.rect);
     } else if (c.kind == 2) {
       clips.push_back(g.Save());
-      GraphicsPath path;
-      RoundedPath(path, c.rect, c.radius);
-      g.SetClip(&path, CombineModeIntersect);
-    } else if (c.rect.Width > 0 && c.rect.Height > 0 && g.IsVisible(c.rect)) {
+      clip_transforms.push_back(false);
+      if (c.radius < 0.01f) {
+        g.SetClip(c.rect, CombineModeIntersect);
+      } else {
+        GraphicsPath path;
+        RoundedPath(path, c.rect, c.radius);
+        g.SetClip(&path, CombineModeIntersect);
+      }
+    } else if (c.rect.Width > 0 && c.rect.Height > 0 && IsRectVisible(c.rect)) {
       if (c.kind == 1) {
-        DrawTextCommand(s, g, c);
+        DrawTextCommand(s, g, solid_brush, c);
         continue;
       }
-      GraphicsPath fill;
-      RoundedPath(fill, c.rect, c.radius);
+      const bool plain_rect = c.radius < 0.01f;
       if (c.fill >> 24) {
-        SolidBrush brush(Color(c.fill));
-        g.FillPath(&brush, &fill);
+        solid_brush.SetColor(Color(c.fill));
+        if (plain_rect) {
+          g.FillRectangle(&solid_brush, c.rect);
+        } else {
+          GraphicsPath fill;
+          RoundedPath(fill, c.rect, c.radius);
+          g.FillPath(&solid_brush, &fill);
+        }
       }
       if (c.stroke_width > 0 && c.stroke >> 24) {
         auto r = c.rect;
         r.Inflate(-c.stroke_width / 2, -c.stroke_width / 2);
         if (r.Width > 0 && r.Height > 0) {
-          GraphicsPath edge;
-          RoundedPath(edge, r, max(0.f, c.radius - c.stroke_width / 2));
           Pen pen(Color(c.stroke), c.stroke_width);
-          g.DrawPath(&pen, &edge);
+          const float inner_r = max(0.f, c.radius - c.stroke_width / 2);
+          if (inner_r < 0.01f) {
+            g.DrawRectangle(&pen, r);
+          } else {
+            GraphicsPath edge;
+            RoundedPath(edge, r, inner_r);
+            g.DrawPath(&pen, &edge);
+          }
         }
       }
     }
@@ -1342,9 +1507,10 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
 
   const int buf_w = int(s->buffer->width);
   const int buf_h = int(s->buffer->height);
+  const size_t buf_stride = size_t(s->buffer->stride_pixels);
   for (int y = 0; y < h; ++y) {
     const int sy = max(0, min(buf_h - 1, int(offset.y) + y));
-    const uint32_t *bg_row = s->buffer->pixels + size_t(sy) * size_t(buf_w);
+    const uint32_t *bg_row = s->buffer->pixels + size_t(sy) * buf_stride;
     uint32_t *b_row = pass_b.pixels + size_t(y) * size_t(w);
     const uint32_t *w_row = pass_w.pixels + size_t(y) * size_t(w);
     for (int x = 0; x < w; ++x) {
@@ -1991,25 +2157,70 @@ RECT ChangedScope(Surface *s, RECT client) {
     }
   }
   size_t enclosing = scopes.size() - 1;
+  bool simple_middle = !scopes.back().transformed;
+  RECT middle_damage{};
   for (const auto *commands : {&a, &b}) {
     size_t depth = scopes.size() - 1;
     for (size_t i = prefix; i < commands->size() - suffix; ++i) {
-      const auto kind = (*commands)[i].kind;
-      if (SavesGraphics(kind))
+      const auto &cmd = (*commands)[i];
+      const auto kind = cmd.kind;
+      if (SavesGraphics(kind)) {
         ++depth;
-      else if (kind == 3 && depth > 0)
+        simple_middle = false;
+      } else if (kind == 3 && depth > 0) {
         --depth;
+        simple_middle = false;
+      } else if (simple_middle) {
+        if (!(kind == 0 && !(cmd.fill >> 24) && !(cmd.stroke >> 24))) {
+          auto r = InkBounds(cmd);
+          r.Inflate(2 + cmd.stroke_width, 2 + cmd.stroke_width);
+          RECT pixels{LONG(std::floor((r.X + ox) * scale)),
+                      LONG(std::floor((r.Y + oy) * scale)),
+                      LONG(std::ceil((r.GetRight() + ox) * scale)),
+                      LONG(std::ceil((r.GetBottom() + oy) * scale))};
+          UnionRect(&middle_damage, &middle_damage, &pixels);
+        }
+      }
       enclosing = min(enclosing, depth);
     }
   }
+  if (simple_middle) {
+    RECT tight{};
+    IntersectRect(&tight, &middle_damage, &scopes[enclosing].clip);
+    return tight;
+  }
   return scopes[enclosing].clip;
 }
-RECT Damage(Surface *s) {
+void AddDamageRect(std::vector<RECT> &rects, const RECT &r) {
+  if (IsRectEmpty(&r))
+    return;
+  for (auto &existing : rects) {
+    RECT expanded{existing.left - 8, existing.top - 8, existing.right + 8,
+                  existing.bottom + 8};
+    RECT overlap{};
+    if (IntersectRect(&overlap, &expanded, &r)) {
+      UnionRect(&existing, &existing, &r);
+      return;
+    }
+  }
+  if (rects.size() < 12) {
+    rects.push_back(r);
+  } else {
+    UnionRect(&rects[0], &rects[0], &r);
+  }
+}
+RECT Damage(Surface *s, std::vector<RECT> &out_rects) {
+  out_rects.clear();
   RECT client = SurfaceClientRect(s);
-  if (!s->buffer || s->offset_changed_since_paint)
+  if (!s->buffer || s->offset_changed_since_paint) {
+    AddDamageRect(out_rects, client);
     return client;
-  if (s->commands.size() != s->pending.size())
-    return ChangedScope(s, client);
+  }
+  if (s->commands.size() != s->pending.size()) {
+    RECT r = ChangedScope(s, client);
+    AddDamageRect(out_rects, r);
+    return r;
+  }
   RECT damage{};
   const double scale = GetDpiForWindow(s->host) / 96.;
   double ox = 0.0, oy = 0.0;
@@ -2020,8 +2231,12 @@ RECT Damage(Surface *s) {
     const auto &a = s->commands[i], &b = s->pending[i];
     if (!(a == b)) {
       if (a.kind != b.kind || transformed || a.kind == 2 || a.kind == 3 ||
-          a.kind == 5 || a.kind == 6 || a.kind == 9)
-        return ChangedScope(s, client);
+          a.kind == 5 || a.kind == 6 || a.kind == 9) {
+        out_rects.clear();
+        RECT r = ChangedScope(s, client);
+        AddDamageRect(out_rects, r);
+        return r;
+      }
       if (!(a.kind == 0 && !(a.fill >> 24) && !(a.stroke >> 24) &&
             !(b.fill >> 24) && !(b.stroke >> 24))) {
         for (const auto *c : {&a, &b}) {
@@ -2032,7 +2247,11 @@ RECT Damage(Surface *s) {
                       LONG(std::floor((r.Y + oy) * scale)),
                       LONG(std::ceil((r.GetRight() + ox) * scale)),
                       LONG(std::ceil((r.GetBottom() + oy) * scale))};
-          UnionRect(&damage, &damage, &pixels);
+          RECT clipped{};
+          if (IntersectRect(&clipped, &pixels, &client)) {
+            UnionRect(&damage, &damage, &clipped);
+            AddDamageRect(out_rects, clipped);
+          }
         }
       }
     }
@@ -2265,6 +2484,7 @@ void sui_surface_set_background(void *handle, uint32_t argb) {
   s->buffer_dirty = true;
   RECT client = SurfaceClientRect(s);
   UnionRect(&s->damage, &s->damage, &client);
+  s->damage_rects.clear();
   if (!s->defer_commit) {
     InvalidateRect(s->host, nullptr, FALSE);
   }
@@ -2318,6 +2538,7 @@ void sui_surface_begin_pending_resize(void *handle, double logical_width,
   s->buffer_dirty = true;
   RECT pending{0, 0, s->pending_width, s->pending_height};
   UnionRect(&s->damage, &s->damage, &pending);
+  s->damage_rects.clear();
 }
 void sui_surface_prerender_pending_resize(void *handle) {
   auto *s = static_cast<Surface *>(handle);
@@ -2359,6 +2580,7 @@ void sui_surface_set_content_offset(void *handle, double ox, double oy) {
   s->scroll_copy = {};
   RECT client = SurfaceClientRect(s);
   UnionRect(&s->damage, &s->damage, &client);
+  s->damage_rects.clear();
 }
 void sui_surface_set_pending_offset(void *handle, double ox, double oy) {
   auto *s = static_cast<Surface *>(handle);
@@ -2373,6 +2595,7 @@ void sui_surface_set_pending_offset(void *handle, double ox, double oy) {
     s->scroll_copy = {};
     RECT client = SurfaceClientRect(s);
     UnionRect(&s->damage, &s->damage, &client);
+    s->damage_rects.clear();
   }
   s->pending_offset_x = ox;
   s->pending_offset_y = oy;
@@ -2629,14 +2852,23 @@ void sui_surface_mask(void *h, void *mask, double x, double y,
 void sui_surface_text(void *h, double x, double y, double w, double height,
                       const char *text, const char *family, double size,
                       double weight, double line_spacing, uint32_t color) {
+  auto *s = static_cast<Surface *>(h);
   auto c = Box(1, x, y, w, height, 0);
   c.text = Wide(text);
-  c.family = Wide(family);
+  if (family && *family) {
+    auto it = s->wide_families.find(family);
+    if (it == s->wide_families.end()) {
+      if (s->wide_families.size() >= 64)
+        s->wide_families.clear();
+      it = s->wide_families.emplace(family, Wide(family)).first;
+    }
+    c.family = it->second;
+  }
   c.size = float(size);
   c.weight = float(weight);
   c.fill = color;
   c.line_spacing = float(line_spacing);
-  static_cast<Surface *>(h)->pending.push_back(std::move(c));
+  s->pending.push_back(std::move(c));
 }
 void sui_surface_path(void *h, const double *commands, int count, uint32_t fill,
                       uint32_t stroke, double width, int clip) {
@@ -2740,10 +2972,19 @@ void sui_surface_end(void *h) {
     s->updating_views = false;
   }
   checkpoint(3);
-  RECT damage = Damage(s);
+  std::vector<RECT> frame_damage_rects;
+  RECT damage = Damage(s, frame_damage_rects);
   if (s->trace.Enabled() && !IsRectEmpty(&damage)) ++s->trace.frame;
   checkpoint(4);
+  const bool had_existing_damage = !IsRectEmpty(&s->damage);
   UnionRect(&s->damage, &s->damage, &damage);
+  if (had_existing_damage && s->damage_rects.empty()) {
+    AddDamageRect(s->damage_rects, s->damage);
+  } else {
+    for (const auto &dr : frame_damage_rects) {
+      AddDamageRect(s->damage_rects, dr);
+    }
+  }
   if (!s->buffer_dirty) {
     s->painted_commands = std::move(s->commands);
     s->painted_scrolls = std::move(s->scrolls);
@@ -2779,8 +3020,10 @@ void sui_surface_end(void *h) {
     // One canvas copy paints all styled controls. Independent native widgets
     // still receive their own damage; do not blit the same pixels per HWND.
     RECT exposed;
-    if (GetUpdateRect(s->host, &exposed, FALSE))
+    if (GetUpdateRect(s->host, &exposed, FALSE)) {
       UnionRect(&s->damage, &s->damage, &exposed);
+      if (!s->damage_rects.empty()) AddDamageRect(s->damage_rects, exposed);
+    }
     if (s->native_state_changed) {
       RedrawWindow(s->host, nullptr, nullptr,
                    RDW_VALIDATE | RDW_NOERASE | RDW_NOFRAME | RDW_ALLCHILDREN);
@@ -2913,6 +3156,7 @@ void sui_control_frame(void *handle, void *control, double x, double y,
   OffsetRect(&damage, context.x, context.y);
   IntersectRect(&damage, &damage, &client);
   UnionRect(&s->damage, &s->damage, &damage);
+  if (!s->damage_rects.empty()) AddDamageRect(s->damage_rects, damage);
 }
 void sui_controls_begin(void *handle) {
   auto *s = static_cast<Surface *>(handle);
@@ -2965,6 +3209,7 @@ void sui_controls_push(void *handle, int64_t id, double x, double y,
                   int(std::ceil((clip_x + ox + clip_width) * scale)),
                   int(std::ceil((clip_y + oy + clip_height) * scale))};
     UnionRect(&s->damage, &damage, &viewport);
+    if (!s->damage_rects.empty()) AddDamageRect(s->damage_rects, viewport);
   }
   const auto content = ChildControls(s, group.window, x, y, scale);
   s->control_contexts.pop_back();
@@ -3049,6 +3294,9 @@ void sui_button_update(void *h, void *button, double radius, const char *help,
     hook.clip_height = rect.bottom;
     hook.clip_radius = r;
   }
+  if ((!help || !*help) && hook.help.empty()) {
+    return;
+  }
   auto text = Wide(help);
   if (text != hook.help) {
     hook.help = std::move(text);
@@ -3086,20 +3334,44 @@ void sui_surface_focus_next(void *h, void *current, int backward) {
 sui_size sui_measure_text(const char *text, const char *family_name,
                           double size, double weight) {
   InitializeGraphics();
-  Bitmap bitmap(1, 1, PixelFormat32bppPARGB);
-  Graphics g(&bitmap);
-  g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-  auto text_w = Wide(text), family_w = Wide(family_name);
-  FontFamily family(family_w.c_str());
-  Font font(
-      family.GetLastStatus() == Ok ? &family : FontFamily::GenericSansSerif(),
-      float(size), weight >= 600 ? FontStyleBold : FontStyleRegular, UnitPixel);
-  StringFormat format(StringFormat::GenericTypographic());
-  format.SetFormatFlags(StringFormatFlagsNoWrap |
-                        StringFormatFlagsMeasureTrailingSpaces);
+  struct TextMeasureCache {
+    Bitmap bitmap;
+    Graphics graphics;
+    std::unordered_map<std::string, std::wstring> wide_families;
+    std::unordered_map<FontKey, std::unique_ptr<TextFont>, FontKeyHash> fonts;
+    TextMeasureCache()
+        : bitmap(1, 1, PixelFormat32bppPARGB), graphics(&bitmap) {
+      graphics.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    }
+  };
+  static TextMeasureCache *cache = new TextMeasureCache();
+  auto text_w = Wide(text);
+  std::wstring family_w;
+  if (family_name && *family_name) {
+    auto fit = cache->wide_families.find(family_name);
+    if (fit == cache->wide_families.end()) {
+      if (cache->wide_families.size() >= 64)
+        cache->wide_families.clear();
+      fit = cache->wide_families.emplace(family_name, Wide(family_name)).first;
+    }
+    family_w = fit->second;
+  }
+  const float fsize = float(size);
+  const bool bold = weight >= 600.0;
+  FontKey key{family_w, FloatBits(fsize), bold};
+  auto found = cache->fonts.find(key);
+  if (found == cache->fonts.end()) {
+    if (cache->fonts.size() >= 256)
+      cache->fonts.clear();
+    found = cache->fonts
+                .emplace(std::move(key),
+                         std::make_unique<TextFont>(family_w, fsize, bold))
+                .first;
+  }
   RectF measured;
-  g.MeasureString(text_w.empty() ? L" " : text_w.c_str(), -1, &font,
-                  PointF(0, 0), &format, &measured);
+  cache->graphics.MeasureString(text_w.empty() ? L" " : text_w.c_str(), -1,
+                                &found->second->font, PointF(0, 0),
+                                &TypographicFormat(), &measured);
   return {text_w.empty() ? 0 : std::ceil(measured.Width),
           std::ceil(measured.Height)};
 }

@@ -1,3 +1,4 @@
+import Foundation
 import Observation
 
 /// Tracks state reads while evaluating bodies. A local state write invalidates
@@ -13,6 +14,9 @@ final class EvaluationGraph {
     let path: ViewPath
     let id: Int
     var revision = 0
+    /// Increments only when this node's own inputs or state changed, not when
+    /// only a descendant inside a `GeometryReader` scope became dirty.
+    var inputRevision = 0
     weak var parent: Node?
     weak var graph: EvaluationGraph?
     var children: [Node] = []
@@ -20,10 +24,18 @@ final class EvaluationGraph {
     var dirty = true, descendantDirty = true, forceChildren = true
     var inputChanged = true
     var result: Element?
+    var lastEquatableView: (any Equatable)?
+    var lastEnvironment: EnvironmentValues?
+    var lastGlobalInvalidationEpoch = -1
     var reads = Set<StateKey>()
     var previousReads = Set<StateKey>()
     var state = Set<StateKey>()
     var lifecycle = Set<StateKey>()
+    /// Dedicated child evaluation scope for `.geometry` nodes (`GeometryReader`).
+    var geometryChild: Node?
+    var geometryInputRevision = -1
+    var geometryRect: CGRect?
+    var geometryNamedOrigins: [AnyHashable: CGPoint]?
     lazy var reference = WeakNode(self)
     init(type: ObjectIdentifier, path: ViewPath, parent: Node?, graph: EvaluationGraph) {
       self.type = type
@@ -32,8 +44,10 @@ final class EvaluationGraph {
       self.graph = graph
       id = EvaluationGraph.nextID
       EvaluationGraph.nextID += 1
+      graph.nodesByID[id] = WeakNode(self)
     }
     deinit {
+      graph?.nodesByID.removeValue(forKey: id)
       for key in reads {
         graph?.removeReader(id, of: key)
       }
@@ -41,16 +55,27 @@ final class EvaluationGraph {
     func retain() {
       if !state.isEmpty { StateRegistry.shared.retain(state) }
       if !lifecycle.isEmpty { LifecycleRegistry.shared.retain(lifecycle) }
-      children.forEach { $0.retain() }
+      for child in children { child.retain() }
     }
   }
   private final class WeakNode {
     weak var value: Node?
     init(_ value: Node) { self.value = value }
   }
+  private final class WeakPair: @unchecked Sendable {
+    weak var graph: EvaluationGraph?
+    weak var node: Node?
+    init(graph: EvaluationGraph, node: Node) {
+      self.graph = graph
+      self.node = node
+    }
+  }
   private var root: Node?
   private var current: Node?
+  private var trackingObservation = false
+  private var globalInvalidationEpoch = 0
   private var readers: [StateKey: [Int: WeakNode]] = [:]
+  private var nodesByID: [Int: WeakNode] = [:]
 
   private func removeReader(_ id: Int, of key: StateKey) {
     readers[key]?.removeValue(forKey: id)
@@ -58,8 +83,15 @@ final class EvaluationGraph {
   }
 
   func invalidateAll() {
+    globalInvalidationEpoch += 1
     root?.dirty = true
     root?.descendantDirty = true
+    for entry in nodesByID.values {
+      if let geo = entry.value?.geometryChild {
+        geo.dirty = true
+        geo.descendantDirty = true
+      }
+    }
   }
 
   private func markNodeDirty(_ node: Node) {
@@ -107,7 +139,21 @@ final class EvaluationGraph {
     defer { Self.active = previous }
     return body()
   }
-  func evaluate(type: ObjectIdentifier, path: ViewPath, _ body: () -> Element) -> Element {
+  private static func sameEquatableView(_ lhs: (any Equatable)?, _ rhs: any Equatable) -> Bool {
+    guard let lhs else { return false }
+    func equal<T: Equatable>(_ a: T, _ b: any Equatable) -> Bool {
+      guard let b = b as? T else { return false }
+      return a == b
+    }
+    return equal(lhs, rhs)
+  }
+
+  func evaluate(
+    type: ObjectIdentifier,
+    path: ViewPath,
+    equatableView: (any Equatable)? = nil,
+    _ body: () -> Element
+  ) -> Element {
     let parent = current
     let node: Node
     if let parent {
@@ -131,7 +177,15 @@ final class EvaluationGraph {
       node = Node(type: type, path: path, parent: nil, graph: self)
       root = node
     }
-    let forced = parent?.forceChildren ?? false
+    var forced = parent?.forceChildren ?? false
+    if forced, let eqView = equatableView, !node.dirty, node.result != nil,
+      node.lastGlobalInvalidationEpoch == globalInvalidationEpoch,
+      let prevEnv = node.lastEnvironment,
+      prevEnv.isEquivalent(to: EnvironmentValues.current),
+      Self.sameEquatableView(node.lastEquatableView, eqView)
+    {
+      forced = false
+    }
     if !forced && !node.descendantDirty, let result = node.result {
       node.retain()
       return result
@@ -140,20 +194,43 @@ final class EvaluationGraph {
     node.reads.removeAll(keepingCapacity: true)
     node.state.removeAll(keepingCapacity: true)
     node.lifecycle.removeAll(keepingCapacity: true)
+    let inputsChanged = forced || node.dirty || node.result == nil
+    if inputsChanged { node.inputRevision += 1 }
     node.forceChildren = forced || node.dirty
     node.inputChanged = forced || node.result == nil
     node.cursor = 0
     current = node
-    final class WeakPair: @unchecked Sendable {
-      weak var graph: EvaluationGraph?
-      weak var node: Node?
-      init(graph: EvaluationGraph, node: Node) {
-        self.graph = graph
-        self.node = node
-      }
+    var result = body()
+    for key in node.previousReads where !node.reads.contains(key) { removeReader(node.id, of: key) }
+    result.evaluationID = node.id
+    node.revision += 1
+    result.evaluationRevision = node.revision
+    current = parent
+    if node.cursor < node.children.count {
+      node.children.removeLast(node.children.count - node.cursor)
     }
+    node.result = result
+    if let eqView = equatableView {
+      node.lastEquatableView = eqView
+      node.lastEnvironment = EnvironmentValues.current
+    } else {
+      node.lastEquatableView = nil
+      node.lastEnvironment = nil
+    }
+    node.lastGlobalInvalidationEpoch = globalInvalidationEpoch
+    node.dirty = false
+    node.descendantDirty = false
+    return result
+  }
+
+  /// Tracks `@Observable` reads exclusively for the currently evaluating node,
+  /// without nesting across recursive child `_render` calls.
+  func trackObservation<T>(_ body: () -> T) -> T {
+    guard !trackingObservation, let node = current else { return body() }
     let pair = WeakPair(graph: self, node: node)
-    var result = withObservationTracking {
+    trackingObservation = true
+    defer { trackingObservation = false }
+    return withObservationTracking {
       body()
     } onChange: {
       if Thread.isMainThread {
@@ -169,17 +246,69 @@ final class EvaluationGraph {
         }
       }
     }
-    for key in node.previousReads where !node.reads.contains(key) { removeReader(node.id, of: key) }
-    result.evaluationID = node.id
-    node.revision += 1
-    result.evaluationRevision = node.revision
-    current = parent
-    if node.cursor < node.children.count {
-      node.children.removeLast(node.children.count - node.cursor)
+  }
+
+  func retainGeometry(ownerID: Int) {
+    guard ownerID != 0, let geo = nodesByID[ownerID]?.value?.geometryChild else { return }
+    geo.retain()
+  }
+
+  /// Evaluates a `GeometryReader` builder inside this `EvaluationGraph` so its
+  /// descendants participate in incremental `@State` / `@Observable` tracking,
+  /// `evaluationID` stability, and `reusesLayout` caching.
+  func evaluateGeometry(
+    ownerID: Int,
+    rect: CGRect,
+    namedOrigins: [AnyHashable: CGPoint],
+    _ body: () -> Element
+  ) -> Element {
+    guard ownerID != 0, let owner = nodesByID[ownerID]?.value else {
+      return body()
     }
-    node.result = result
-    node.dirty = false
-    node.descendantDirty = false
+    let scopeRoot: Node
+    let needsFullRebuild: Bool
+    if let existing = owner.geometryChild {
+      scopeRoot = existing
+      needsFullRebuild =
+        owner.geometryInputRevision != owner.inputRevision
+        || owner.geometryRect != rect
+        || owner.geometryNamedOrigins != namedOrigins
+        || scopeRoot.dirty
+    } else {
+      scopeRoot = Node(
+        type: ObjectIdentifier(EvaluationGraph.self),
+        path: owner.path,
+        parent: owner,
+        graph: self
+      )
+      owner.geometryChild = scopeRoot
+      needsFullRebuild = true
+    }
+    if !needsFullRebuild && !scopeRoot.descendantDirty, let cached = scopeRoot.result {
+      scopeRoot.retain()
+      return cached
+    }
+    let previousActive = Self.active
+    let previousCurrent = current
+    Self.active = self
+    current = scopeRoot
+    defer {
+      current = previousCurrent
+      Self.active = previousActive
+    }
+    scopeRoot.forceChildren = needsFullRebuild
+    scopeRoot.inputChanged = needsFullRebuild
+    scopeRoot.cursor = 0
+    let result = body()
+    if scopeRoot.cursor < scopeRoot.children.count {
+      scopeRoot.children.removeLast(scopeRoot.children.count - scopeRoot.cursor)
+    }
+    owner.geometryInputRevision = owner.inputRevision
+    owner.geometryRect = rect
+    owner.geometryNamedOrigins = namedOrigins
+    scopeRoot.result = result
+    scopeRoot.dirty = false
+    scopeRoot.descendantDirty = false
     return result
   }
 }

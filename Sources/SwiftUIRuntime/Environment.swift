@@ -49,6 +49,65 @@ public struct EnvironmentValues {
   }
   public static let `default` = EnvironmentValues()
   package static var current = EnvironmentValues()
+
+  /// Returns true when every entry in `self` matches `other` so an `Equatable`
+  /// view can soundly skip re-evaluation when its inputs and environment match.
+  func isEquivalent(to other: EnvironmentValues) -> Bool {
+    guard foregroundColor == other.foregroundColor,
+      isEnabled == other.isEnabled,
+      layoutDirection == other.layoutDirection,
+      colorScheme == other.colorScheme,
+      tint == other.tint,
+      font == other.font,
+      accessibilityReduceMotion == other.accessibilityReduceMotion,
+      objects.count == other.objects.count,
+      values.count == other.values.count
+    else { return false }
+    for (key, lhs) in objects {
+      guard let rhs = other.objects[key], lhs === rhs else { return false }
+    }
+    for (key, lhs) in values {
+      guard let rhs = other.values[key], Self.valuesEqual(lhs, rhs) else { return false }
+    }
+    return true
+  }
+
+  private static func valuesEqual(_ lhs: Any, _ rhs: Any) -> Bool {
+    if let eq = lhs as? any Equatable {
+      return openEquatableEqual(eq, rhs)
+    }
+    if let lhsOpt = lhs as? any _OptionalEnvironmentValue,
+      let rhsOpt = rhs as? any _OptionalEnvironmentValue
+    {
+      guard type(of: lhs) == type(of: rhs) else { return false }
+      if lhsOpt._isNilValue && rhsOpt._isNilValue { return true }
+      if lhsOpt._isNilValue != rhsOpt._isNilValue { return false }
+      if let lObj = lhsOpt._unwrappedObject, let rObj = rhsOpt._unwrappedObject {
+        return lObj === rObj
+      }
+      return false
+    }
+    if type(of: lhs) is AnyClass, type(of: rhs) is AnyClass {
+      return (lhs as AnyObject) === (rhs as AnyObject)
+    }
+    return false
+  }
+
+  private static func openEquatableEqual<T: Equatable>(_ lhs: T, _ rhs: Any) -> Bool {
+    guard let rhs = rhs as? T else { return false }
+    return lhs == rhs
+  }
+}
+private protocol _OptionalEnvironmentValue {
+  var _isNilValue: Bool { get }
+  var _unwrappedObject: AnyObject? { get }
+}
+extension Optional: _OptionalEnvironmentValue {
+  var _isNilValue: Bool { self == nil }
+  var _unwrappedObject: AnyObject? {
+    guard let wrapped = self, type(of: wrapped) is AnyClass else { return nil }
+    return wrapped as AnyObject
+  }
 }
 @propertyWrapper public struct Environment<Value>: _EnvironmentProperty {
   private final class Storage { var value: Value? }

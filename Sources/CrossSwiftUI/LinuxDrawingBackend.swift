@@ -25,7 +25,8 @@ public final class LinuxDrawingBackend: RenderBackend {
   private var appliedDarkMode: Bool? = nil
   private var canvasImage: OpaquePointer?
   private var canvasSize: (width: Int32, height: Int32, scale: Int32)?
-  private var canvasDamage: Rect?
+  private var canvasCapacity: (width: Int32, height: Int32, scale: Int32)?
+  private var canvasDamageRects: [Rect] = []
   private var listener: ListenerId?
   private var queuedRender: (() -> Void)?
   private var pointerSource: UInt32 = 0
@@ -38,6 +39,7 @@ public final class LinuxDrawingBackend: RenderBackend {
   private var allocationSignal: gulong = 0
   private var windowScrollSignal: gulong = 0
   private var applying = false
+  private var painting = false
   private var tick: UInt32 = 0
   private var motions: [NodeID: LinuxDrawing.Motion] = [:]
   private var motionDamage: [NodeID: Rect] = [:]
@@ -123,6 +125,11 @@ public final class LinuxDrawingBackend: RenderBackend {
       switch event {
       case .resized(_, let size):
         self.onResize?(SwiftUIRuntime.Size(width: size.width, height: size.height))
+        if let update = self.queuedRender {
+          self.queuedRender = nil
+          self.content.cancelUpdate()
+          update()
+        }
       case .updating:
         let update = self.queuedRender
         self.queuedRender = nil
@@ -220,36 +227,67 @@ public final class LinuxDrawingBackend: RenderBackend {
   }
 
   private func paint(in context: OpaquePointer) {
-    guard let root else { return }
-    let start = trace ? g_get_monotonic_time() : 0
     let size = (width: gtk_widget_get_allocated_width(canvas),
                 height: gtk_widget_get_allocated_height(canvas),
                 scale: gtk_widget_get_scale_factor(canvas))
     guard size.width > 0, size.height > 0 else { return }
+    let targetW = Double(size.width)
+    let targetH = Double(size.height)
+    if let currentRoot = self.root,
+       abs(currentRoot.frame.width - targetW) > 0.5 || abs(currentRoot.frame.height - targetH) > 0.5
+    {
+      painting = true
+      onResize?(SwiftUIRuntime.Size(width: targetW, height: targetH))
+      if let update = queuedRender {
+        queuedRender = nil
+        content.cancelUpdate()
+        update()
+      }
+      painting = false
+    }
+    guard let root else { return }
+    let start = trace ? g_get_monotonic_time() : 0
     if canvasImage == nil || canvasSize?.width != size.width || canvasSize?.height != size.height
       || canvasSize?.scale != size.scale
     {
-      if let canvasImage { cairo_surface_destroy(canvasImage) }
-      canvasImage = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixels(Double(size.width) * Double(size.scale)),
-                                               pixels(Double(size.height) * Double(size.scale)))
-      if let canvasImage {
-        cairo_surface_set_device_scale(canvasImage, Double(size.scale), Double(size.scale))
+      let reqW = max(Int32(1), pixels(Double(size.width) * Double(size.scale)))
+      let reqH = max(Int32(1), pixels(Double(size.height) * Double(size.scale)))
+      let canReuse =
+        canvasImage != nil
+        && canvasCapacity?.scale == size.scale
+        && (canvasCapacity?.width ?? 0) >= reqW
+        && (canvasCapacity?.height ?? 0) >= reqH
+        && reqW >= (canvasCapacity?.width ?? 0) / 2
+        && reqH >= (canvasCapacity?.height ?? 0) / 2
+      if !canReuse {
+        if let canvasImage { cairo_surface_destroy(canvasImage) }
+        let capW = ((reqW + 255) / 256) * 256
+        let capH = ((reqH + 255) / 256) * 256
+        canvasImage = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, capW, capH)
+        if let canvasImage {
+          cairo_surface_set_device_scale(canvasImage, Double(size.scale), Double(size.scale))
+        }
+        canvasCapacity = (width: capW, height: capH, scale: size.scale)
       }
       canvasSize = size
-      canvasDamage = Rect(x: 0, y: 0, width: Double(size.width), height: Double(size.height))
+      canvasDamageRects = [Rect(x: 0, y: 0, width: Double(size.width), height: Double(size.height))]
     }
-    let damage = canvasDamage
-    canvasDamage = nil
+    let damageRects = canvasDamageRects
+    canvasDamageRects.removeAll(keepingCapacity: true)
     let now = Date.timeIntervalSinceReferenceDate
     if let image = canvasImage, cairo_surface_status(image) == CAIRO_STATUS_SUCCESS {
-      if let damage, !damage.isEmpty, let buffer = cairo_create(image) {
+      if !damageRects.isEmpty, let buffer = cairo_create(image) {
         defer { cairo_destroy(buffer) }
-        cairo_rectangle(buffer, damage.minX, damage.minY, damage.width, damage.height)
-        cairo_clip(buffer)
-        cairo_set_operator(buffer, CAIRO_OPERATOR_CLEAR)
-        cairo_paint(buffer)
-        cairo_set_operator(buffer, CAIRO_OPERATOR_OVER)
-        drawing.paint(root, in: buffer, clip: root.frame, damage: damage, motions: motions, now: now)
+        for damage in damageRects where !damage.isEmpty {
+          cairo_save(buffer)
+          cairo_rectangle(buffer, damage.minX, damage.minY, damage.width, damage.height)
+          cairo_clip(buffer)
+          cairo_set_operator(buffer, CAIRO_OPERATOR_CLEAR)
+          cairo_paint(buffer)
+          cairo_set_operator(buffer, CAIRO_OPERATOR_OVER)
+          drawing.paint(root, in: buffer, clip: root.frame, damage: damage, motions: motions, now: now)
+          cairo_restore(buffer)
+        }
       }
       cairo_save(context)
       cairo_set_source_surface(context, image, 0, 0)
@@ -260,31 +298,88 @@ public final class LinuxDrawingBackend: RenderBackend {
     }
     if trace {
       let end = g_get_monotonic_time()
-      log("GTK paint \(Double(end - start) / 1000) end=\(end) repaint=\(damage?.width ?? 0)x\(damage?.height ?? 0)")
+      let summary: String
+      if damageRects.isEmpty {
+        summary = "0.0x0.0"
+      } else if damageRects.count == 1 {
+        summary = "\(damageRects[0].width)x\(damageRects[0].height)"
+      } else {
+        let area = damageRects.reduce(0.0) { $0 + $1.width * $1.height }
+        summary = "\(damageRects.count)rects(\(Int(area))px)"
+      }
+      log("GTK paint \(Double(end - start) / 1000) end=\(end) repaint=\(summary)")
+    }
+  }
+
+  private static func unionRect(_ a: Rect, _ b: Rect) -> Rect {
+    if a.isEmpty { return b }
+    if b.isEmpty { return a }
+    let left = min(a.minX, b.minX)
+    let top = min(a.minY, b.minY)
+    return Rect(
+      x: left, y: top,
+      width: max(a.maxX, b.maxX) - left,
+      height: max(a.maxY, b.maxY) - top)
+  }
+
+  private static func addDamageRect(_ raw: Rect, into rects: inout [Rect]) {
+    guard !raw.isEmpty else { return }
+    let x = floor(raw.minX), y = floor(raw.minY)
+    var rect = Rect(x: x, y: y, width: ceil(raw.maxX) - x, height: ceil(raw.maxY) - y)
+    guard !rect.isEmpty else { return }
+    // Merge with any overlapping or adjacent (<= 8px gap) rect.
+    var merged = true
+    while merged {
+      merged = false
+      var i = 0
+      while i < rects.count {
+        let existing = rects[i]
+        let overlapsOrNear =
+          rect.minX <= existing.maxX + 8 && rect.maxX + 8 >= existing.minX
+          && rect.minY <= existing.maxY + 8 && rect.maxY + 8 >= existing.minY
+        if overlapsOrNear {
+          rect = unionRect(existing, rect)
+          rects.remove(at: i)
+          merged = true
+        } else {
+          i += 1
+        }
+      }
+    }
+    rects.append(rect)
+    if rects.count > 8 {
+      let combined = rects.reduce(Rect.zero, unionRect)
+      rects = [combined]
     }
   }
 
   private func invalidateCanvas(_ rect: Rect? = nil) {
     guard let rect else {
-      canvasDamage = Rect(x: 0, y: 0, width: Double(gtk_widget_get_allocated_width(canvas)),
-                          height: Double(gtk_widget_get_allocated_height(canvas)))
-      gtk_widget_queue_draw(canvas)
+      let full = Rect(
+        x: 0, y: 0,
+        width: Double(gtk_widget_get_allocated_width(canvas)),
+        height: Double(gtk_widget_get_allocated_height(canvas)))
+      canvasDamageRects = [full]
+      if !painting { gtk_widget_queue_draw(canvas) }
       return
     }
-    guard !rect.isEmpty else { return }
-    let x = floor(rect.minX), y = floor(rect.minY)
-    let damage = Rect(x: x, y: y, width: ceil(rect.maxX) - x, height: ceil(rect.maxY) - y)
-    if let previous = canvasDamage {
-      let left = min(previous.minX, x), top = min(previous.minY, y)
-      canvasDamage = Rect(x: left, y: top, width: max(previous.maxX, damage.maxX) - left,
-                          height: max(previous.maxY, damage.maxY) - top)
-    } else {
-      canvasDamage = damage
+    invalidateCanvasRects([rect])
+  }
+
+  private func invalidateCanvasRects(_ rects: [Rect]) {
+    guard !rects.isEmpty else { return }
+    for rect in rects where !rect.isEmpty {
+      Self.addDamageRect(rect, into: &canvasDamageRects)
+      if !painting {
+        let x = floor(rect.minX), y = floor(rect.minY)
+        let w = ceil(rect.maxX) - x, h = ceil(rect.maxY) - y
+        gtk_widget_queue_draw_area(canvas, pixels(x), pixels(y), pixels(w), pixels(h))
+      }
     }
-    gtk_widget_queue_draw_area(canvas, pixels(x), pixels(y), pixels(damage.width), pixels(damage.height))
   }
 
   private func publish(_ root: Element, damage: Rect? = nil) {
+    let previousRoot = self.root
     self.root = root
     let hadVisibleMotions = !motionDamage.isEmpty
     updateVisibleMotions(in: root)
@@ -298,8 +393,12 @@ public final class LinuxDrawingBackend: RenderBackend {
     updateControls(root, clip: root.frame, background: defaultBg, allowed: true, focus: &focus, modal: modal,
                    inModal: false, accessibilityLabel: "", refreshContent: damage == nil,
                    live: &live, liveButtons: &liveButtons)
-    for id in controls.keys.filter({ !live.contains($0) }) { controls.removeValue(forKey: id) }
-    for id in buttons.keys.filter({ !liveButtons.contains($0) }) { buttons.removeValue(forKey: id) }
+    if !controls.isEmpty {
+      for id in controls.keys.filter({ !live.contains($0) }) { controls.removeValue(forKey: id) }
+    }
+    if !buttons.isEmpty {
+      for id in buttons.keys.filter({ !liveButtons.contains($0) }) { buttons.removeValue(forKey: id) }
+    }
     if let focus {
       if let edit = controls[focus] {
         if !edit.field.isFocused { edit.field.focus() }
@@ -309,7 +408,113 @@ public final class LinuxDrawingBackend: RenderBackend {
     }
     // Moving controls can invalidate the whole GTK window. Track the pixels
     // that actually changed so an expose only composites the cached canvas.
-    invalidateCanvas(!hadVisibleMotions && motionDamage.isEmpty ? damage : nil)
+    if !hadVisibleMotions && motionDamage.isEmpty {
+      if let damage {
+        invalidateCanvas(damage)
+      } else if let previousRoot, previousRoot.frame == root.frame, canvasImage != nil {
+        let incremental = computeIncrementalDamage(old: previousRoot, new: root, clip: root.frame)
+        if !incremental.isEmpty {
+          let totalArea = incremental.reduce(0.0) { $0 + $1.width * $1.height }
+          let fullArea = root.frame.width * root.frame.height
+          if fullArea > 0 && totalArea >= fullArea * 0.7 {
+            invalidateCanvas(nil)
+          } else {
+            invalidateCanvasRects(incremental)
+          }
+        }
+      } else {
+        invalidateCanvas(nil)
+      }
+    } else {
+      invalidateCanvas(nil)
+    }
+  }
+
+  /// Computes disjoint damage rects between two mounted trees, skipping
+  /// `reusesLayout` subtrees in O(1) and ignoring non-visual property noise.
+  private func computeIncrementalDamage(old: Element, new: Element, clip: Rect) -> [Rect] {
+    var rects: [Rect] = []
+    func expandedBounds(_ node: Element) -> Rect {
+      let shadowPad = node.props.shadows.reduce(0.0) { best, s in
+        max(best, ShadowMask.padding(radius: s.radius) + max(abs(s.x), abs(s.y)))
+      }
+      let pad = max(2.0, node.props.borderWidth + shadowPad)
+      return Rect(
+        x: node.frame.minX - pad, y: node.frame.minY - pad,
+        width: node.frame.width + pad * 2, height: node.frame.height + pad * 2)
+    }
+    func isTransformed(_ node: Element) -> Bool {
+      node.props.rotation != 0 || node.props.scaleX != 1 || node.props.scaleY != 1
+    }
+    func subtreeBounds(_ node: Element, clip: Rect) -> Rect {
+      if isTransformed(node) { return clip }
+      let nextClip = node.props.clipped ? clip.intersection(node.frame) : clip
+      var bounds = expandedBounds(node).intersection(clip)
+      if node.hasOverflow {
+        for child in node.children {
+          bounds = Self.unionRect(bounds, subtreeBounds(child, clip: nextClip))
+        }
+      }
+      return bounds
+    }
+    func pathBuildersDiffer(_ a: Element, _ b: Element) -> Bool {
+      if (a.pathBuilder == nil) != (b.pathBuilder == nil) { return true }
+      if let pa = a.pathBuilder, let pb = b.pathBuilder {
+        let r = a.frame.cgRect
+        if pa(r) != pb(r) { return true }
+      }
+      if (a.clipPathBuilder == nil) != (b.clipPathBuilder == nil) { return true }
+      if let ca = a.clipPathBuilder, let cb = b.clipPathBuilder {
+        let r = CGRect(origin: .zero, size: a.frame.cgRect.size)
+        if ca(r) != cb(r) { return true }
+      }
+      return false
+    }
+    func diff(_ a: Element, _ b: Element, clip: Rect) {
+      if b.reusesLayout && a.id == b.id && a.frame == b.frame { return }
+      if isTransformed(a) || isTransformed(b) {
+        Self.addDamageRect(clip, into: &rects)
+        return
+      }
+      let aClip = a.props.clipped ? clip.intersection(a.frame) : clip
+      let bClip = b.props.clipped ? clip.intersection(b.frame) : clip
+      if a.id != b.id || a.kind != b.kind || a.frame != b.frame
+        || a.props.clipped != b.props.clipped || a.props.visible != b.props.visible
+        || a.props.opacity != b.props.opacity
+      {
+        Self.addDamageRect(subtreeBounds(a, clip: clip), into: &rects)
+        Self.addDamageRect(subtreeBounds(b, clip: clip), into: &rects)
+        return
+      }
+      if !a.props.visualEquals(b.props) || pathBuildersDiffer(a, b) {
+        Self.addDamageRect(expandedBounds(a).intersection(clip), into: &rects)
+        Self.addDamageRect(expandedBounds(b).intersection(clip), into: &rects)
+      }
+      if a.children.count == b.children.count {
+        for i in 0..<a.children.count {
+          diff(a.children[i], b.children[i], clip: bClip)
+        }
+      } else {
+        var oldByID: [NodeID: Element] = [:]
+        oldByID.reserveCapacity(a.children.count)
+        for child in a.children { oldByID[child.id] = child }
+        var seen = Set<NodeID>()
+        seen.reserveCapacity(b.children.count)
+        for child in b.children {
+          seen.insert(child.id)
+          if let prior = oldByID[child.id] {
+            diff(prior, child, clip: bClip)
+          } else {
+            Self.addDamageRect(subtreeBounds(child, clip: bClip), into: &rects)
+          }
+        }
+        for child in a.children where !seen.contains(child.id) {
+          Self.addDamageRect(subtreeBounds(child, clip: aClip), into: &rects)
+        }
+      }
+    }
+    diff(old, new, clip: clip)
+    return rects.map { $0.intersection(clip) }.filter { !$0.isEmpty }
   }
 
   private func preparePublication(_ root: Element) {
@@ -337,15 +542,20 @@ public final class LinuxDrawingBackend: RenderBackend {
       }
       var hasControls = node.kind == .textField || node.kind == .button || node.kind == .styledButton
         || node.props.focusable
-      for child in node.children.reversed() {
-        if visit(child, animation: animation) { hasControls = true }
+      let count = node.children.count
+      if count > 0 {
+        for i in stride(from: count - 1, through: 0, by: -1) {
+          if visit(node.children[i], animation: animation) { hasControls = true }
+        }
       }
       if hasControls { controlBranches.insert(node.id) }
       return hasControls
     }
     visit(root, animation: nil)
     prior = next
-    motions = motions.filter { next[$0.key] != nil && $0.value.isActive(at: now) }
+    if !motions.isEmpty {
+      motions = motions.filter { next[$0.key] != nil && $0.value.isActive(at: now) }
+    }
   }
 
   private func updateVisibleMotions(in root: Element) {
@@ -458,13 +668,13 @@ public final class LinuxDrawingBackend: RenderBackend {
         buttons[node.id] = Activation(node.id, host: typed(host, GtkFixed.self), backend: self)
       }
       if let control = buttons[node.id] {
-        if refreshContent || isNew { control.updateContent(node) }
+        if isNew || (refreshContent && !node.reusesLayout) { control.updateContent(node) }
         control.updatePlacement(visible: active ? visible : .zero, enabled: props.enabled && active,
                                 accessibilityHidden: props.accessibilityHidden)
         if props.focusRequested && active { focus = node.id }
       }
     }
-    for child in LinuxDrawing.orderedChildren(node) {
+    LinuxDrawing.forEachOrderedChild(node) { child in
       updateControls(child, clip: clip, background: background, allowed: allowed,
                      focus: &focus, modal: modal, inModal: inModal,
                      accessibilityLabel: accessibilityLabel, refreshContent: refreshContent,
@@ -620,6 +830,8 @@ private final class Activation {
   private var name: String?
   private var help: String?
   private var placement = Rect.zero
+  private var isShown = false
+  private var isSensitive = true
 
   init(_ id: NodeID, host: UnsafeMutablePointer<GtkFixed>, backend: LinuxDrawingBackend) {
     self.id = id
@@ -700,9 +912,12 @@ private final class Activation {
   }
 
   func updatePlacement(visible: Rect, enabled: Bool, accessibilityHidden: Bool) {
-    let shown: gboolean = !visible.isEmpty && !accessibilityHidden ? 1 : 0
-    if shown == 0, gtk_widget_get_visible(widget) != 0 { gtk_widget_hide(widget) }
-    if shown != 0, placement != visible {
+    let shown = !visible.isEmpty && !accessibilityHidden
+    if !shown, isShown {
+      gtk_widget_hide(widget)
+      isShown = false
+    }
+    if shown, placement != visible {
       let x = pixels(visible.minX), y = pixels(visible.minY)
       let width = pixels(visible.width), height = pixels(visible.height)
       if x != pixels(placement.minX) || y != pixels(placement.minY) {
@@ -713,9 +928,14 @@ private final class Activation {
       }
       placement = visible
     }
-    let sensitive: gboolean = enabled ? 1 : 0
-    if gtk_widget_get_sensitive(widget) != sensitive { gtk_widget_set_sensitive(widget, sensitive) }
-    if shown != 0, gtk_widget_get_visible(widget) == 0 { gtk_widget_show(widget) }
+    if isSensitive != enabled {
+      gtk_widget_set_sensitive(widget, enabled ? 1 : 0)
+      isSensitive = enabled
+    }
+    if shown, !isShown {
+      gtk_widget_show(widget)
+      isShown = true
+    }
   }
 }
 

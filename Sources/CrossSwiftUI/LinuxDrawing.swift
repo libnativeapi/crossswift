@@ -13,6 +13,7 @@ final class LinuxDrawing {
   }
   private var measured: [TextKey: SwiftUIRuntime.Size] = [:]
   private var layouts: [TextKey: OpaquePointer] = [:]
+  private var fontDescriptions: [Font: OpaquePointer] = [:]
   private let textContext = pango_font_map_create_context(pango_cairo_font_map_get_default())
   private final class NativeShadowMask {
     let surface: OpaquePointer
@@ -37,6 +38,7 @@ final class LinuxDrawing {
 
   deinit {
     for layout in layouts.values { g_object_unref(UnsafeMutableRawPointer(layout)) }
+    for desc in fontDescriptions.values { pango_font_description_free(desc) }
     if let textContext { g_object_unref(UnsafeMutableRawPointer(textContext)) }
   }
   struct Motion {
@@ -104,14 +106,14 @@ final class LinuxDrawing {
     var height: Int32 = 0
     pango_layout_get_pixel_size(layout, &width, &height)
     let size = SwiftUIRuntime.Size(width: Double(width), height: Double(height))
-    if measured.count >= 2048 { measured.removeAll(keepingCapacity: true) }
+    if measured.count >= 8192 { measured.removeAll(keepingCapacity: true) }
     measured[key] = size
     return size
   }
 
-  private func configure(_ layout: OpaquePointer, text: String, font: Font, spacing: Double) {
-    guard let description = pango_font_description_new() else { return }
-    defer { pango_font_description_free(description) }
+  private func fontDescription(for font: Font) -> OpaquePointer? {
+    if let cached = fontDescriptions[font] { return cached }
+    guard let description = pango_font_description_new() else { return nil }
     let family: String
     switch font.family {
     case "Segoe UI", "-apple-system", "system-ui": family = "Sans"
@@ -122,7 +124,18 @@ final class LinuxDrawing {
     pango_font_description_set_family(description, family)
     pango_font_description_set_absolute_size(description, Double(font.size) * Double(PANGO_SCALE))
     pango_font_description_set_weight(description, PangoWeight(rawValue: UInt32(max(100, min(900, font.weight.value)))))
-    pango_layout_set_font_description(layout, description)
+    if fontDescriptions.count >= 256 {
+      for desc in fontDescriptions.values { pango_font_description_free(desc) }
+      fontDescriptions.removeAll(keepingCapacity: true)
+    }
+    fontDescriptions[font] = description
+    return description
+  }
+
+  private func configure(_ layout: OpaquePointer, text: String, font: Font, spacing: Double) {
+    if let description = fontDescription(for: font) {
+      pango_layout_set_font_description(layout, description)
+    }
     pango_layout_set_text(layout, text, -1)
     pango_layout_set_spacing(layout, Int32(clamping: Int(spacing * Double(PANGO_SCALE))))
   }
@@ -143,8 +156,13 @@ final class LinuxDrawing {
 
     let transformed = translation != .zero || props.rotation != 0 || props.scaleX != 1 || props.scaleY != 1
     if !transformed && props.shadows.isEmpty && frame.intersection(damage).isEmpty
-      && (props.clipped || (node.children.isEmpty && props.shadows.isEmpty)) { return }
-    let usesClip = props.clipped || node.clipPathBuilder != nil
+      && (props.clipped || !node.hasOverflow || node.children.isEmpty) { return }
+    let canFoldOpacity =
+      opacity < 1 && node.children.isEmpty && node.kind != .gradient && node.kind != .image
+      && !((props.background?.opacity ?? 0) > 0 && props.borderWidth > 0 && props.borderColor.opacity > 0)
+    let needsGroup = opacity < 1 && !canFoldOpacity
+    let tightGroupClip = needsGroup && !props.clipped && !node.hasOverflow
+    let usesClip = props.clipped || node.clipPathBuilder != nil || tightGroupClip
     if transformed || usesClip { cairo_save(context) }
     defer { if transformed || usesClip { cairo_restore(context) } }
     if translation != .zero { cairo_translate(context, translation.x, translation.y) }
@@ -181,6 +199,14 @@ final class LinuxDrawing {
     if props.clipped {
       addRoundedRect(frame, radius: props.cornerRadius, to: context)
       cairo_clip(context)
+    } else if tightGroupClip {
+      // Bound cairo_push_group's offscreen surface to this node's frame rather
+      // than allocating a full-window buffer for every dimmed subtree.
+      let margin = max(2.0, props.borderWidth)
+      cairo_rectangle(
+        context, frame.minX - margin, frame.minY - margin,
+        frame.width + margin * 2, frame.height + margin * 2)
+      cairo_clip(context)
     }
     if let builder = node.clipPathBuilder {
       let mask = builder(CGRect(origin: .zero, size: frame.cgRect.size))
@@ -188,16 +214,20 @@ final class LinuxDrawing {
       cairo_clip(context)
     }
 
-    if opacity < 1 { cairo_push_group(context) }
+    if needsGroup { cairo_push_group(context) }
+    let leafAlpha = canFoldOpacity ? opacity : 1.0
     if let builder = node.pathBuilder {
-      shape(context, builder(frame.cgRect), fill: props.background ?? .clear,
-            stroke: props.borderColor, width: props.borderWidth, dash: props.dash)
+      shape(context, builder(frame.cgRect),
+            fill: (props.background ?? .clear).opacity(leafAlpha),
+            stroke: props.borderColor.opacity(leafAlpha), width: props.borderWidth, dash: props.dash)
     } else if node.kind == .path {
       shape(context, props.path.transformed(x: frame.minX, y: frame.minY),
-            fill: props.background ?? .clear, stroke: props.borderColor, width: props.borderWidth, dash: props.dash)
+            fill: (props.background ?? .clear).opacity(leafAlpha),
+            stroke: props.borderColor.opacity(leafAlpha), width: props.borderWidth, dash: props.dash)
     } else if props.background != nil || props.borderWidth > 0 {
       addRoundedRect(frame, radius: props.cornerRadius, to: context)
-      drawPath(context, fill: props.background ?? .clear, stroke: props.borderColor, width: props.borderWidth)
+      drawPath(context, fill: (props.background ?? .clear).opacity(leafAlpha),
+               stroke: props.borderColor.opacity(leafAlpha), width: props.borderWidth)
     }
     if node.kind == .gradient, let gradient = props.gradient {
       let pattern = cairo_pattern_create_linear(
@@ -216,9 +246,13 @@ final class LinuxDrawing {
     }
     let scaled = isScaled || props.rotation != 0 || props.scaleX != 1 || props.scaleY != 1
     if node.kind == .image { image(node, in: context) }
-    if node.kind == .text || node.kind == .button { text(node, in: context, isScaled: scaled) }
-    for child in Self.orderedChildren(node) {
-      paint(child, in: context, clip: props.clipped ? area : clip, damage: transformed ? clip : damage,
+    if node.kind == .text || node.kind == .button {
+      text(node, in: context, isScaled: scaled, alpha: leafAlpha)
+    }
+    let childClip = props.clipped ? area : clip
+    let childDamage = transformed ? clip : damage
+    Self.forEachOrderedChild(node) { child in
+      paint(child, in: context, clip: childClip, damage: childDamage,
             motions: motions, now: now,
             inheritedOpacity: node.props.opacity, isScaled: scaled)
     }
@@ -239,7 +273,7 @@ final class LinuxDrawing {
         cairo_fill(context)
       }
     }
-    if opacity < 1 {
+    if needsGroup {
       cairo_pop_group_to_source(context)
       cairo_paint_with_alpha(context, opacity)
     }
@@ -257,7 +291,7 @@ final class LinuxDrawing {
       pango_layout_set_attributes(layout, attributes)
       pango_attr_list_unref(attributes)
     }
-    if layouts.count >= 1024 {
+    if layouts.count >= 4096 {
       for old in layouts.values { g_object_unref(UnsafeMutableRawPointer(old)) }
       layouts.removeAll(keepingCapacity: true)
     }
@@ -265,13 +299,13 @@ final class LinuxDrawing {
     return layout
   }
 
-  private func text(_ node: Element, in context: OpaquePointer, isScaled: Bool) {
+  private func text(_ node: Element, in context: OpaquePointer, isScaled: Bool, alpha: Double = 1.0) {
     let props = node.props
     let frame = node.frame
     let key = TextKey(text: props.renderedText ?? props.text, font: props.font ?? .body,
                       spacing: props.lineSpacing, underline: props.underline, tracking: props.tracking)
     guard let layout = textLayout(key) else { return }
-    source(context, props.foreground ?? .black)
+    source(context, (props.foreground ?? .black).opacity(alpha))
     if node.kind == .button {
       var width: Int32 = 0, height: Int32 = 0
       pango_layout_get_pixel_size(layout, &width, &height)
@@ -292,8 +326,11 @@ final class LinuxDrawing {
     let frame = node.frame
     guard frame.width > 0, frame.height > 0 else { return }
     let path = node.props.imagePath
-    let lowerPath = path.lowercased()
-    if (path.hasPrefix("sf://") || lowerPath.hasSuffix(".svg") || lowerPath.hasSuffix(".pdf")),
+    let isVector =
+      path.hasPrefix("sf://")
+      || path.hasSuffix(".svg") || path.hasSuffix(".SVG")
+      || path.hasSuffix(".pdf") || path.hasSuffix(".PDF")
+    if isVector,
        let image = VectorImage.load(path),
        image.bounds.width > 0, image.bounds.height > 0 {
       let scale = min(frame.width / image.bounds.width, frame.height / image.bounds.height)
@@ -405,6 +442,29 @@ final class LinuxDrawing {
 
   private func source(_ context: OpaquePointer, _ color: Color) {
     cairo_set_source_rgba(context, color.red, color.green, color.blue, color.opacity)
+  }
+
+  static func forEachOrderedChild(_ node: Element, _ body: (Element) -> Void) {
+    let children = node.children
+    let count = children.count
+    if count == 0 { return }
+    if count == 1 {
+      body(children[0])
+      return
+    }
+    let behind = node.kind == .layer && node.props.layerBehind
+    if children.contains(where: { $0.props.zIndex != 0 }) {
+      let base = behind ? Array(children.reversed()) : children
+      let sorted = base.enumerated().sorted {
+        $0.element.props.zIndex == $1.element.props.zIndex
+          ? $0.offset < $1.offset : $0.element.props.zIndex < $1.element.props.zIndex
+      }
+      for entry in sorted { body(entry.element) }
+    } else if behind {
+      for i in stride(from: count - 1, through: 0, by: -1) { body(children[i]) }
+    } else {
+      for i in 0..<count { body(children[i]) }
+    }
   }
 
   static func orderedChildren(_ node: Element) -> [Element] {

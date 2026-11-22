@@ -252,6 +252,52 @@ public struct NodeProps: Equatable {
   /// Optional semantic control metadata used by native platform hosts (e.g. Android Compose).
   public var semanticControl: SemanticControl? = nil
 
+  /// Compares only properties that affect visual rendering, ignoring metadata
+  /// such as `animationPass`, accessibility labels, tooltips, and focus flags
+  /// that can differ across passes without changing pixels.
+  public func visualEquals(_ other: NodeProps) -> Bool {
+    if self == other { return true }
+    var lhs = self
+    var rhs = other
+    lhs.animationPass = 0
+    rhs.animationPass = 0
+    lhs.animation = nil
+    rhs.animation = nil
+    lhs.animationDisabled = false
+    rhs.animationDisabled = false
+    lhs.focusRequested = false
+    rhs.focusRequested = false
+    lhs.focusable = false
+    rhs.focusable = false
+    lhs.hitTesting = true
+    rhs.hitTesting = true
+    lhs.help = ""
+    rhs.help = ""
+    lhs.accessibilityLabel = ""
+    rhs.accessibilityLabel = ""
+    lhs.accessibilityValue = ""
+    rhs.accessibilityValue = ""
+    lhs.accessibilityHidden = false
+    rhs.accessibilityHidden = false
+    lhs.accessibilityTraits = 0
+    rhs.accessibilityTraits = 0
+    lhs.accessibilityIdentifier = ""
+    rhs.accessibilityIdentifier = ""
+    lhs.keyboardShortcut = nil
+    rhs.keyboardShortcut = nil
+    lhs.coordinateSpace = nil
+    rhs.coordinateSpace = nil
+    lhs.disabledOverride = nil
+    rhs.disabledOverride = nil
+    lhs.colorSchemeOverride = nil
+    rhs.colorSchemeOverride = nil
+    lhs.semanticControl = nil
+    rhs.semanticControl = nil
+    lhs.transition = nil
+    rhs.transition = nil
+    return lhs == rhs
+  }
+
   public init() {}
 }
 public struct Element {
@@ -267,7 +313,7 @@ public struct Element {
   var layoutID: Int = 0
   var evaluationID: Int = 0
   var evaluationRevision: Int = 0
-  var reusesLayout = false
+  package var reusesLayout = false
   package var hasOverflow = false
   var hasDynamicLayout = false
   var hasPresentation = false
@@ -468,9 +514,34 @@ func normalize(_ element: Element, previous: Element? = nil) -> Element {
     case 0:
       return Element(kind: .empty)
     case 1:
-      return result.children[0]
+      var single = result.children[0]
+      if single.props.lineLimit == nil, let limit = result.props.lineLimit {
+        single.props.lineLimit = limit
+      }
+      if single.props.lineSpacing == 0, result.props.lineSpacing != 0 {
+        single.props.lineSpacing = result.props.lineSpacing
+      }
+      if single.props.foreground == nil, let fg = result.props.foreground {
+        single.props.foreground = fg
+      }
+      if single.props.font == nil, let font = result.props.font {
+        single.props.font = font
+      }
+      if single.props.truncationMode == .tail, result.props.truncationMode != .tail {
+        single.props.truncationMode = result.props.truncationMode
+      }
+      if result.props.opacity != 1 { single.props.opacity *= result.props.opacity }
+      if single.props.disabledOverride == nil, let disabled = result.props.disabledOverride {
+        single.props.disabledOverride = disabled
+      }
+      if single.props.colorSchemeOverride == nil, let scheme = result.props.colorSchemeOverride {
+        single.props.colorSchemeOverride = scheme
+      }
+      if single.explicitID == nil { single.explicitID = result.explicitID }
+      if single.tagValue == nil { single.tagValue = result.tagValue }
+      return single
     default:
-      var props = NodeProps()
+      var props = result.props
       props.spacing = 0
       return Element(kind: .container(.vertical), props: props, children: result.children)
     }

@@ -25,9 +25,12 @@ public struct ShadowMask {
     let paddedWidth = width + padding * 2
     let paddedHeight = height + padding * 2
     guard paddedWidth.isFinite, paddedHeight.isFinite else { return nil }
-    // Bound temporary storage for oversized views; downsampling changes only
-    // resolution, never the logical blur radius or its extent.
-    let scale = min(scale, 2048 / max(paddedWidth, paddedHeight))
+    // Bound temporary storage for oversized views; Gaussian shadows are
+    // low-frequency so capping resolution on large blurs preserves smoothness
+    // while avoiding multi-million-pixel CPU blurs.
+    let maxDim = max(paddedWidth, paddedHeight)
+    let targetLimit = radius >= 4 && maxDim > 160 ? 512.0 : 2048.0
+    let scale = min(scale, targetLimit / maxDim)
     let w = Int(ceil(paddedWidth * scale))
     let h = Int(ceil(paddedHeight * scale))
     guard w > 0, h > 0 else { return nil }
@@ -41,17 +44,52 @@ public struct ShadowMask {
     let bottom = top + height * scale
     let corner = max(0, min(cornerRadius, min(width, height) / 2)) * scale
     var pixels = [Float](repeating: 0, count: w * h)
-    // Integrate coverage along each scanline, including fractional-size edges.
-    for y in 0..<h {
-      for sample in 0..<4 {
-        let py = Double(y) + (Double(sample) + 0.5) / 4
-        guard py > top, py < bottom else { continue }
-        let dy = max(0, top + corner - py, py - (bottom - corner))
-        let cut = corner - sqrt(max(0, corner * corner - dy * dy))
-        let start = left + cut
-        let end = right - cut
-        for x in max(0, Int(floor(start)))..<min(w, Int(ceil(end))) {
-          pixels[y * w + x] += Float(max(0, min(Double(x + 1), end) - max(Double(x), start))) / 4
+    // Integrate coverage along each scanline; fill interior spans directly.
+    pixels.withUnsafeMutableBufferPointer { buf in
+      guard let base = buf.baseAddress else { return }
+      let yStart = max(0, Int(floor(top)))
+      let yEnd = min(h, Int(ceil(bottom)))
+      guard yStart < yEnd else { return }
+      let flatTop = top + corner
+      let flatBottom = bottom - corner
+      let interiorX0 = max(0, Int(ceil(left)))
+      let interiorX1 = min(w, Int(floor(right)))
+      for y in yStart..<yEnd {
+        let row = base + y * w
+        let yd = Double(y)
+        if yd >= flatTop && yd + 1 <= flatBottom && interiorX0 < interiorX1 {
+          for x in interiorX0..<interiorX1 { row[x] = 1.0 }
+          let lx = interiorX0 - 1
+          if lx >= 0 && lx < w {
+            row[lx] = Float(max(0, min(Double(lx + 1), right) - max(Double(lx), left)))
+          }
+          if interiorX1 >= 0 && interiorX1 < w {
+            row[interiorX1] = Float(
+              max(0, min(Double(interiorX1 + 1), right) - max(Double(interiorX1), left)))
+          }
+          continue
+        }
+        for sample in 0..<4 {
+          let py = yd + (Double(sample) + 0.5) * 0.25
+          guard py > top, py < bottom else { continue }
+          let dy = max(0, flatTop - py, py - flatBottom)
+          let cut = corner - sqrt(max(0, corner * corner - dy * dy))
+          let start = left + cut
+          let end = right - cut
+          let x0 = max(0, Int(floor(start)))
+          let x1 = min(w, Int(ceil(end)))
+          if x0 >= x1 { continue }
+          let full0 = min(x1, max(x0, Int(ceil(start))))
+          let full1 = max(full0, min(x1, Int(floor(end))))
+          if x0 < full0 {
+            row[x0] += Float(max(0, min(Double(x0 + 1), end) - max(Double(x0), start))) * 0.25
+          }
+          if full0 < full1 {
+            for x in full0..<full1 { row[x] += 0.25 }
+          }
+          if full1 < x1 {
+            row[full1] += Float(max(0, min(Double(full1 + 1), end) - max(Double(full1), start))) * 0.25
+          }
         }
       }
     }
@@ -75,7 +113,17 @@ public struct ShadowMask {
         Self.blur(scratch, into: &pixels, width: w, height: h, radius: boxRadius, horizontal: false)
       }
     }
-    self.alpha = pixels.map { UInt8(clamping: Int((max(0, min(1, $0)) * 255).rounded())) }
+    var out = [UInt8](repeating: 0, count: pixels.count)
+    pixels.withUnsafeBufferPointer { src in
+      out.withUnsafeMutableBufferPointer { dst in
+        guard let sp = src.baseAddress, let dp = dst.baseAddress else { return }
+        for i in 0..<src.count {
+          let v = sp[i]
+          dp[i] = v <= 0 ? 0 : (v >= 1 ? 255 : UInt8(v * 255 + 0.5))
+        }
+      }
+    }
+    self.alpha = out
   }
 
   private static func blur(
@@ -85,15 +133,21 @@ public struct ShadowMask {
     let length = horizontal ? width : height
     let lines = horizontal ? height : width
     let stride = horizontal ? 1 : width
-    let divisor = Float(radius * 2 + 1)
-    for line in 0..<lines {
-      let base = horizontal ? line * width : line
-      var sum: Float = 0
-      for i in 0..<min(length, radius + 1) { sum += input[base + i * stride] }
-      for i in 0..<length {
-        output[base + i * stride] = sum / divisor
-        if i >= radius { sum -= input[base + (i - radius) * stride] }
-        if i + radius + 1 < length { sum += input[base + (i + radius + 1) * stride] }
+    let invDivisor: Float = 1.0 / Float(radius * 2 + 1)
+    input.withUnsafeBufferPointer { src in
+      output.withUnsafeMutableBufferPointer { dst in
+        guard let sp = src.baseAddress, let dp = dst.baseAddress else { return }
+        let initialEnd = min(length, radius + 1)
+        for line in 0..<lines {
+          let base = horizontal ? line * width : line
+          var sum: Float = 0
+          for i in 0..<initialEnd { sum += sp[base + i * stride] }
+          for i in 0..<length {
+            dp[base + i * stride] = sum * invDivisor
+            if i >= radius { sum -= sp[base + (i - radius) * stride] }
+            if i + radius + 1 < length { sum += sp[base + (i + radius + 1) * stride] }
+          }
+        }
       }
     }
   }

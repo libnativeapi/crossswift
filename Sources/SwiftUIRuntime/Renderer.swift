@@ -38,6 +38,7 @@ import Foundation
   private let layoutAnimations = LayoutAnimator()
   private var transactionDepth = 0
   private let evaluations = EvaluationGraph()
+  private var mountedGeometryChildren: [Int: Element] = [:]
   private var contentSize: Size
   private var hoveredNodeIDs: [NodeID] = []
   private var focused: NodeID?
@@ -116,6 +117,7 @@ import Foundation
     )
     mounted = mountedTree
     tree = mountedTree
+    refreshMountedGeometryChildren(mountedTree)
     layoutAnimations.seed(mountedTree)
     refreshHoverActions()
     lastCommands = commands ?? []
@@ -825,6 +827,7 @@ import Foundation
     isRendering = true
     mounted = updated
     tree = updated
+    refreshMountedGeometryChildren(updated)
     lastCommands = commands ?? []
     lastTimings = ["scroll.translate": (Date.timeIntervalSinceReferenceDate - started) * 1000]
     let published = Date.timeIntervalSinceReferenceDate
@@ -892,6 +895,8 @@ import Foundation
       root: &element,
       in: contentSize,
       animator: layoutAnimations,
+      evaluations: evaluations,
+      mountedGeometryChildren: mountedGeometryChildren,
       renderPass: currentPass,
       now: now)
     lastTimings["layout"] = (Date.timeIntervalSinceReferenceDate - start) * 1000
@@ -926,6 +931,7 @@ import Foundation
     )
     mounted = mountedTree
     tree = mountedTree
+    refreshMountedGeometryChildren(mountedTree)
     layoutAnimations.finishPass(mounted: mountedTree)
     refreshHoverActions()
     lastCommands = commands ?? []
@@ -947,6 +953,18 @@ import Foundation
     LifecycleRegistry.shared.commit(root: rootPath)
     isRendering = false
   }
+  private func refreshMountedGeometryChildren(_ root: Element) {
+    mountedGeometryChildren.removeAll(keepingCapacity: true)
+    func visit(_ node: Element) {
+      if node.kind == .geometry, node.evaluationID != 0, let child = node.children.first {
+        mountedGeometryChildren[node.evaluationID] = child
+      }
+      guard node.hasDynamicLayout else { return }
+      for child in node.children { visit(child) }
+    }
+    visit(root)
+  }
+
   private func refreshHoverActions() {
     guard let target = hoveredNodeIDs.first else { return }
     // The hit path is leaf-first. A single ancestry lookup refreshes callbacks

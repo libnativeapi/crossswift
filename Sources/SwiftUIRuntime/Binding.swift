@@ -19,7 +19,12 @@ public struct Binding<Value> {
   }
 
   public var wrappedValue: Value {
-    get { getter() }
+    get {
+      if let graph = EvaluationGraph.active {
+        return graph.trackObservation { getter() }
+      }
+      return getter()
+    }
     nonmutating set { setter(newValue) }
   }
 

@@ -234,26 +234,60 @@ func flattenChildren(_ element: Element) -> [Element] {
   if element.kind == .fragment {
     var children: [Element] = []
     children.reserveCapacity(element.children.count)
-    func append(_ child: Element, inheritedTag: AnyHashable?, inheritedID: AnyHashable?) {
+    func append(
+      _ child: Element,
+      inheritedTag: AnyHashable?,
+      inheritedID: AnyHashable?,
+      inheritedLineLimit: Int?,
+      inheritedLineSpacing: Double,
+      inheritedForeground: Color?,
+      inheritedFont: Font?
+    ) {
       let tag = child.tagValue ?? inheritedTag
       let eid = child.explicitID ?? inheritedID
+      let lineLimit = child.props.lineLimit ?? inheritedLineLimit
+      let lineSpacing = child.props.lineSpacing != 0 ? child.props.lineSpacing : inheritedLineSpacing
+      let foreground = child.props.foreground ?? inheritedForeground
+      let font = child.props.font ?? inheritedFont
       switch child.kind {
       case .fragment:
         let propagateID = child.children.count == 1 ? eid : nil
         for nested in child.children {
-          append(nested, inheritedTag: tag, inheritedID: propagateID)
+          append(
+            nested,
+            inheritedTag: tag,
+            inheritedID: propagateID,
+            inheritedLineLimit: lineLimit,
+            inheritedLineSpacing: lineSpacing,
+            inheritedForeground: foreground,
+            inheritedFont: font)
         }
       case .empty: break
       default:
         var resolved = child
         if resolved.tagValue == nil { resolved.tagValue = tag }
         if resolved.explicitID == nil { resolved.explicitID = eid }
+        if resolved.props.lineLimit == nil, let lineLimit { resolved.props.lineLimit = lineLimit }
+        if resolved.props.lineSpacing == 0, lineSpacing != 0 {
+          resolved.props.lineSpacing = lineSpacing
+        }
+        if resolved.props.foreground == nil, let foreground {
+          resolved.props.foreground = foreground
+        }
+        if resolved.props.font == nil, let font { resolved.props.font = font }
         children.append(resolved)
       }
     }
     let rootPropagateID = element.children.count == 1 ? element.explicitID : nil
     for child in element.children {
-      append(child, inheritedTag: element.tagValue, inheritedID: rootPropagateID)
+      append(
+        child,
+        inheritedTag: element.tagValue,
+        inheritedID: rootPropagateID,
+        inheritedLineLimit: element.props.lineLimit,
+        inheritedLineSpacing: element.props.lineSpacing,
+        inheritedForeground: element.props.foreground,
+        inheritedFont: element.props.font)
     }
     return children
   }

@@ -125,7 +125,13 @@ struct ModifierContent<Content: View, Modifier: ViewModifier>: View, _PrimitiveV
   var body: Never { fatalError("ModifierContent is primitive") }
   func _makeElement(path: ViewPath) -> Element {
     _installState(modifier, path: path)
-    return _render(modifier.body(content: AnyView(content)), path: path)
+    let bodyValue: Modifier.Body
+    if let graph = EvaluationGraph.active {
+      bodyValue = graph.trackObservation { modifier.body(content: AnyView(content)) }
+    } else {
+      bodyValue = modifier.body(content: AnyView(content))
+    }
+    return _render(bodyValue, path: path)
   }
 }
 public struct Group<Content: View>: View {

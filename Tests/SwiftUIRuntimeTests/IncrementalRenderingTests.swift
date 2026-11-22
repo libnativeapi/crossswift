@@ -680,4 +680,222 @@ final class IncrementalRenderingTests: XCTestCase {
     renderer.input(event: 1, point: CGPoint(x: overflow.frame.minX + 5, y: overflow.frame.minY + 5))
     XCTAssertEqual(hovered.suffix(2), ["item:2", "overflow"])
   }
+
+  @Observable
+  fileprivate final class CellSelectionBox {
+    var selected: Bool
+    init(selected: Bool = false) { self.selected = selected }
+  }
+
+  private struct ObservableGeometryCell: View {
+    let index: Int
+    let box: CellSelectionBox
+    let counts: Counts
+    @State private var tapped = 0
+
+    var body: some View {
+      let _ = counts.bodies["cell:\(index)", default: 0] += 1
+      Button("cell-\(index)-\(box.selected ? "on" : "off")-\(tapped)") {
+        tapped += 1
+      }
+    }
+  }
+
+  private struct ObservableGeometryGrid: View {
+    let boxes: [CellSelectionBox]
+    let counts: Counts
+
+    var body: some View {
+      VStack {
+        Counter(name: "outside", counts: counts)
+        GeometryReader { proxy in
+          let _ = counts.bodies["geo", default: 0] += 1
+          VStack {
+            ForEach(0..<boxes.count, id: \.self) { index in
+              ObservableGeometryCell(index: index, box: boxes[index], counts: counts)
+                .frame(width: proxy.size.width, height: 20)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  func testObservableAndStateInsideGeometryReaderOnlyReevaluateDirtyCell() throws {
+    StateRegistry.shared.reset()
+    let counts = Counts()
+    let boxes = (0..<12).map { CellSelectionBox(selected: $0 == 0) }
+    let renderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(ObservableGeometryGrid(boxes: boxes, counts: counts)),
+      size: Size(width: 300, height: 300)
+    )
+    renderer.mount()
+    XCTAssertEqual(counts.bodies["geo"], 1)
+    XCTAssertEqual(counts.bodies["cell:0"], 1)
+    XCTAssertEqual(counts.bodies["cell:5"], 1)
+    XCTAssertEqual(counts.bodies["outside"], 1)
+
+    // Flipping two @Observable boxes inside GeometryReader should only re-evaluate
+    // those two cells, leaving the other 10 cells and outside untouched.
+    boxes[0].selected = false
+    boxes[5].selected = true
+    renderer.renderIfNeeded()
+    XCTAssertNotNil(findNode(in: renderer.tree!, text: "cell-0-off-0"))
+    XCTAssertNotNil(findNode(in: renderer.tree!, text: "cell-5-on-0"))
+    XCTAssertEqual(counts.bodies["cell:0"], 2)
+    XCTAssertEqual(counts.bodies["cell:5"], 2)
+    XCTAssertEqual(counts.bodies["cell:1"], 1)
+    XCTAssertEqual(counts.bodies["cell:11"], 1)
+    XCTAssertEqual(counts.bodies["outside"], 1)
+
+    // Tapping a @State button inside GeometryReader should only re-evaluate that cell.
+    let cell3 = try XCTUnwrap(findNode(in: renderer.tree!, text: "cell-3-off-0"))
+    renderer.performTap(cell3.id)
+    XCTAssertNotNil(findNode(in: renderer.tree!, text: "cell-3-off-1"))
+    XCTAssertEqual(counts.bodies["cell:3"], 2)
+    XCTAssertEqual(counts.bodies["cell:1"], 1)
+    XCTAssertEqual(counts.bodies["cell:5"], 2)
+    XCTAssertEqual(counts.bodies["outside"], 1)
+  }
+
+  func testBinarySearchTextTruncationMatchesHeadAndTailWidths() throws {
+    StateRegistry.shared.reset()
+    let longText = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    let view = VStack {
+      Text(longText).lineLimit(1).truncationMode(.tail).frame(width: 80)
+      Text(longText).lineLimit(1).truncationMode(.head).frame(width: 80)
+    }
+    let renderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(view),
+      size: Size(width: 200, height: 100),
+      layoutEngine: LayoutEngine(metrics: TextMetrics(characterWidth: 8, lineHeight: 20))
+    )
+    renderer.mount()
+    let texts = collectTexts(in: renderer.tree!)
+    XCTAssertEqual(texts.count, 2)
+    XCTAssertEqual(texts[0], "ABCDEFGHI…")
+    XCTAssertEqual(texts[1], "…123456789")
+  }
+
+  private struct EquatableResizeTile: View, Equatable {
+    let title: String
+    let counts: Counts
+    @Environment(\.colorScheme) private var colorScheme
+    static func == (lhs: Self, rhs: Self) -> Bool {
+      lhs.title == rhs.title && lhs.counts === rhs.counts
+    }
+    var body: some View {
+      let _ = counts.bodies["eq:\(title)", default: 0] += 1
+      Text("\(title):\(colorScheme == .dark ? "dark" : "light")")
+    }
+  }
+
+  private struct EquatableGeometryHost: View {
+    let counts: Counts
+    @State private var scheme: ColorScheme = .light
+    var body: some View {
+      VStack {
+        Button("toggle-scheme") { scheme = scheme == .light ? .dark : .light }
+        GeometryReader { proxy in
+          let _ = counts.bodies["geo", default: 0] += 1
+          let bucket = max(100, Int(proxy.size.height))
+          VStack {
+            EquatableResizeTile(title: "stable:\(bucket)", counts: counts)
+          }
+        }
+        .environment(\.colorScheme, scheme)
+      }
+    }
+  }
+
+  func testEquatableChildInsideGeometryReaderSkipsReevaluationOnResizeAndInvalidatesOnEnvironmentChange()
+    throws
+  {
+    StateRegistry.shared.reset()
+    let counts = Counts()
+    let renderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(EquatableGeometryHost(counts: counts)),
+      size: Size(width: 300, height: 80)
+    )
+    renderer.mount()
+    XCTAssertEqual(counts.bodies["geo"], 1)
+    XCTAssertEqual(counts.bodies["eq:stable:100"], 1)
+    XCTAssertNotNil(findNode(in: renderer.tree!, text: "stable:100:light"))
+
+    // Horizontal resize changes GeometryReader width, but bucket stays 100 -> Equatable child skips!
+    renderer.resize(to: Size(width: 340, height: 80))
+    XCTAssertEqual(counts.bodies["geo"], 2)
+    XCTAssertEqual(counts.bodies["eq:stable:100"], 1)
+
+    // Changing @Environment(\.colorScheme) MUST invalidate the Equatable child even with same inputs!
+    let button = try XCTUnwrap(findNode(in: renderer.tree!, text: "toggle-scheme"))
+    renderer.performTap(button.id)
+    XCTAssertEqual(counts.bodies["eq:stable:100"], 2)
+    XCTAssertNotNil(findNode(in: renderer.tree!, text: "stable:100:dark"))
+  }
+
+  private struct ConditionalStyledLabel: View {
+    let flag: Bool
+    @ViewBuilder var body: some View {
+      if flag {
+        Text("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+      } else {
+        Text("0123456789")
+      }
+    }
+  }
+
+  func testLineLimitSurvivesConditionalContentFragmentFlattening() throws {
+    StateRegistry.shared.reset()
+    let view = HStack {
+      ConditionalStyledLabel(flag: true)
+        .lineLimit(1)
+        .frame(width: 80)
+    }
+    let renderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(view),
+      size: Size(width: 200, height: 40),
+      layoutEngine: LayoutEngine(metrics: TextMetrics(characterWidth: 8, lineHeight: 20))
+    )
+    renderer.mount()
+    let texts = collectTexts(in: renderer.tree!)
+    XCTAssertEqual(texts, ["ABCDEFGHI…"])
+  }
+
+  func testVisualPropsEqualsIgnoresAnimationPassAndMetadata() {
+    var a = NodeProps()
+    a.background = .blue
+    a.text = "Hello"
+    a.animationPass = 1
+    a.help = "Tip A"
+    a.focusRequested = false
+
+    var b = a
+    b.animationPass = 99
+    b.help = "Tip B"
+    b.focusRequested = true
+    b.accessibilityLabel = "Different"
+    XCTAssertTrue(a.visualEquals(b))
+
+    var c = b
+    c.background = .red
+    XCTAssertFalse(a.visualEquals(c))
+
+    var d = b
+    d.text = "World"
+    XCTAssertFalse(a.visualEquals(d))
+  }
+
+  private func collectTexts(in node: Element) -> [String] {
+    var result: [String] = []
+    if node.kind == .text, let rendered = node.props.renderedText {
+      result.append(rendered)
+    }
+    for child in node.children { result.append(contentsOf: collectTexts(in: child)) }
+    return result
+  }
 }

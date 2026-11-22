@@ -59,6 +59,7 @@ public struct LayoutEngine {
     var flexibility: [Int: Flexibility] = [:]
     var placements: [Int: Placement] = [:]
     var geometryContent: [Int: Element] = [:]
+    var geometryNormalized: [Int: Element] = [:]
     var text: [TextKey: TextLayout] = [:]
     var timings: [String: Double] = [:]
     var passes = 0
@@ -68,6 +69,7 @@ public struct LayoutEngine {
       flexibility.removeAll()
       placements.removeAll()
       geometryContent.removeAll()
+      geometryNormalized.removeAll()
       text.removeAll()
     }
   }
@@ -75,16 +77,22 @@ public struct LayoutEngine {
   private final class Pass {
     let prunes: Bool
     let animator: LayoutAnimator?
+    let evaluations: EvaluationGraph?
+    let mountedGeometryChildren: [Int: Element]
     let renderPass: Int
     let now: TimeInterval
     init(
       prunes: Bool,
       animator: LayoutAnimator? = nil,
+      evaluations: EvaluationGraph? = nil,
+      mountedGeometryChildren: [Int: Element] = [:],
       renderPass: Int = 0,
       now: TimeInterval = 0
     ) {
       self.prunes = prunes
       self.animator = animator
+      self.evaluations = evaluations
+      self.mountedGeometryChildren = mountedGeometryChildren
       self.renderPass = renderPass
       self.now = now
     }
@@ -143,6 +151,8 @@ public struct LayoutEngine {
     root: inout Element,
     in size: Size,
     animator: LayoutAnimator?,
+    evaluations: EvaluationGraph? = nil,
+    mountedGeometryChildren: [Int: Element] = [:],
     renderPass: Int,
     now: TimeInterval
   ) {
@@ -151,7 +161,12 @@ public struct LayoutEngine {
     // IDs are never recycled. Reclaim obsolete proposals and snapshots in
     // bounded batches instead of rebuilding three dictionaries on every tick.
     engine.pass = Pass(
-      prunes: cache.passes % 8 == 0, animator: animator, renderPass: renderPass, now: now)
+      prunes: cache.passes % 8 == 0,
+      animator: animator,
+      evaluations: evaluations,
+      mountedGeometryChildren: mountedGeometryChildren,
+      renderPass: renderPass,
+      now: now)
     var started = Date.timeIntervalSinceReferenceDate
     engine.identify(&root)
     cache.timings["identify"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
@@ -163,6 +178,9 @@ public struct LayoutEngine {
     if engine.pass!.prunes {
       for key in cache.identities.keys.filter({ !engine.pass!.liveViews.contains($0) }) {
         cache.identities.removeValue(forKey: key)
+      }
+      for key in cache.geometryNormalized.keys.filter({ !engine.pass!.liveViews.contains($0) }) {
+        cache.geometryNormalized.removeValue(forKey: key)
       }
       for key in cache.measurements.keys.filter({ !engine.pass!.liveMeasurements.contains($0.id) })
       {
@@ -280,8 +298,15 @@ public struct LayoutEngine {
         height: font.map { Double($0.size) } ?? metrics.lineHeight)
   }
   private func textLayout(_ props: NodeProps, width: Double?) -> Cache.TextLayout {
+    let effectiveWidth = props.fixedWidth ? nil : width
+    if !props.text.utf8.contains(10) {
+      let natural = textSize(props.text, props.font)
+      if effectiveWidth == nil || natural.width <= effectiveWidth! {
+        return Cache.TextLayout(text: props.text, size: natural)
+      }
+    }
     let key = Cache.TextKey(
-      text: props.text, font: props.font, width: props.fixedWidth ? nil : width,
+      text: props.text, font: props.font, width: effectiveWidth,
       limit: props.lineLimit, spacing: props.lineSpacing, truncation: props.truncationMode)
     if let cached = cache.text[key] { return cached }
     let wrapped = lines(props, width: key.width)
@@ -298,7 +323,11 @@ public struct LayoutEngine {
   }
   private func lines(_ p: NodeProps, width: Double?) -> [String] {
     var result: [String] = []
-    for paragraph in p.text.components(separatedBy: "\n") {
+    let paragraphs: [String] =
+      p.text.utf8.contains(10)
+      ? p.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+      : [p.text]
+    for paragraph in paragraphs {
       guard let width, width > 0, !p.fixedWidth, p.lineLimit != 1,
         textSize(paragraph, p.font).width > width
       else {
@@ -306,7 +335,9 @@ public struct LayoutEngine {
         continue
       }
       var line = ""
-      for word in paragraph.components(separatedBy: " ") {
+      let words = paragraph.split(separator: " ", omittingEmptySubsequences: false)
+      for wordSlice in words {
+        let word = String(wordSlice)
         let next = line.isEmpty ? word : line + " " + word
         if !line.isEmpty && textSize(next, p.font).width > width {
           result.append(line)
@@ -315,13 +346,19 @@ public struct LayoutEngine {
           line = next
         }
         while textSize(line, p.font).width > width && line.count > 1 {
-          var prefix = ""
-          for char in line {
-            if !prefix.isEmpty && textSize(prefix + String(char), p.font).width > width { break }
-            prefix.append(char)
+          let chars = Array(line)
+          var lo = 1
+          var hi = chars.count - 1
+          while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if textSize(String(chars[..<mid]), p.font).width <= width {
+              lo = mid
+            } else {
+              hi = mid - 1
+            }
           }
-          result.append(prefix)
-          line = String(line.dropFirst(prefix.count))
+          result.append(String(chars[..<lo]))
+          line = String(chars[lo...])
         }
       }
       result.append(line)
@@ -332,11 +369,32 @@ public struct LayoutEngine {
     if let width, p.lineLimit != nil, !p.fixedWidth {
       result = result.map { line in
         guard textSize(line, p.font).width > width else { return line }
-        var value = line
-        while !value.isEmpty && textSize(value + "…", p.font).width > width {
-          if p.truncationMode == .head { value.removeFirst() } else { value.removeLast() }
+        let chars = Array(line)
+        var lo = 0
+        var hi = chars.count
+        if p.truncationMode == .head {
+          while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            let candidate = "…" + String(chars[(chars.count - mid)...])
+            if textSize(candidate, p.font).width <= width {
+              lo = mid
+            } else {
+              hi = mid - 1
+            }
+          }
+          return "…" + String(chars[(chars.count - lo)...])
+        } else {
+          while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            let candidate = String(chars[..<mid]) + "…"
+            if textSize(candidate, p.font).width <= width {
+              lo = mid
+            } else {
+              hi = mid - 1
+            }
+          }
+          return String(chars[..<lo]) + "…"
         }
-        return p.truncationMode == .head ? "…" + value : value + "…"
       }
     }
     return result
@@ -362,6 +420,29 @@ public struct LayoutEngine {
     let offer = ProposedViewSize(
       width: p.fixedWidth ? nil : width.map { CGFloat($0) },
       height: p.fixedHeight ? nil : height.map { CGFloat($0) })
+    let knownWidth: Double? =
+      p.gridUnsizedAxes.contains(.horizontal) ? 0
+      : p.frameWidth
+        ?? (p.minWidth != nil && p.minWidth == p.maxWidth ? p.minWidth : nil)
+        ?? (p.fillWidth
+          ? offer.width.flatMap {
+            let w = Double($0)
+            return w.isFinite ? min(p.maxWidth ?? .infinity, max(p.minWidth ?? 0, w)) : nil
+          } : nil)
+    let knownHeight: Double? =
+      p.gridUnsizedAxes.contains(.vertical) ? 0
+      : p.frameHeight
+        ?? (p.minHeight != nil && p.minHeight == p.maxHeight ? p.minHeight : nil)
+        ?? (p.fillHeight
+          ? offer.height.flatMap {
+            let h = Double($0)
+            return h.isFinite ? min(p.maxHeight ?? .infinity, max(p.minHeight ?? 0, h)) : nil
+          } : nil)
+    if let knownWidth, let knownHeight {
+      return Size(
+        width: knownWidth.isFinite ? max(0, knownWidth) : 0,
+        height: knownHeight.isFinite ? max(0, knownHeight) : 0)
+    }
     var size = Size.zero
     switch e.kind {
     case .text, .button:
@@ -563,15 +644,20 @@ public struct LayoutEngine {
     }
   }
   private func fit(_ e: Element, in size: Size) -> Size {
-    let natural = measure(e, ProposedViewSize(width: size.width, height: size.height))
     let p = e.props
-    return Size(
-      width: p.frameWidth
-        ?? (fills(e, horizontal: true)
-          ? max(p.minWidth ?? 0, min(size.width, p.maxWidth ?? .infinity)) : natural.width),
-      height: p.frameHeight
-        ?? (fills(e, horizontal: false)
-          ? max(p.minHeight ?? 0, min(size.height, p.maxHeight ?? .infinity)) : natural.height))
+    let knownWidth: Double? =
+      p.frameWidth
+      ?? (fills(e, horizontal: true)
+        ? max(p.minWidth ?? 0, min(size.width, p.maxWidth ?? .infinity)) : nil)
+    let knownHeight: Double? =
+      p.frameHeight
+      ?? (fills(e, horizontal: false)
+        ? max(p.minHeight ?? 0, min(size.height, p.maxHeight ?? .infinity)) : nil)
+    if let knownWidth, let knownHeight {
+      return Size(width: knownWidth, height: knownHeight)
+    }
+    let natural = measure(e, ProposedViewSize(width: size.width, height: size.height))
+    return Size(width: knownWidth ?? natural.width, height: knownHeight ?? natural.height)
   }
   private func aligned(_ size: Size, in rect: Rect, alignment: Alignment, child: Element? = nil)
     -> Rect
@@ -690,19 +776,39 @@ public struct LayoutEngine {
       }
     case .geometry:
       if let builder = e.geometryBuilder {
-        let priorMountedChild = e.children.first
+        let priorMountedChild =
+          (e.evaluationID != 0 ? pass?.mountedGeometryChildren[e.evaluationID] : nil)
+          ?? e.children.first
+        let cgRect = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height)
         let snapshot = GeometrySnapshot(
-          rect: CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height),
+          rect: cgRect,
           namedOrigins: GeometryContext.current)
         snapshot.capture {
           let started = Date.timeIntervalSinceReferenceDate
-          var child = builder(
-            CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height))
+          var child: Element
+          if let evaluations = pass?.evaluations, e.evaluationID != 0 {
+            child = evaluations.evaluateGeometry(
+              ownerID: e.evaluationID,
+              rect: cgRect,
+              namedOrigins: GeometryContext.current
+            ) {
+              builder(cgRect)
+            }
+          } else {
+            child = builder(cgRect)
+          }
+          child = normalize(
+            child,
+            previous: e.evaluationID != 0 ? cache.geometryNormalized[e.evaluationID] : nil)
+          if e.evaluationID != 0 {
+            cache.geometryNormalized[e.evaluationID] = child
+          }
           pass?.geometryMilliseconds += (Date.timeIntervalSinceReferenceDate - started) * 1000
           resolveEnvironment(
             &child, inheritedForeground: e.props.foreground, inheritedDisabled: !e.props.enabled,
             inheritedOpacity: e.props.opacity, inheritedVisible: e.props.visible,
-            inheritedLineLimit: e.props.lineLimit, inheritedLineSpacing: e.props.lineSpacing)
+            inheritedLineLimit: e.props.lineLimit, inheritedLineSpacing: e.props.lineSpacing,
+            previous: priorMountedChild)
           if let pass, let animator = pass.animator {
             animator.applyGeometryChild(
               &child,
@@ -711,8 +817,6 @@ public struct LayoutEngine {
               renderPass: pass.renderPass,
               now: pass.now)
           }
-          // Geometry content is rebuilt with its current closure and scope.
-          // Reuse only layout identities when the new content measures alike.
           identify(&child, previousGeometry: cache.geometryContent[e.layoutID])
           e.children = [child]
           place(&e.children[0], in: rect)
@@ -873,10 +977,16 @@ public struct LayoutEngine {
     sizes.reserveCapacity(visible.count)
     for i in visible {
       let child = e.children[i]
-      let natural = measure(child, proposal)
       let flex =
         child.props.flex > 0 || fills(child, horizontal: !vertical)
         ? max(1, child.props.flex) : 0
+      let crossFills = child.props.flex > 0 || fills(child, horizontal: vertical)
+      let natural: Size
+      if flex > 0 && crossFills {
+        natural = .zero
+      } else {
+        natural = measure(child, proposal)
+      }
       sizes.append((natural, flex))
       if flex > 0 {
         flexTotal += flex
@@ -980,6 +1090,8 @@ public struct LayoutEngine {
   private func retainGeometry(_ element: Element) {
     if let snapshot = element.geometrySnapshot {
       snapshot.retain()
+      pass?.evaluations?.retainGeometry(ownerID: element.evaluationID)
+      for child in element.children where child.hasDynamicLayout { retainGeometry(child) }
       return
     }
     for child in element.children where child.hasDynamicLayout { retainGeometry(child) }

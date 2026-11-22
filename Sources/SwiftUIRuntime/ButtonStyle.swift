@@ -20,9 +20,14 @@ struct StyledButton<Label: View, Style: ButtonStyle>: View, _PrimitiveView {
   var body: Never { fatalError("StyledButton is primitive") }
   func _makeElement(path: ViewPath) -> Element {
     let isEnabled = EnvironmentValues.current.isEnabled
-    let content = style.makeBody(
-      configuration: ButtonStyleConfiguration(
-        label: AnyView(button.label), isPressed: isEnabled && pressed))
+    let config = ButtonStyleConfiguration(
+      label: AnyView(button.label), isPressed: isEnabled && pressed)
+    let content: Style.Body
+    if let graph = EvaluationGraph.active {
+      content = graph.trackObservation { style.makeBody(configuration: config) }
+    } else {
+      content = style.makeBody(configuration: config)
+    }
     let rendered = _render(content, path: path.appending(index: 0))
     var element = Element(
       kind: .styledButton, children: [rendered], action: button.action)

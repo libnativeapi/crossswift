@@ -753,10 +753,13 @@ public func withTransaction<V, Result>(
   return try withTransaction(tx, body)
 }
 
-public struct EquatableView<Content: Equatable & View>: View {
+public struct EquatableView<Content: Equatable & View>: View, Equatable {
   public var content: Content
   public init(content: Content) { self.content = content }
   public var body: Content { content }
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.content == rhs.content
+  }
 }
 
 extension View where Self: Equatable {

@@ -27,9 +27,16 @@
     private var contentListener: ListenerId?
     private var pendingEvents: [() -> Void] = []
     private var modalControls: Set<NodeID>?
-    private var controlLabels: [NodeID: String] = [:]
-    private var controlHitRadii: [NodeID: Double] = [:]
+    private var controlBranches: Set<NodeID> = []
     private var desiredFocus: NodeID?
+    private struct RetainedButton {
+      let view: NativeAPI.Button
+      let listener: ListenerId
+      var enabled: Bool?
+      var visible: Bool?
+      var label: String?
+      var hitRadius: Double = 0
+    }
     private struct RetainedEdit {
       let view: NativeAPI.TextField
       let listener: ListenerId
@@ -132,7 +139,7 @@
     private let content: NativeAPI.View
     private var surface: UnsafeMutableRawPointer?
     private var surfaceBackgroundColor: SwiftUIRuntime.Color = .white
-    private var buttons: [NodeID: (view: NativeAPI.Button, listener: ListenerId)] = [:]
+    private var buttons: [NodeID: RetainedButton] = [:]
     private var hostedViews: [NodeID: (mount: any _HostedViewMount, nativeHandle: UnsafeMutableRawPointer?)] = [:]
 
     public convenience init?(window: NativeAPI.Window, schedulesUpdates: Bool = false) {
@@ -257,6 +264,10 @@
           self.deliverUpdate()
         case let .resized(_, size):
           self.onResize?(SwiftUIRuntime.Size(width: size.width, height: size.height))
+          if self.schedulesUpdates && !self.deliveringUpdate && self.pendingRender != nil {
+            self.content.cancelUpdate()
+            self.deliverUpdate()
+          }
         default:
           break
         }
@@ -371,22 +382,44 @@
       let started = Date.timeIntervalSinceReferenceDate
       let now = Date.timeIntervalSinceReferenceDate
       var current: [NodeID: AnimatedValues] = [:]
+      current.reserveCapacity(previous.count)
       var live = Set<NodeID>()
+      live.reserveCapacity(buttons.count)
       var liveEdits = Set<NodeID>()
+      liveEdits.reserveCapacity(edits.count)
       var liveHosted = Set<NodeID>()
+      liveHosted.reserveCapacity(hostedViews.count)
+      controlBranches.removeAll(keepingCapacity: true)
       var hasModal = false
       var hasFocusRequest = false
       let rootSizeChanged = self.root.map {
         abs($0.frame.width - root.frame.width) > 0.5 || abs($0.frame.height - root.frame.height) > 0.5
       } ?? false
       let suppressAllAnimations = root.props.animationDisabled || rootSizeChanged
-      func animate(_ node: Element, inherited: Animation?, disabled: Bool) {
-        if node.kind == .textField { liveEdits.insert(node.id) }
-        if node.kind == .hostedView { liveHosted.insert(node.id) }
-        if node.kind == .styledButton || node.kind == .button { live.insert(node.id) }
-        hasModal =
-          hasModal || node.props.accessibilityTraits & AccessibilityTraits.isModal.rawValue != 0
-        hasFocusRequest = hasFocusRequest || node.props.focusRequested
+      @discardableResult
+      func animate(_ node: Element, inherited: Animation?, disabled: Bool) -> Bool {
+        var hasControl = false
+        switch node.kind {
+        case .textField:
+          liveEdits.insert(node.id)
+          hasControl = true
+        case .hostedView:
+          liveHosted.insert(node.id)
+          hasControl = true
+        case .styledButton, .button:
+          live.insert(node.id)
+          hasControl = true
+        case .scroll:
+          hasControl = true
+        default:
+          break
+        }
+        if node.props.accessibilityTraits & AccessibilityTraits.isModal.rawValue != 0 {
+          hasModal = true
+        }
+        if node.props.focusRequested {
+          hasFocusRequest = true
+        }
         let values = AnimatedValues(node.props)
         current[node.id] = values
         let nodeDisabled = disabled || node.props.animationDisabled
@@ -401,20 +434,28 @@
             }
             motions[node.id] = Motion(
               from: origin, frame: node.frame, animation: animation, start: now + animation.delay)
-          } else {
+          } else if !motions.isEmpty {
             motions.removeValue(forKey: node.id)
           }
-        } else if nodeDisabled {
+        } else if nodeDisabled, !motions.isEmpty {
           motions.removeValue(forKey: node.id)
         }
-        node.children.forEach { animate($0, inherited: animation, disabled: nodeDisabled) }
+        for child in node.children {
+          if animate(child, inherited: animation, disabled: nodeDisabled) {
+            hasControl = true
+          }
+        }
+        if hasControl { controlBranches.insert(node.id) }
+        return hasControl
       }
       animate(root, inherited: nil, disabled: suppressAllAnimations)
       if suppressAllAnimations {
-        motions.removeAll()
+        motions.removeAll(keepingCapacity: true)
       }
       previous = current
-      motions = motions.filter { current[$0.key] != nil }
+      if !motions.isEmpty {
+        motions = motions.filter { current[$0.key] != nil }
+      }
       self.root = root
       modalControls = nil
       func modal(_ node: Element) {
@@ -422,7 +463,7 @@
           func ids(_ node: Element) -> [NodeID] { [node.id] + node.children.flatMap(ids) }
           modalControls = Set(ids(node))
         }
-        node.children.forEach(modal)
+        for child in node.children { modal(child) }
       }
       if hasModal { modal(root) }
       desiredFocus = nil
@@ -440,12 +481,21 @@
               edits[id]?.view.isFocused == true || buttons[id]?.view.isFocused == true
             }) ?? candidates.first
         }
-        node.children.forEach(focusTarget)
+        for child in node.children { focusTarget(child) }
       }
       if hasFocusRequest { focusTarget(root) }
-      for id in Set(buttons.keys).subtracting(live) { removeButton(id) }
-      for id in Set(edits.keys).subtracting(liveEdits) { removeEdit(id) }
-      for id in Set(hostedViews.keys).subtracting(liveHosted) { removeHostedView(id) }
+      if !buttons.isEmpty {
+        let deadButtons = buttons.keys.filter { !live.contains($0) }
+        for id in deadButtons { removeButton(id) }
+      }
+      if !edits.isEmpty {
+        let deadEdits = edits.keys.filter { !liveEdits.contains($0) }
+        for id in deadEdits { removeEdit(id) }
+      }
+      if !hostedViews.isEmpty {
+        let deadHosted = hostedViews.keys.filter { !liveHosted.contains($0) }
+        for id in deadHosted { removeHostedView(id) }
+      }
       sui_surface_begin(surface)
       lastTimings["prepare"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
       publish(root, on: surface)
@@ -621,6 +671,7 @@
       background: SwiftUIRuntime.Color = .white, nativeClip: Rect? = nil,
       geometryOnly: Bool = false
     ) {
+      guard controlBranches.contains(node.id) else { return }
       let allowed = allowed && node.props.hitTesting
       let modalAllowed = modalControls?.contains(node.id) ?? true
       let controlAllowed = allowed && modalAllowed
@@ -669,7 +720,8 @@
       if node.kind == .styledButton || node.kind == .button, buttons[node.id] != nil || inViewport {
         let retained = buttons[node.id] != nil
         if buttons[node.id] == nil {
-          guard let button = NativeAPI.Button.create(label(node)), let handle = button.nativeObject
+          let initialTitle = label(node)
+          guard let button = NativeAPI.Button.create(initialTitle), let handle = button.nativeObject
           else {
             fatalError("nativeapi failed to create a button")
           }
@@ -684,9 +736,10 @@
               self?.enqueue { [weak self] in self?.tapHandler?(id) }
             }
           }
-          buttons[id] = (button, listener)
+          buttons[id] = RetainedButton(view: button, listener: listener, label: initialTitle)
         }
-        let button = buttons[node.id]!.view
+        var entry = buttons[node.id]!
+        let button = entry.view
         let r = node.frame
         if inViewport || nativeClip != nil, let surface, let handle = button.nativeObject {
           sui_control_frame(surface, handle, r.minX, r.minY, r.width, r.height)
@@ -696,30 +749,43 @@
         // still need visibility refreshed when their viewport changes.
         if !geometryOnly || !retained {
           let enabled = node.props.enabled && controlAllowed
-          if button.isEnabled != enabled { button.setEnabled(enabled) }
-          let title = label(node)
-          if controlLabels[node.id] != title {
-            button.setText(title)
-            controlLabels[node.id] = title
+          if entry.enabled != enabled {
+            if button.isEnabled != enabled { button.setEnabled(enabled) }
+            entry.enabled = enabled
           }
-          func hitRadius(_ element: Element) -> Double {
-            max(element.props.hitRadius, element.children.map(hitRadius).max() ?? 0)
+          if !retained || !node.reusesLayout {
+            let title = label(node)
+            if entry.label != title {
+              button.setText(title)
+              entry.label = title
+            }
+            func hitRadius(_ element: Element) -> Double {
+              var radius = element.props.hitRadius
+              for child in element.children {
+                radius = max(radius, hitRadius(child))
+              }
+              return radius
+            }
+            entry.hitRadius = hitRadius(node)
           }
-          controlHitRadii[node.id] = hitRadius(node)
         }
         if !geometryOnly || !retained || nativeClip == nil {
           // Opacity-zero shortcut buttons still participate in the renderer's
           // key handling, but their HWND must not paint or occlude the canvas.
           let visible = node.props.visible && node.props.opacity > 0
             && controlAllowed && (nativeClip != nil || inViewport)
-          if button.isVisible != visible { button.setVisible(visible) }
+          if entry.visible != visible {
+            if button.isVisible != visible { button.setVisible(visible) }
+            entry.visible = visible
+          }
         }
+        buttons[node.id] = entry
         if let surface, let handle = button.nativeObject {
           sui_control_tab_visible(surface, handle, inViewport ? 1 : 0)
           let visible =
             node.props.visible && controlAllowed ? r.intersection(nativeClip ?? clip) : .zero
           sui_button_update(
-            surface, handle, controlHitRadii[node.id] ?? 0, node.props.help,
+            surface, handle, entry.hitRadius, node.props.help,
             visible.minX - r.minX, visible.minY - r.minY, visible.width, visible.height)
         }
         if wantsFocus && !button.isFocused && node.props.enabled && inViewport {
@@ -892,7 +958,7 @@
           hostedViews[node.id] = (created.mount, handle)
         }
       }
-      for child in orderedChildren(node) {
+      forEachOrderedChild(node) { child in
         updateButtons(
           child, allowed: allowed, clip: clip, background: background, nativeClip: nativeClip,
           geometryOnly: geometryOnly)
@@ -920,8 +986,6 @@
     }
     private func removeButton(_ id: NodeID) {
       guard let button = buttons.removeValue(forKey: id) else { return }
-      controlLabels.removeValue(forKey: id)
-      controlHitRadii.removeValue(forKey: id)
       _ = button.view.removeListener(button.listener)
       if let surface, let handle = button.view.nativeObject {
         sui_surface_remove_button(surface, handle)
@@ -1010,7 +1074,7 @@
         vector(
           p.path.transformed(x: r.minX, y: r.minY), fill: p.background ?? .clear,
           stroke: p.borderColor, width: p.borderWidth)
-      } else if (p.background?.opacity ?? 0) > 0 || p.borderWidth > 0 && p.borderColor.opacity > 0 {
+      } else if p.background != nil || (p.borderWidth > 0 && p.borderColor.opacity > 0) {
         sui_surface_shape(
           surface, r.minX, r.minY, r.width, r.height, p.cornerRadius,
           (p.background ?? .clear).opacity(p.opacity).argb, p.borderColor.opacity(p.opacity).argb,
@@ -1025,9 +1089,13 @@
         }
       }
       if node.kind == .image {
-        let lowerPath = p.imagePath.lowercased()
-        if (p.imagePath.hasPrefix("sf://") || lowerPath.hasSuffix(".svg") || lowerPath.hasSuffix(".pdf")),
-          let image = VectorImage.load(p.imagePath)
+        let imagePath = p.imagePath
+        let isVector =
+          imagePath.hasPrefix("sf://")
+          || imagePath.hasSuffix(".svg") || imagePath.hasSuffix(".SVG")
+          || imagePath.hasSuffix(".pdf") || imagePath.hasSuffix(".PDF")
+        if isVector,
+          let image = VectorImage.load(imagePath)
         {
           let sx = r.width / image.bounds.width
           let sy = r.height / image.bounds.height
@@ -1078,7 +1146,7 @@
           surface, Int64(node.id.rawValue), 0,
           clip.minX, clip.minY, clip.width, clip.height, child.frame.minX, child.frame.minY)
       }
-      for child in orderedChildren(node) {
+      forEachOrderedChild(node) { child in
         draw(
           child, clip: clip, transformedAncestor: transformedAncestor || transformed || translated)
       }
@@ -1101,17 +1169,27 @@
       if transformed { sui_surface_restore(surface) }
       if translated { sui_surface_restore(surface) }
     }
-    private func orderedChildren(_ node: Element) -> [Element] {
-      let children =
-        node.kind == .layer && node.props.layerBehind
-        ? Array(node.children.reversed()) : node.children
-      guard children.count > 1, children.contains(where: { $0.props.zIndex != 0 }) else {
-        return children
+    private func forEachOrderedChild(_ node: Element, _ body: (Element) -> Void) {
+      let children = node.children
+      let count = children.count
+      if count == 0 { return }
+      if count == 1 {
+        body(children[0])
+        return
       }
-      return children.enumerated().sorted(by: {
-        $0.element.props.zIndex == $1.element.props.zIndex
-          ? $0.offset < $1.offset : $0.element.props.zIndex < $1.element.props.zIndex
-      }).map { $0.element }
+      let behind = node.kind == .layer && node.props.layerBehind
+      if children.contains(where: { $0.props.zIndex != 0 }) {
+        let base = behind ? Array(children.reversed()) : children
+        let sorted = base.enumerated().sorted {
+          $0.element.props.zIndex == $1.element.props.zIndex
+            ? $0.offset < $1.offset : $0.element.props.zIndex < $1.element.props.zIndex
+        }
+        for entry in sorted { body(entry.element) }
+      } else if behind {
+        for i in stride(from: count - 1, through: 0, by: -1) { body(children[i]) }
+      } else {
+        for i in 0..<count { body(children[i]) }
+      }
     }
   }
   extension Rect {

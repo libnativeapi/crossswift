@@ -67,7 +67,12 @@ public struct _HostedViewPrimitive: View, _PrimitiveView {
 }
 @MainActor func _render<V: View>(_ view: V, path: ViewPath) -> Element {
   if let graph = EvaluationGraph.active {
-    return graph.evaluate(type: ObjectIdentifier(V.self), path: path) {
+    // Only use Equatable memoization for composite views (not primitives,
+    // which are cheap to emit and may read ambient state/environment directly).
+    let equatableView: (any Equatable)? =
+      (view is any _PrimitiveView) ? nil : (view as? any Equatable)
+    return graph.evaluate(type: ObjectIdentifier(V.self), path: path, equatableView: equatableView)
+    {
       _renderUncached(view, path: path)
     }
   }
@@ -78,7 +83,13 @@ public struct _HostedViewPrimitive: View, _PrimitiveView {
   if let primitive = view as? any _PrimitiveView {
     return primitive._makeElement(path: path)
   }
-  return _render(view.body, path: path)
+  let bodyValue: V.Body
+  if let graph = EvaluationGraph.active {
+    bodyValue = graph.trackObservation { view.body }
+  } else {
+    bodyValue = view.body
+  }
+  return _render(bodyValue, path: path)
 }
 @MainActor private var dynamicPropertyIndices: [ObjectIdentifier: [Int]] = [:]
 @MainActor func _installState<V>(_ value: V, path: ViewPath) {
