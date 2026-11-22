@@ -599,8 +599,13 @@ open class NSImage: NSObject, @unchecked Sendable {
       candidates.append(contentsOf: [
         base.appendingPathComponent("\(name).imageset"),
         base.appendingPathComponent("Assets.xcassets/\(name).imageset"),
-        base.appendingPathComponent("Tinycast/Assets.xcassets/\(name).imageset"),
       ])
+      if let appFolder = (Bundle.main.infoDictionary?["CFBundleName"] as? String)
+        ?? Bundle.main.executableURL?.deletingPathExtension().lastPathComponent,
+        !appFolder.isEmpty
+      {
+        candidates.append(base.appendingPathComponent("\(appFolder)/Assets.xcassets/\(name).imageset"))
+      }
       // Discover any *.xcassets catalog (e.g. FluentIcons.xcassets, IconAssets.xcassets)
       // directly in `root` or `root/Resources` without enumerating inside the catalogs.
       for container in [base, base.appendingPathComponent("Resources")] {

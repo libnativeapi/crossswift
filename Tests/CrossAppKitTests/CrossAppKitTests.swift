@@ -115,4 +115,23 @@ final class CrossAppKitTests: XCTestCase {
       XCTFail("Expected symbol op at index 1")
     }
   }
+
+  func testCurrentRunningApplicationHasNoHardcodedHostAppIdentity() {
+    let app = CrossAppKit.NSRunningApplication.current
+    let bundleID = (app.bundleIdentifier ?? "").lowercased()
+    let name = (app.localizedName ?? "").lowercased()
+    XCTAssertFalse(bundleID.contains("tinycast"))
+    XCTAssertFalse(bundleID.contains("abueammar"))
+    XCTAssertFalse(name.contains("tinycast"))
+  }
+
+  func testPasteboardCustomTypesRegisterDynamically() {
+    let pb = CrossAppKit.NSPasteboard.withUniqueName()
+    let customType = CrossAppKit.NSPasteboard.PasteboardType("dev.crossswift.test.custom")
+    let item = CrossAppKit.NSPasteboardItem()
+    item.setString("payload", forType: customType)
+    XCTAssertTrue(pb.writeObjects([item]))
+    XCTAssertEqual(pb.string(forType: customType), "payload")
+    XCTAssertEqual(pb.types?.contains(customType), true)
+  }
 }

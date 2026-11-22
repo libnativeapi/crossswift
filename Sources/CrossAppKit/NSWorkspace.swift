@@ -87,12 +87,18 @@ open class NSRunningApplication: NSObject, @unchecked Sendable {
       if let app = NSRunningApplication(processIdentifier: winPID) { return app }
     #endif
     let fallbackPID = ProcessInfo.processInfo.processIdentifier
+    let executableStem = Bundle.main.executableURL?.deletingPathExtension().lastPathComponent
+    let processName = ProcessInfo.processInfo.processName
+    let resolvedName = (Bundle.main.infoDictionary?["CFBundleName"] as? String)
+      ?? executableStem
+      ?? (processName.isEmpty ? "CrossSwiftApp" : processName)
+    let fallbackBundleID = "dev.crossswift.\(resolvedName.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" })"
     return NSRunningApplication(
       processIdentifier: fallbackPID,
-      bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.abueammar.tinycast",
+      bundleIdentifier: Bundle.main.bundleIdentifier ?? fallbackBundleID,
       bundleURL: Bundle.main.bundleURL,
       executableURL: Bundle.main.executableURL,
-      localizedName: Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "Tinycast"
+      localizedName: resolvedName
     )
   }
 

@@ -338,7 +338,13 @@ open class NSStatusItem: NSObject {
     #if !os(macOS)
       if let tray = NativeAPI.TrayIcon.create() {
         self.nativeTrayIcon = tray
-        tray.setTooltip("Tinycast")
+        let defaultTooltip = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
+          ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String)
+          ?? Bundle.main.executableURL?.deletingPathExtension().lastPathComponent
+          ?? ProcessInfo.processInfo.processName
+        if !defaultTooltip.isEmpty {
+          tray.setTooltip(defaultTooltip)
+        }
         _ = tray.setVisible(true)
         listenerId = tray.addListener { [weak self] event in
           MainActor.assumeIsolated {

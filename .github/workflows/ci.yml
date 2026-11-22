@@ -67,6 +67,88 @@ jobs:
           test -f build/Build/Products/Release/XcodeDemo/index.html
           test -f build/Build/Products/Release/XcodeDemo/app/XcodeDemo.wasm
 
+  android:
+    name: build Android APK (XcodeDemo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.4.2'
+
+      - name: Install Swift SDK for Android
+        run: |
+          swift sdk install \
+            https://download.swift.org/swift-6.4.2-release/android-sdk/swift-6.4.2-RELEASE/swift-6.4.2-RELEASE_android.artifactbundle.tar.gz \
+            --checksum 4d6ad63ea74becd58e123ff58b1b48c3be5ec0db0dff0ea5abe37ac007dd3233
+
+      - name: Build XcodeDemo APK via xcodebuild
+        run: |
+          swift run xcodebuild \
+            -project Examples/XcodeDemo/XcodeDemo.xcodeproj \
+            -scheme XcodeDemo \
+            -configuration Release \
+            -destination generic/platform=Android \
+            -derivedDataPath build/ci-android \
+            ANDROID_ABIS=arm64-v8a \
+            clean build
+          test -f build/ci-android/Build/Products/Release/XcodeDemo/XcodeDemo.apk
+
+  harmony:
+    name: cross-compile HarmonyOS ARM64 runtime (XcodeDemo)
+    runs-on: ubuntu-latest
+    container: swift:6.4.2-noble
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: crossswift
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: crossswift
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.NATIVEAPI_REPOSITORY }}
+          ref: ${{ env.NATIVEAPI_REF }}
+          path: nativeapi
+
+      - name: Initialise the nativeapi core submodule
+        working-directory: nativeapi
+        run: git submodule update --init core
+
+      - name: Install Swift Static Linux SDK (ARM64)
+        run: |
+          sdk_name=swift-6.4.2-RELEASE_static-linux-0.1.0
+          archive="/tmp/${sdk_name}.artifactbundle.tar.gz"
+          curl --fail --location --retry 2 --output "$archive" \
+            "https://download.swift.org/swift-6.4.2-release/static-sdk/swift-6.4.2-RELEASE/${sdk_name}.artifactbundle.tar.gz"
+          echo "3786b179936d9cc9e266dd506bd1654176358d7b25288e243359f4d17cc4dc5a  $archive" | sha256sum -c -
+          mkdir -p /tmp/static-linux-sdk
+          tar -xzf "$archive" -C /tmp/static-linux-sdk \
+            "${sdk_name}.artifactbundle/${sdk_name}/swift-linux-musl/musl-1.2.5.sdk/aarch64"
+
+      - name: Cross-compile XcodeDemo for HarmonyOS via xcodebuild
+        env:
+          SWIFT_STATIC_LINUX_SDK: /tmp/static-linux-sdk/swift-6.4.2-RELEASE_static-linux-0.1.0.artifactbundle
+        run: |
+          swift run xcodebuild \
+            -project Examples/XcodeDemo/XcodeDemo.xcodeproj \
+            -scheme XcodeDemo \
+            -configuration Release \
+            -destination generic/platform=HarmonyOS \
+            -derivedDataPath build/ci-harmony \
+            clean build
+          test -f build/ci-harmony/Build/Products/Release/XcodeDemo/runtime/XcodeDemo.o
+          test -f build/ci-harmony/Build/Products/Release/XcodeDemo/entry/src/main/ets/pages/Index.ets
+
   linux:
     name: build and smoke (Linux, GTK 3)
     runs-on: ubuntu-latest
@@ -107,6 +189,24 @@ jobs:
           dbus-run-session -- \
             xvfb-run -a -s "-screen 0 1024x768x24" \
             swift run Counter --smoke
+
+      - name: Build XcodeDemo and DesktopUIGallery via xcodebuild
+        run: |
+          swift run xcodebuild \
+            -project Examples/XcodeDemo/XcodeDemo.xcodeproj \
+            -scheme XcodeDemo \
+            -configuration Release \
+            -derivedDataPath build/ci-linux \
+            clean build
+          test -x build/ci-linux/Build/Products/Release/XcodeDemo/XcodeDemo
+          test -d build/ci-linux/Build/Products/Release/XcodeDemo/Resources
+          swift run xcodebuild \
+            -project Examples/DesktopUIGallery/DesktopUIGallery.xcodeproj \
+            -scheme DesktopUIGallery \
+            -configuration Release \
+            -derivedDataPath build/ci-linux \
+            clean build
+          test -x build/ci-linux/Build/Products/Release/DesktopUIGallery/DesktopUIGallery
 
   windows:
     name: build and smoke (Windows)
@@ -165,3 +265,18 @@ jobs:
 
       - name: Smoke test
         run: swift run --build-system native -Xcxx -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH Counter --smoke
+
+      - name: Build XcodeDemo via xcodebuild
+        run: |
+          swift run --build-system native -Xcxx -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH xcodebuild `
+            -project Examples/XcodeDemo/XcodeDemo.xcodeproj `
+            -scheme XcodeDemo `
+            -configuration Release `
+            -derivedDataPath build/ci-windows `
+            clean build
+          if (-not (Test-Path build/ci-windows/Build/Products/Release/XcodeDemo/XcodeDemo.exe)) {
+            throw "Missing XcodeDemo.exe"
+          }
+          if (-not (Test-Path build/ci-windows/Build/Products/Release/XcodeDemo/Resources)) {
+            throw "Missing XcodeDemo Resources"
+          }

@@ -112,7 +112,6 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
   private var localChangeCount: Int = 0
   private var localItems: [NSPasteboardItem] = []
   private var knownCustomTypes: Set<PasteboardType> = [
-    PasteboardType("com.tinycast.internal"),
     PasteboardType("org.nspasteboard.ConcealedType"),
     PasteboardType("org.nspasteboard.TransientType"),
     PasteboardType("com.apple.is-sensitive"),

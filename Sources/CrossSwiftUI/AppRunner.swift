@@ -300,7 +300,7 @@ public func runApp<A: App>(_ app: A) {
     return
   }
 
-  // Accessory / MenuBarExtra-only app (such as Tinycast): run via NSApplication.shared.run()
+  // Accessory / MenuBarExtra-only app: run via NSApplication.shared.run()
   if CommandLine.arguments.contains("--smoke") {
     startSmokeTimer()
   }

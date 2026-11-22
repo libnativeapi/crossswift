@@ -274,7 +274,10 @@ public final class SwiftPMBackend {
       "--scratch-path", scratchDir.path,
     ]
     if platform == .windows {
-      buildArgs += ["--build-system", "native"]
+      buildArgs += [
+        "--build-system", "native",
+        "-Xcxx", "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
+      ]
     }
     if configuration == .release {
       buildArgs += [
