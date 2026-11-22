@@ -19,8 +19,10 @@ platform builds compile natively against Apple's SDKs.
 - **Android**: `SwiftUIAndroid` connects the shared runtime over JNI to Jetpack
   Compose, supporting live switching between Material 3 + Navigation Compose and
   iOS 27 Liquid Glass styling.
-- **HarmonyOS**: `CrossXcodeBuild` (`HarmonyBuilder`) cross-compiles ARM64
-  Swift static objects against `NativeAPI` and packages an ArkUI Stage-model HAP.
+- **HarmonyOS**: `SwiftUIHarmony` and `CrossXcodeBuild` (`HarmonyBuilder`)
+  cross-compile ARM64 Swift static objects (with `SwiftUIRuntimeMacros` and
+  adapted SwiftPM packages) against `NativeAPI` and package a Stage-model ArkUI
+  HAP with dual HarmonyOS Native / iOS Liquid Glass styling.
 
 ```swift
 import SwiftUI
@@ -68,11 +70,12 @@ responsibilities are split cleanly across distinct modules:
 
 | Module | Role |
 | --- | --- |
-| `SwiftUIRuntime` + `SwiftUIRuntimeMacros` | Platform-independent SwiftUI engine: `View`, `@ViewBuilder`, element tree, layout, sibling diff, `@State` / `@Binding` / `@Environment` / `@FocusState`, `@Observable` (`@Bindable`) and `ObservableObject`, `@Entry` & `#Preview` macros, controls, navigation, presentations, SVG/PDF vectors, SF Symbols, `.xcstrings` localization, and animations. Has no `NativeAPI` dependency, so `SwiftUIRuntimeTests` runs on macOS, Windows, and Linux. |
-| `CrossSwiftUI` (+ `CSwiftUIWindows`) | Desktop `NativeAPI` SwiftUI backend for **Windows** (retained Win32/GDI+ display list, native buttons, transparent matte-composited `EDIT` controls) and **Linux** (GTK 3 drawing area with Cairo/Pango and native GTK controls), `App` / `WindowGroup` / `MenuBarExtra` runner, and AppKit hosting (`NSHostingView`, `NSHostingController`, `NSViewRepresentable`, `NSApplicationDelegateAdaptor`). |
-| `SwiftUIWeb` | WebAssembly (`os(WASI)`) DOM renderer, `WindowGroup` browser runner, and web `.xcassets` / `.xcstrings` / SF Symbol loader. |
-| `SwiftUIAndroid` (+ `CSwiftUIAndroid`) | Android JNI bridge (`AndroidHost`) and Jetpack Compose host (`SwiftUIComposeHost`), with dual Material 3 and iOS Liquid Glass renderers. |
-| `SwiftUI` | User-facing `import SwiftUI` facade on non-Apple targets, re-exporting `SwiftUIRuntime` together with the active platform backend (`CrossSwiftUI` + `CrossAppKit` + `CrossFoundation` + `CoreGraphics` on Windows/Linux, `SwiftUIWeb` on WASI, `SwiftUIAndroid` on Android, or `SwiftUIRuntime` on HarmonyOS). |
+| `SwiftUIRuntime` + `SwiftUIRuntimeMacros` | Platform-independent SwiftUI engine: `View`, `@ViewBuilder`, element tree, layout (with `Spacer.minLength`, `.layoutPriority`, layout-preserving `.hidden()`, and `Lazy*` virtualization), sibling diff, `@State` / `@AppStorage` / `@SceneStorage` / `@Binding` / `@Environment` / `@FocusState` / `@FocusedValue`, `@Observable` (`@Bindable`) and `ObservableObject`, `@Entry` & `#Preview` macros, controls (`DisclosureGroup`, `Gauge`, `DatePicker`, `ColorPicker`, `AsyncImage`, `Table`, `ShareLink`, `.fileImporter`/`.fileExporter`), navigation (`NavigationPath`), presentations, SVG/PDF vectors, SF Symbols, `.xcstrings` localization, rich `Canvas`, linear/radial/angular gradients, timed `LongPressGesture`, and color/transition/layout animations. Has no `NativeAPI` dependency, so `SwiftUIRuntimeTests` runs on macOS, Windows, and Linux. |
+| `CrossSwiftUI` (+ `CSwiftUIWindows`) | Desktop `NativeAPI` SwiftUI backend for **Windows** (DirectWrite text, retained GDI+ display list, offscreen layers & blur/brightness/contrast filters, native buttons, transparent matte-composited `EDIT` controls) and **Linux** (GTK 3 drawing area with Cairo/Pango, offscreen filters, and native GTK/ATK controls), multi-scene `App` / `WindowGroup` / `Window` / `Settings` / `Scene.commands` / `MenuBarExtra` (`.menu` & `.window`) runner, and AppKit hosting (`NSHostingView`, `NSHostingController`, `NSViewRepresentable`, `NSApplicationDelegateAdaptor`). |
+| `SwiftUIWeb` | WebAssembly (`os(WASI)`) DOM/SVG/CSS renderer (dark-mode sync, `openURL`, `scrollTo`, filters, gradients, multi-layer vectors), `WindowGroup` browser runner, and web `.xcassets` / `.xcstrings` / SF Symbol loader. |
+| `SwiftUIAndroid` (+ `CSwiftUIAndroid`) | Android thread-safe JNI async bridge (`AndroidHost`), `Choreographer` animation loop, dark-mode & `openURL` sync, and Jetpack Compose host (`SwiftUIComposeHost`), with dual Material 3 and iOS Liquid Glass renderers. |
+| `SwiftUIHarmony` | Formal HarmonyOS runtime backend (`HarmonyBackend`) and ArkTS Stage-model host (`CrossSwiftUIHost.ets`) with async render push, 60 Hz animation ticks, dark-mode sync, and dual HarmonyOS / iOS Liquid Glass styling. |
+| `SwiftUI` | User-facing `import SwiftUI` facade on non-Apple targets, re-exporting `SwiftUIRuntime` together with the active platform backend (`CrossSwiftUI` + `CrossAppKit` + `CrossFoundation` + `CoreGraphics` on Windows/Linux, `SwiftUIWeb` on WASI, `SwiftUIAndroid` on Android, or `SwiftUIHarmony` on HarmonyOS). |
 | `CrossAppKit` + `AppKit` (+ `CAppKitWindows`) | Cross-platform AppKit implementation (`NSApplication`, `NSWindow`, `NSPanel`, `NSView`, controls, TextKit 1/2, `NSMenu`, `NSStatusItem`, `NSPasteboard`, `NSWorkspace`, `NSColor`, `NSAppearance`, `NSFont`, `NSImage`, `NSBezierPath`, Carbon hotkey bridge). Re-exported as `import AppKit` on Windows and Linux; `CrossAppKit` also builds standalone on macOS for `CrossAppKitTests`. |
 | `CrossFoundation` & Apple shims | Apple `Foundation` extensions missing from `swift-corelibs-foundation`, standalone framework shims (`CoreGraphics`, `Combine`, `CryptoKit`, `Carbon`, `UniformTypeIdentifiers`, `OSLog`, `os`, `SQLite3`), and 34 system/framework shims under `Sources/AppleShims/` (`CoreFoundation`, `Darwin`, `ApplicationServices`, `ServiceManagement`, `Security`, `CoreText`, `ImageIO`, `JavaScriptCore`, `IOKit`, `Network`, `AVFoundation`, `PDFKit`, etc.). |
 | `CrossXcodeBuild` + `CrossXcodeBuildCLI` | Pure-Swift `.xcodeproj` / `.xcworkspace` parser, Apple-framework & SwiftPM dependency adapter, `.xcassets` / `.xcstrings` / icon compiler, and the cross-platform `xcodebuild` executable targeting Windows, Linux, WebAssembly, HarmonyOS, and Android. |

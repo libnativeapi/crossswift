@@ -9,7 +9,7 @@ CrossSwift（`crossswift`）是一套独立的 Apple 框架兼容层与 `xcodebu
 - **Windows 与 Linux 桌面端**：`CrossSwiftUI` 与 `CrossAppKit` 基于 [nativeapi](https://github.com/libnativeapi/nativeapi) 渲染视图并承载窗口、菜单、状态栏图标与原生文本输入控件，底层辅以 `CrossFoundation` 及 Apple 框架垫片。
 - **WebAssembly**：`SwiftUIWeb` 借助 JavaScriptKit 与原生 HTML 控件将应用挂载至浏览器 DOM。
 - **Android**：`SwiftUIAndroid` 通过 JNI 将共享运行时接入 Jetpack Compose，支持在 Material 3 + Navigation Compose 与 iOS 27 Liquid Glass 视觉风格之间实时切换。
-- **HarmonyOS**：`CrossXcodeBuild`（`HarmonyBuilder`）基于 `NativeAPI` 交叉编译 ARM64 Swift 静态目标文件，并打包为 Stage 模型 ArkUI HAP。
+- **HarmonyOS**：`SwiftUIHarmony` 与 `CrossXcodeBuild`（`HarmonyBuilder`）基于 `NativeAPI` 交叉编译 ARM64 Swift 静态目标文件（含 `SwiftUIRuntimeMacros` 与远程 SwiftPM 包），并打包为支持 HarmonyOS 原生 / iOS Liquid Glass 双风格的 Stage 模型 ArkUI HAP。
 
 ```swift
 import SwiftUI
@@ -53,11 +53,12 @@ struct CounterView: View {
 
 | 模块 | 职责说明 |
 | --- | --- |
-| `SwiftUIRuntime` + `SwiftUIRuntimeMacros` | 平台无关的 SwiftUI 核心引擎：`View`、`@ViewBuilder`、元素树、布局引擎、兄弟节点 diff、`@State` / `@Binding` / `@Environment` / `@FocusState`、`@Observable`（`@Bindable`）与 `ObservableObject`、`@Entry` 与 `#Preview` 宏、基础与容器控件、导航、弹窗展示、SVG/PDF 矢量解析、内置 SF Symbols、`.xcstrings` 本地化及动画。不依赖 `NativeAPI`，因此 `SwiftUIRuntimeTests` 可在 macOS、Windows、Linux 上直接运行。 |
-| `CrossSwiftUI`（及 `CSwiftUIWindows`） | 面向 **Windows**（保留式 Win32/GDI+ 显示列表、原生按钮、双通道遮罩透明合成 `EDIT` 文本框）与 **Linux**（GTK 3 绘图区、Cairo/Pango 渲染与原生 GTK 控件）的桌面端 `NativeAPI` SwiftUI 后端、`App` / `WindowGroup` / `MenuBarExtra` 场景运行器，以及 AppKit 桥接托管（`NSHostingView`、`NSHostingController`、`NSViewRepresentable`、`NSApplicationDelegateAdaptor`）。 |
-| `SwiftUIWeb` | WebAssembly（`os(WASI)`）DOM 渲染器、`WindowGroup` 浏览器运行器，以及 Web 端 `.xcassets` / `.xcstrings` / SF Symbols 资源加载器。 |
-| `SwiftUIAndroid`（及 `CSwiftUIAndroid`） | Android JNI 桥接层（`AndroidHost`）与 Jetpack Compose 宿主（`SwiftUIComposeHost`），内置 Material 3 与 iOS Liquid Glass 双风格渲染器。 |
-| `SwiftUI` | 非 Apple 平台面向用户的 `import SwiftUI` 门面模块，重导出 `SwiftUIRuntime` 与当前目标平台后端（Windows/Linux 下重导出 `CrossSwiftUI` + `CrossAppKit` + `CrossFoundation` + `CoreGraphics`，WASI 下重导出 `SwiftUIWeb`，Android 下重导出 `SwiftUIAndroid`，HarmonyOS 下重导出 `SwiftUIRuntime`）。 |
+| `SwiftUIRuntime` + `SwiftUIRuntimeMacros` | 平台无关的 SwiftUI 核心引擎：`View`、`@ViewBuilder`、元素树、布局引擎（含 `Spacer.minLength`、`.layoutPriority`、保留空间的 `.hidden()` 与 `Lazy*` 虚拟化）、兄弟节点 diff、`@State` / `@AppStorage` / `@SceneStorage` / `@Binding` / `@Environment` / `@FocusState` / `@FocusedValue`、`@Observable`（`@Bindable`）与 `ObservableObject`、`@Entry` 与 `#Preview` 宏、基础与扩展控件（`DisclosureGroup`、`Gauge`、`DatePicker`、`ColorPicker`、`AsyncImage`、`Table`、`ShareLink`、`.fileImporter`/`.fileExporter`）、导航（`NavigationPath`）、弹窗展示、SVG/PDF 矢量解析、内置 SF Symbols、`.xcstrings` 本地化、富 `Canvas`、线性/径向/角度渐变、定时 `LongPressGesture` 及颜色/转场/布局动画。不依赖 `NativeAPI`，因此 `SwiftUIRuntimeTests` 可在 macOS、Windows、Linux 上直接运行。 |
+| `CrossSwiftUI`（及 `CSwiftUIWindows`） | 面向 **Windows**（DirectWrite 文本、保留式 GDI+ 显示列表、离屏图层与模糊/亮度/对比度滤镜、原生按钮、双通道遮罩透明合成 `EDIT` 文本框）与 **Linux**（GTK 3 绘图区、Cairo/Pango 渲染、离屏滤镜与原生 GTK/ATK 控件）的桌面端 `NativeAPI` SwiftUI 后端、多场景 `App` / `WindowGroup` / `Window` / `Settings` / `Scene.commands` / `MenuBarExtra`（`.menu` 与 `.window`）运行器，以及 AppKit 桥接托管（`NSHostingView`、`NSHostingController`、`NSViewRepresentable`、`NSApplicationDelegateAdaptor`）。 |
+| `SwiftUIWeb` | WebAssembly（`os(WASI)`）DOM/SVG/CSS 渲染器（深浅色同步、`openURL`、`scrollTo`、滤镜、渐变与多层矢量）、`WindowGroup` 浏览器运行器，以及 Web 端 `.xcassets` / `.xcstrings` / SF Symbols 资源加载器。 |
+| `SwiftUIAndroid`（及 `CSwiftUIAndroid`） | Android 线程安全 JNI 异步桥接层（`AndroidHost`）、`Choreographer` 动画循环、深浅色与 `openURL` 同步，以及 Jetpack Compose 宿主（`SwiftUIComposeHost`），内置 Material 3 与 iOS Liquid Glass 双风格渲染器。 |
+| `SwiftUIHarmony` | 正式 HarmonyOS 运行时后端（`HarmonyBackend`）与 ArkTS Stage 模型宿主（`CrossSwiftUIHost.ets`），支持异步刷新推送、60 Hz 动画帧、深浅色同步与 HarmonyOS / iOS Liquid Glass 双风格渲染。 |
+| `SwiftUI` | 非 Apple 平台面向用户的 `import SwiftUI` 门面模块，重导出 `SwiftUIRuntime` 与当前目标平台后端（Windows/Linux 下重导出 `CrossSwiftUI` + `CrossAppKit` + `CrossFoundation` + `CoreGraphics`，WASI 下重导出 `SwiftUIWeb`，Android 下重导出 `SwiftUIAndroid`，HarmonyOS 下重导出 `SwiftUIHarmony`）。 |
 | `CrossAppKit` + `AppKit`（及 `CAppKitWindows`） | 跨平台 AppKit 实现（`NSApplication`、`NSWindow`、`NSPanel`、`NSView`、常用控件、TextKit 1/2、`NSMenu`、`NSStatusItem`、`NSPasteboard`、`NSWorkspace`、`NSColor`、`NSAppearance`、`NSFont`、`NSImage`、`NSBezierPath`、Carbon 全局热键桥接）。在 Windows 与 Linux 上通过 `import AppKit` 暴露；`CrossAppKit` 亦可在 macOS 上独立构建以运行 `CrossAppKitTests`。 |
 | `CrossFoundation` 与 Apple 框架垫片 | 补齐 `swift-corelibs-foundation` 缺失的 Apple `Foundation` API，提供顶层独立框架垫片（`CoreGraphics`、`Combine`、`CryptoKit`、`Carbon`、`UniformTypeIdentifiers`、`OSLog`、`os`、`SQLite3`）以及 `Sources/AppleShims/` 下的 34 个系统/框架模块（`CoreFoundation`、`Darwin`、`ApplicationServices`、`ServiceManagement`、`Security`、`CoreText`、`ImageIO`、`JavaScriptCore`、`IOKit`、`Network`、`AVFoundation`、`PDFKit` 等）。 |
 | `CrossXcodeBuild` + `CrossXcodeBuildCLI` | 纯 Swift 实现的 `.xcodeproj` / `.xcworkspace` 解析器、Apple 框架与 SwiftPM 依赖适配器、`.xcassets` / `.xcstrings` / 图标资源编译器，以及支持编译到 Windows、Linux、WebAssembly、HarmonyOS 与 Android 的跨平台 `xcodebuild` 命令行工具。 |

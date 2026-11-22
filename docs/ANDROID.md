@@ -71,16 +71,27 @@ otherwise) and toggleable live when `ANDROID_STYLE_SWITCHER=YES`:
   custom Compose `Layout` positions children in pixel coordinates while keying
   composables by `NodeID`.
 - **Controls & containers**: `Text`, `Button` (plain, bordered, prominent, and
-  custom `ButtonStyle` hit areas), `TextField`, `SecureField`, `Toggle`,
-  `Slider`, `Stepper`, `Picker`, `Menu`, `ProgressView`, `List`, `Form`,
-  `Section`, `ScrollView` (vertical and horizontal), `NavigationStack`,
-  `NavigationLink`, `TabView`, `.sheet`, `.confirmationDialog`, and `.alert`.
-- **Graphics & assets**: shapes, rounded corners, borders, linear gradients,
-  raster images from bundled `Resources/`, and multi-layer vector paths
-  (SF Symbols, `.xcassets` imagesets, and PDF/SVG vectors).
-- **Lifecycle**: `AndroidHost` mounts and updates on the Android main `Looper`
-  and releases the Swift `Renderer` from `Activity.onDestroy` (`AutoCloseable`).
-  `@State` is scoped to the mounted host instance across recompositions.
+  custom `ButtonStyle` hit areas), `TextField`, `SecureField`, multiline
+  `TextEditor`, keyboard submit (`onSubmit`), `Toggle`, `Slider`, `Stepper`,
+  `Picker`, `Menu`, `ProgressView`, `List`, `Form`, `Section`, `ScrollView`
+  (vertical/horizontal plus `ScrollViewProxy.scrollTo`), `NavigationStack` /
+  `NavigationPath`, `NavigationLink`, `TabView`, `DisclosureGroup`, `Gauge`,
+  `DatePicker`, `ColorPicker`, `AsyncImage`, `Table`, `.sheet`,
+  `.confirmationDialog`, and `.alert`.
+- **Graphics, animations & assets**: shapes, rounded corners, borders,
+  `graphicsLayer` rotation/scale transforms, drop shadows, custom vector clip
+  paths, `.blur`, true linear/radial/angular gradients, raster images from
+  bundled `Resources/`, and multi-layer vector paths (SF Symbols, `.xcassets`
+  imagesets, and PDF/SVG vectors).
+- **Async updates, animations & host integration**: `CSwiftUIAndroid` provides a
+  thread-safe `JavaVM` bridge (`scheduleAsyncRender` and `openURL`) so `.task`,
+  `Timer`, `AsyncImage`, and `@Observable` mutations push snapshots back to the
+  Android main `Looper` automatically, while a `Choreographer` frame loop
+  drives active `SwiftUIRuntime` animations. System dark mode (`isSystemInDarkTheme`)
+  synchronizes `EnvironmentValues.colorScheme`, `OpenURLAction` launches
+  `ACTION_VIEW` intents, and `AndroidHost` releases the Swift `Renderer` from
+  `Activity.onDestroy` (`AutoCloseable`). `@State` is scoped to the mounted host
+  instance across recompositions.
 
 See [`skills/xcodebuild/references/platforms.md`](../skills/xcodebuild/references/platforms.md)
 for all Android build settings (`ANDROID_ABIS`, `ANDROID_API_LEVEL`,

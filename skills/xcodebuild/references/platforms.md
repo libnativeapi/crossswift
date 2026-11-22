@@ -35,14 +35,18 @@ When both a build setting and an environment variable exist, the build setting t
 ### HarmonyOS (`-destination generic/platform=HarmonyOS` / `-sdk harmonyos|ohos`)
 
 - **Host**: macOS or Linux.
-- **Architecture**: `arm64-v8a` (`aarch64-swift-linux-musl`).
+- **Architecture**: `arm64-v8a` (`aarch64-swift-linux-musl`, configurable via `HARMONY_ABIS`).
 - **Prerequisites**: Swift 6.4.2 `swiftc`, ARM64 Swift Static Linux SDK (`musl-1.2.5.sdk/aarch64`), and `nativeapi/bindings/swift`. DevEco Studio is optional — when present, `ohpm` + `hvigorw` run automatically to produce `<ProductName>.hap`.
 - **Settings / env**:
   - `SWIFT_STATIC_LINUX_SDK` (env): Path to the Static Linux SDK artifact bundle or `.../musl-1.2.5.sdk/aarch64` (also searched under `~/Library/org.swift.swiftpm/swift-sdks` and `~/.swiftpm/swift-sdks`).
   - `DEVECO_STUDIO_HOME` (env): Path to DevEco Studio `Contents` directory (default fallback on macOS: `/Applications/DevEco-Studio.app/Contents`).
+  - `HARMONY_SDK_VERSION` (build setting or env): Target/compile SDK version in `build-profile.json5` (default: `6.0.2(22)`).
+  - `HARMONY_COMPATIBLE_SDK_VERSION` (build setting or env): Compatible SDK version (default: `6.0.2(22)`).
+  - `HARMONY_ABIS` (build setting or env): Comma- or space-separated ABIs for `externalNativeOptions` (default: `arm64-v8a`).
+  - `HARMONY_UI_STYLE` (build setting or env): Initial UI style — `harmony` or `ios` (default: `harmony`, or `ios` when `SDKROOT` contains `iphone`).
 - **Staged layout** (`<BUILT_PRODUCTS_DIR>/<ProductName>/`):
-  - `runtime/` (`NativeAPI.o`, `SwiftUIRuntime.o`, `SwiftUI.o`, `<ExecutableName>.o`, static musl archives)
-  - Stage-model HarmonyOS project (`AppScope/`, `entry/src/main/cpp/`, `entry/src/main/ets/`, `entry/src/main/resources/rawfile/Resources/`)
+  - `runtime/` (`NativeAPI.o`, `SwiftUIRuntime.o`, `SwiftUIHarmony.o`, `SwiftUI.o`, adapted SwiftPM package `.o` files, `<ExecutableName>.o`, static musl archives)
+  - Stage-model HarmonyOS project (`AppScope/`, `entry/src/main/cpp/`, `entry/src/main/ets/` using `Sources/SwiftUIHarmony/ArkTS/CrossSwiftUIHost.ets`, `entry/src/main/resources/rawfile/Resources/` extracted at startup)
   - `<ProductName>.hap` (unsigned, copied from `entry/build/default/outputs/default/entry-default-unsigned.hap` when DevEco Studio is found)
 
 ### Android (`-destination generic/platform=Android` / `-sdk android`)

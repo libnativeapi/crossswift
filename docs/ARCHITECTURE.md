@@ -11,46 +11,69 @@ Apple-framework compatibility shims, and the `.xcodeproj` build toolchain.
 ## Modules and boundaries
 
 - `SwiftUIRuntime` + `SwiftUIRuntimeMacros`: platform-independent view values,
-  result builders, scoped `EnvironmentValues`, `@State` / `@Binding` /
-  `@FocusState`, `@Observable` (`@Bindable`) and `ObservableObject`, compiler
+  result builders, scoped `EnvironmentValues`, `@State` / `@AppStorage` /
+  `@SceneStorage` / `@Binding` / `@FocusState` / `@FocusedValue` /
+  `@FocusedObject`, `@Observable` (`@Bindable`) and `ObservableObject`, compiler
   macros (`@Entry` and `#Preview` over Swift's JSON plugin wire protocol without
-  `swift-syntax`), element tree, layout engine, sibling diff, controls,
-  navigation, presentations, SVG/PDF vector parsing, embedded `SFSymbolCatalog`,
-  and `.xcstrings` localization (`XCStringsCatalog`). Imports no `NativeAPI`,
-  AppKit, browser, or Android APIs.
+  `swift-syntax`), element tree, layout engine (with `Spacer.minLength`,
+  `.layoutPriority`, layout-preserving `.hidden()`, and viewport virtualization
+  for `LazyVStack`/`LazyHStack`/`LazyVGrid`/`LazyHGrid`), sibling diff,
+  controls (`DisclosureGroup`, `Gauge`, `DatePicker`, `ColorPicker`,
+  `AsyncImage`, `Table`, `ShareLink`, `.fileImporter`/`.fileExporter`,
+  `.redacted`, `.refreshable`, `.swipeActions`), navigation (`NavigationPath` +
+  `.navigationDestination`), presentations, SVG/PDF vector parsing, embedded
+  `SFSymbolCatalog`, `.xcstrings` localization (`XCStringsCatalog`), multi-segment
+  `Path.trimmedPath`, rich `Canvas`, true linear/radial/angular gradients,
+  timed `LongPressGesture` + gesture arbitration, and color/transition/layout
+  animations. Imports no `NativeAPI`, AppKit, browser, or Android APIs.
 - `CrossSwiftUI`: desktop (`NativeAPI`) integration for **Windows and Linux** —
   `WindowsDrawingBackend`, `LinuxDrawingBackend`, `NativeViewBackend`, the
-  `App` / `WindowGroup` / `MenuBarExtra` scene runner (`runApp`), native window
+  multi-scene `App` / `WindowGroup` / `Window` / `Settings` / `MenuBarExtra`
+  (`.menu` and `.window`) / `Scene.commands` runner (`runApp`), native window
   dark/light chrome synchronization, and `CrossAppKit` hosting (`NSHostingView`,
   `NSHostingController`, `NSViewRepresentable`, `NSApplicationDelegateAdaptor`,
-  plus `Color`/`Font`/`Image` ↔ `NSColor`/`NSFont`/`NSImage` conversions).
-- `CSwiftUIWindows`: generic Win32/GDI+ retained display list, buffered
-  `WM_PAINT` DIB compositor, text measurement, dual-pass matte transparent
-  `EDIT` compositing, borrowed `NativeAPI` `BUTTON` subclassing, focus/tooltip
+  plus `Color`/`Font`/`Image` ↔ `NSColor`/`NSFont`/`NSImage` conversions and
+  `Combine` `Published`/`ObservableObjectPublisher` bridging).
+- `CSwiftUIWindows`: generic Win32/DirectWrite/GDI+ retained display list,
+  buffered `WM_PAINT` DIB compositor, DirectWrite text measurement and rendering
+  (numeric weights 100–900, font fallback, color fonts, with GDI+ fallback),
+  offscreen layer opacity and 3-pass box blur / brightness / contrast pixel
+  filters, radial/angular gradients, dual-pass matte transparent `EDIT`
+  compositing, borrowed `NativeAPI` `BUTTON` subclassing, focus/accessibility/tooltip
   bridge, and layered window shadow helper. Owns no application design tokens,
   domain components, or theme recipes.
 - `CrossAppKit` + `AppKit` + `CAppKitWindows`: cross-platform AppKit views,
   controls, windows/panels, menus, status items, TextKit 1/2, pasteboard,
-  workspace, colors/appearances, fonts, images, and Carbon global hotkeys over
-  `NativeAPI` (with Win32/DWM/Shell/COM/Accessibility glue in `CAppKitWindows`
-  on Windows). `CrossAppKit` compiles standalone on macOS for unit tests;
-  `AppKit` is the `import AppKit` facade on Windows and Linux.
+  workspace (`/proc` and `xdg-open` on Linux, Shell/Win32 on Windows),
+  colors/appearances, fonts, images, and Carbon global hotkeys over
+  `NativeAPI` (with Win32/DWM/Shell/COM/Credential Manager/Accessibility glue
+  in `CAppKitWindows` on Windows). `CrossAppKit` compiles standalone on macOS
+  for unit tests; `AppKit` is the `import AppKit` facade on Windows and Linux.
 - `CrossFoundation` + framework shims: Apple `Foundation` extensions missing
   from `swift-corelibs-foundation` on Windows/Linux, standalone framework
-  targets (`CoreGraphics`, `Combine`, `CryptoKit`, `Carbon`,
-  `UniformTypeIdentifiers`, `OSLog`, `os`, `SQLite3`), and 34 system/framework
-  shims under `Sources/AppleShims/`.
-- `SwiftUIWeb`: WebAssembly (`os(WASI)`) `WindowGroup` hosting, DOM renderer,
-  and web `.xcassets` / `.xcstrings` / SF Symbol loader via `JavaScriptKit`.
-- `SwiftUIAndroid` + `CSwiftUIAndroid`: Android JNI snapshot/event bridge
-  (`AndroidHost`) and Jetpack Compose host (`SwiftUIComposeHost`,
-  `AndroidStyleRenderers`) supporting live switching between Material 3 +
-  Navigation Compose and iOS 27 Liquid Glass styling. See [ANDROID.md](ANDROID.md).
+  targets (`CoreGraphics`, full `Combine` publishers/operators/schedulers,
+  `CryptoKit`, `Carbon`, `UniformTypeIdentifiers`, `OSLog`, `os`, `SQLite3`),
+  and 34 system/framework shims under `Sources/AppleShims/` (including real
+  `Security` Keychain persistence via Win32 Credential Manager / Linux 0600 XDG
+  keystore and `ServiceManagement` login items on Windows and Linux XDG).
+- `SwiftUIWeb`: WebAssembly (`os(WASI)`) `WindowGroup` hosting, DOM/SVG/CSS
+  renderer (including live dark-mode sync, `openURL`, `scrollTo` DOM sync, CSS
+  filters, conic/radial/linear gradients, and multi-layer SVG/PDF vectors), and
+  web `.xcassets` / `.xcstrings` / SF Symbol loader via `JavaScriptKit`.
+- `SwiftUIAndroid` + `CSwiftUIAndroid`: Android thread-safe `JavaVM` async
+  bridge (`AndroidHost`), `Choreographer` animation loop, dark-mode & `openURL`
+  sync, and Jetpack Compose host (`SwiftUIComposeHost`, `AndroidStyleRenderers`)
+  supporting live switching between Material 3 + Navigation Compose and iOS 27
+  Liquid Glass styling. See [ANDROID.md](ANDROID.md).
+- `SwiftUIHarmony`: formal HarmonyOS runtime backend (`HarmonyBackend`) and
+  parameterized ArkTS host (`CrossSwiftUIHost.ets`) with async render push,
+  60 Hz animation ticks, dark-mode sync, `rawfile/Resources` extraction, and
+  HarmonyOS Native / iOS Liquid Glass dual-style rendering.
 - `SwiftUI`: user-facing `import SwiftUI` facade on non-Apple targets,
   re-exporting `Foundation` and `SwiftUIRuntime` together with `CrossSwiftUI`
   (+ `CrossAppKit`, `CrossFoundation`, `CoreGraphics`) on Windows/Linux,
-  `SwiftUIWeb` on WASI, `SwiftUIAndroid` on Android, or `SwiftUIRuntime` under
-  `CROSS_SWIFTUI_HARMONY` for the HarmonyOS ArkUI host.
+  `SwiftUIWeb` on WASI, `SwiftUIAndroid` on Android, or `SwiftUIHarmony` under
+  `CROSS_SWIFTUI_HARMONY` for HarmonyOS.
 - `CrossXcodeBuild` + `CrossXcodeBuildCLI`: pure-Swift `.xcodeproj` /
   `.xcworkspace` parser, Apple-framework & SwiftPM dependency adapter,
   `.xcassets` / `.xcstrings` / icon compiler, and the `xcodebuild` CLI driver
@@ -130,9 +153,10 @@ remain retained when scrolled away. Unchanged labels, frames, z-order, and hit
 regions skip native mutations. Local button regions exclude clipping already
 performed by their viewport, so scrolling does not rebuild per-button `HRGN`s.
 Offscreen text/images/shapes and transparent layout boxes do not generate
-drawing commands. Within a `ScrollView`, `LazyVStack` virtualizes large
-`ForEach` collections using cached item-height estimates and a viewport buffer,
-while `LazyHStack`, `LazyVGrid`, and `LazyHGrid` evaluate children eagerly.
+drawing commands. Within a `ScrollView`, `LazyVStack`, `LazyHStack`, `LazyVGrid`, and `LazyHGrid`
+virtualize large `ForEach` collections (`> 72` items) using cached item-extent
+estimates and a viewport buffer, while smaller collections evaluate eagerly to
+preserve fast pixel-copy scroll translation.
 A focused container chooses one native descendant rather than requesting focus
 on every child.
 

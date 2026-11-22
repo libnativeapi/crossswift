@@ -41,9 +41,9 @@ SwiftUI 视图 → SwiftUIRuntime → SwiftUIAndroid (AndroidHost) → JNI → S
 ## 支持能力与宿主集成
 
 - **排版测量与布局**：Compose 侧通过 `TextMeasurer` 按当前屏幕密度测量真实字体尺寸并回传给 `SwiftUIRuntime`，确保 Swift 布局框与 Compose 文本渲染一致；自定义 Compose `Layout` 按像素坐标放置子节点并以 `NodeID` 作为键值复用组合项。
-- **控件与容器**：支持 `Text`、`Button`（`plain`、`bordered`、`borderedProminent` 及自定义 `ButtonStyle` 点击热区）、`TextField`、`SecureField`、`Toggle`、`Slider`、`Stepper`、`Picker`、`Menu`、`ProgressView`、`List`、`Form`、`Section`、`ScrollView`（纵向与横向）、`NavigationStack`、`NavigationLink`、`TabView`、`.sheet`、`.confirmationDialog` 与 `.alert`。
-- **图形与资源**：支持几何形状、圆角、边框、线性渐变、打包在 `Resources/` 中的位图，以及多层矢量路径（SF Symbols、`.xcassets` 图像集与 PDF/SVG 矢量图）。
-- **生命周期**：`AndroidHost` 在 Android 主线程 `Looper` 上挂载与更新，并在 `Activity.onDestroy`（`AutoCloseable`）时释放底层 Swift `Renderer`；`@State` 状态在当前挂载宿主实例生命周期内跨 Compose 重组保持。
+- **控件与容器**：支持 `Text`、`Button`（`plain`、`bordered`、`borderedProminent` 及自定义 `ButtonStyle` 点击热区）、`TextField`、`SecureField`、多行 `TextEditor`、键盘提交（`onSubmit`）、`Toggle`、`Slider`、`Stepper`、`Picker`、`Menu`、`ProgressView`、`List`、`Form`、`Section`、`ScrollView`（纵向/横向及 `ScrollViewProxy.scrollTo`）、`NavigationStack` / `NavigationPath`、`NavigationLink`、`TabView`、`DisclosureGroup`、`Gauge`、`DatePicker`、`ColorPicker`、`AsyncImage`、`Table`、`.sheet`、`.confirmationDialog` 与 `.alert`。
+- **图形、动画与资源**：支持几何形状、圆角、边框、`graphicsLayer` 旋转/缩放变换、投影阴影、自定义矢量裁剪路径、`.blur`、线性/径向/角度渐变、打包在 `Resources/` 中的位图，以及多层矢量路径（SF Symbols、`.xcassets` 图像集与 PDF/SVG 矢量图）。
+- **异步更新、动画与宿主集成**：`CSwiftUIAndroid` 提供线程安全的 `JavaVM` 桥接（`scheduleAsyncRender` 与 `openURL`），使 `.task`、`Timer`、`AsyncImage` 与 `@Observable` 变更能够自动向 Android 主线程 `Looper` 推送最新快照，并由 `Choreographer` 帧循环驱动 `SwiftUIRuntime` 动画。系统深浅色模式（`isSystemInDarkTheme`）实时同步至 `EnvironmentValues.colorScheme`，`OpenURLAction` 拉起系统 `ACTION_VIEW` Intent，`AndroidHost` 在 `Activity.onDestroy`（`AutoCloseable`）时释放底层 Swift `Renderer`。`@State` 状态在当前挂载宿主实例生命周期内跨 Compose 重组保持。
 
 完整的 Android 构建设置（`ANDROID_ABIS`、`ANDROID_API_LEVEL`、`SWIFT_ANDROID_SDK`、`ANDROID_UI_STYLE`、`ANDROID_STYLE_SWITCHER`）请参见 [`skills/xcodebuild/references/platforms.md`](../skills/xcodebuild/references/platforms.md)，运行时行为边界请参见 [DIVERGENCES-ZH.md](DIVERGENCES-ZH.md)。
 
