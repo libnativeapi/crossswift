@@ -432,6 +432,9 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
   private func measureDetached(proposal: ProposedViewSize) -> NSSize {
     #if os(Windows)
       let engine = LayoutEngine(textMeasurer: WindowsDrawingBackend.measureText)
+    #elseif os(Linux)
+      let pango = LinuxDrawing()
+      let engine = LayoutEngine(textMeasurer: pango.measure)
     #else
       let engine = LayoutEngine()
     #endif
@@ -587,6 +590,10 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
         backend?.setBackgroundColor(SwiftUIRuntime.Color(
           red: Double(bg.r), green: Double(bg.g), blue: Double(bg.b), opacity: Double(bg.a)
         ))
+      }
+    #elseif os(Linux)
+      backend?.environmentTransform = { env in
+        env.colorScheme = isDark ? SwiftUIRuntime.ColorScheme.dark : SwiftUIRuntime.ColorScheme.light
       }
     #endif
   }
@@ -1131,6 +1138,30 @@ internal func installAssetResolversOnce() {
       perform action: @escaping (P.Output) -> Void
     ) -> some SwiftUIRuntime.View where P.Failure == Never {
       _WinOnReceiveView(content: self, publisher: publisher, action: action)
+    }
+  }
+
+  extension SwiftUIRuntime.Published.Publisher: Combine.Publisher {
+    public typealias Output = Value
+    public typealias Failure = Never
+
+    public func sink(
+      receiveCompletion: @escaping (Subscribers.Completion<Never>) -> Void,
+      receiveValue: @escaping (Value) -> Void
+    ) -> AnyCancellable {
+      AnyCancellable(_subscribe(receiveValue))
+    }
+  }
+
+  extension SwiftUIRuntime.ObservableObjectPublisher: Combine.Publisher {
+    public typealias Output = Void
+    public typealias Failure = Never
+
+    public func sink(
+      receiveCompletion: @escaping (Subscribers.Completion<Never>) -> Void,
+      receiveValue: @escaping (Void) -> Void
+    ) -> AnyCancellable {
+      AnyCancellable(_subscribe { receiveValue(()) })
     }
   }
 #endif

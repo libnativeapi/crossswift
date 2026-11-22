@@ -256,7 +256,7 @@ if buildDesktopNative {
     .target(name: "Darwin", dependencies: darwinDeps, path: "Sources/AppleShims/Darwin"),
     .target(name: "ApplicationServices", dependencies: appServicesDeps, path: "Sources/AppleShims/ApplicationServices"),
     .target(name: "ServiceManagement", path: "Sources/AppleShims/ServiceManagement"),
-    .target(name: "Security", dependencies: ["CoreFoundation"], path: "Sources/AppleShims/Security"),
+    .target(name: "Security", dependencies: ["CoreFoundation"] + winGlueDependencies, path: "Sources/AppleShims/Security"),
     .target(name: "CloudKit", path: "Sources/AppleShims/CloudKit"),
     .target(name: "EventKit", dependencies: ["CoreGraphics"], path: "Sources/AppleShims/EventKit"),
     .target(name: "AVFoundation", dependencies: ["CoreGraphics", "CrossAppKit", "CoreMedia"], path: "Sources/AppleShims/AVFoundation"),
@@ -302,6 +302,17 @@ if buildDesktopNative {
         "CrossAppKit",
         "CrossFoundation",
         "CoreGraphics",
+        "Combine",
+      ]
+    ),
+    .testTarget(
+      name: "CrossShimsTests",
+      dependencies: [
+        "Combine",
+        "Security",
+        "ServiceManagement",
+        "SwiftUIRuntime",
+        "CrossSwiftUI",
       ]
     ),
   ]

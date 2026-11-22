@@ -14,7 +14,12 @@ public final class LinuxDrawingBackend: RenderBackend {
   public var onResize: ((SwiftUIRuntime.Size) -> Void)?
 
   private let window: NativeAPI.Window
-  public var environment: EnvironmentValues { .hosting(window) }
+  public var environmentTransform: ((inout EnvironmentValues) -> Void)?
+  public var environment: EnvironmentValues {
+    var env = EnvironmentValues.hosting(window)
+    environmentTransform?(&env)
+    return env
+  }
   private let content: NativeAPI.View
   private let hostView: NativeAPI.View
   private let canvas: Widget

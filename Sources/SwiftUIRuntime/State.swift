@@ -72,6 +72,7 @@ public final class StateRegistry {
     values = values.filter { $0.key.path.root !== root }
     liveByRoot.removeValue(forKey: rootID)
     LifecycleRegistry.shared.remove(root)
+    SceneStorageStore.shared.remove(root: root)
   }
   func notifyChange() {
     onChange?()
@@ -80,6 +81,7 @@ public final class StateRegistry {
   private init() {}
   public func reset() {
     LifecycleRegistry.shared.reset()
+    SceneStorageStore.shared.reset()
     values.removeAll()
     liveByRoot.removeAll()
     onChange = nil

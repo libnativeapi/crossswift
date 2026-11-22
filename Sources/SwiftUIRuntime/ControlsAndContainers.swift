@@ -1768,18 +1768,19 @@ private struct _NavigationEntry: Identifiable {
   let view: AnyView
 }
 
-private struct _NavigationActions: Sendable {
+struct _NavigationActions: Sendable {
   let push: (@MainActor @Sendable (String, AnyView) -> Void)?
+  let pushValue: (@MainActor @Sendable (ObjectIdentifier, AnyHashable, Any, String) -> Void)?
   let pop: (@MainActor @Sendable () -> Void)?
   let popToRoot: (@MainActor @Sendable () -> Void)?
 }
 
 private enum _NavigationActionsKey: EnvironmentKey {
-  static let defaultValue = _NavigationActions(push: nil, pop: nil, popToRoot: nil)
+  static let defaultValue = _NavigationActions(push: nil, pushValue: nil, pop: nil, popToRoot: nil)
 }
 
 extension EnvironmentValues {
-  fileprivate var _navigationActions: _NavigationActions {
+  var _navigationActions: _NavigationActions {
     get { self[_NavigationActionsKey.self] }
     set { self[_NavigationActionsKey.self] = newValue }
   }
@@ -1794,19 +1795,72 @@ private struct _NavigationTitlePreferenceKey: PreferenceKey {
 
 public struct NavigationStack<Data, Root: View>: View {
   let root: Root
+  private let pathBinding: Binding<NavigationPath>?
+  private let arrayPathSync: ((inout [NavigationPath.Box]) -> Void)?
+  private let arrayPathPush: ((Any) -> Void)?
+  private let arrayPathPop: (() -> Void)?
+  private let arrayPathCount: (() -> Int)?
+  private let arrayPathLast: (() -> NavigationPath.Box?)?
   @State private var entries: [_NavigationEntry] = []
   @State private var nextID: Int = 1
   @State private var rootTitle: String = ""
   @State private var detailTitle: String = ""
+  @State private var destinationRegistry = _NavigationDestinationRegistry()
 
   public init(@ViewBuilder root: () -> Root) where Data == Never {
     self.root = root()
+    self.pathBinding = nil
+    self.arrayPathSync = nil
+    self.arrayPathPush = nil
+    self.arrayPathPop = nil
+    self.arrayPathCount = nil
+    self.arrayPathLast = nil
   }
+
+  public init(path: Binding<NavigationPath>, @ViewBuilder root: () -> Root) where Data == NavigationPath {
+    self.root = root()
+    self.pathBinding = path
+    self.arrayPathSync = nil
+    self.arrayPathPush = nil
+    self.arrayPathPop = nil
+    self.arrayPathCount = nil
+    self.arrayPathLast = nil
+  }
+
+  public init<Element: Hashable>(
+    path: Binding<[Element]>,
+    @ViewBuilder root: () -> Root
+  ) where Data == [Element] {
+    self.root = root()
+    self.pathBinding = nil
+    self.arrayPathSync = nil
+    self.arrayPathPush = { raw in
+      if let typed = raw as? Element {
+        path.wrappedValue.append(typed)
+      }
+    }
+    self.arrayPathPop = {
+      if !path.wrappedValue.isEmpty {
+        path.wrappedValue.removeLast()
+      }
+    }
+    self.arrayPathCount = { path.wrappedValue.count }
+    self.arrayPathLast = { path.wrappedValue.last.map { NavigationPath.Box($0) } }
+  }
+
+  @_disfavoredOverload
   public init(path: Binding<Data>, @ViewBuilder root: () -> Root) {
     self.root = root()
+    self.pathBinding = nil
+    self.arrayPathSync = nil
+    self.arrayPathPush = nil
+    self.arrayPathPop = nil
+    self.arrayPathCount = nil
+    self.arrayPathLast = nil
   }
 
   public var body: some View {
+    let registry = destinationRegistry
     let actions = _NavigationActions(
       push: { title, dest in
         let id = nextID
@@ -1814,44 +1868,96 @@ public struct NavigationStack<Data, Root: View>: View {
         detailTitle = title
         entries.append(_NavigationEntry(id: id, title: title, view: dest))
       },
+      pushValue: { typeID, hashable, raw, label in
+        if let pathBinding {
+          pathBinding.wrappedValue.boxes.append(NavigationPath.Box(hashable))
+          // Preserve concrete payload for typed destination resolution.
+          let idx = pathBinding.wrappedValue.boxes.count - 1
+          pathBinding.wrappedValue.boxes[idx] = NavigationPath.Box(
+            _RawBoxPayload(typeID: typeID, hashable: hashable, raw: raw, label: label)
+          )
+        } else if let arrayPathPush {
+          arrayPathPush(raw)
+        } else if let view = registry.resolve(typeID: typeID, value: raw) {
+          let id = nextID
+          nextID += 1
+          detailTitle = label
+          entries.append(_NavigationEntry(id: id, title: label, view: view))
+        }
+      },
       pop: {
-        if !entries.isEmpty {
+        if let pathBinding, !pathBinding.wrappedValue.isEmpty {
+          pathBinding.wrappedValue.removeLast()
+          detailTitle = ""
+        } else if let arrayPathPop, (arrayPathCount?() ?? 0) > 0 {
+          arrayPathPop()
+          detailTitle = ""
+        } else if !entries.isEmpty {
           entries.removeLast()
           detailTitle = entries.last?.title ?? ""
         }
       },
       popToRoot: {
+        if let pathBinding {
+          pathBinding.wrappedValue.removeLast(pathBinding.wrappedValue.count)
+        } else if let arrayPathPop, let count = arrayPathCount?(), count > 0 {
+          for _ in 0..<count { arrayPathPop() }
+        }
         entries.removeAll()
         detailTitle = ""
       }
     )
-    let activeTitle = entries.isEmpty
-      ? rootTitle
-      : (detailTitle.isEmpty ? (entries.last?.title ?? "") : detailTitle)
-    let backTitle = entries.count <= 1
-      ? (rootTitle.isEmpty ? "Back" : rootTitle)
-      : entries[entries.count - 2].title
 
-    let pageKey = entries.last.map { String($0.id) } ?? "0"
+    let externalDepth: Int = {
+      if let pathBinding { return pathBinding.wrappedValue.count }
+      if let arrayPathCount { return arrayPathCount() }
+      return 0
+    }()
+    let totalDepth = externalDepth > 0 ? externalDepth : entries.count
+    let topExternalBox: NavigationPath.Box? = {
+      if let pathBinding { return pathBinding.wrappedValue.boxes.last }
+      if let arrayPathLast { return arrayPathLast() }
+      return nil
+    }()
+    let topExternalView: AnyView? = topExternalBox.flatMap { box in
+      if let payload = box.raw as? _RawBoxPayload {
+        return registry.resolve(typeID: payload.typeID, value: payload.raw)
+      }
+      return registry.resolve(typeID: box.typeID, value: box.raw)
+    }
+
+    let activeTitle = totalDepth == 0
+      ? rootTitle
+      : (detailTitle.isEmpty ? (entries.last?.title ?? topExternalBox?.label ?? "") : detailTitle)
+    let backTitle = totalDepth <= 1
+      ? (rootTitle.isEmpty ? "Back" : rootTitle)
+      : (entries.count >= 2 ? entries[entries.count - 2].title : "Back")
+
+    let pageKey: String = {
+      if let box = topExternalBox {
+        return "path-\(totalDepth)-\(box.label)"
+      }
+      return entries.last.map { String($0.id) } ?? "0"
+    }()
 
     SemanticControlWrapper(
       semantic: SemanticControl(
         kind: "navStack",
-        intValue: entries.count,
+        intValue: totalDepth,
         subtitle: pageKey,
-        canGoBack: !entries.isEmpty
+        canGoBack: totalDepth > 0
       ),
       content: VStack(spacing: 0) {
-        if !activeTitle.isEmpty || !entries.isEmpty {
+        if !activeTitle.isEmpty || totalDepth > 0 {
           SemanticControlWrapper(
             semantic: SemanticControl(
               kind: "navBar",
               title: activeTitle,
               subtitle: backTitle,
-              canGoBack: !entries.isEmpty
+              canGoBack: totalDepth > 0
             ),
             content: HStack(spacing: 8) {
-              if !entries.isEmpty {
+              if totalDepth > 0 {
                 Button {
                   actions.pop?()
                 } label: {
@@ -1867,7 +1973,7 @@ public struct NavigationStack<Data, Root: View>: View {
               Text(verbatim: activeTitle)
                 .font(.headline)
               Spacer()
-              if !entries.isEmpty {
+              if totalDepth > 0 {
                 Color.clear.frame(width: 44, height: 1)
               }
             }
@@ -1882,7 +1988,12 @@ public struct NavigationStack<Data, Root: View>: View {
         }
 
         Group {
-          if let top = entries.last {
+          if let topExternalView {
+            topExternalView
+              .onPreferenceChange(_NavigationTitlePreferenceKey.self) { title in
+                if let title, !title.isEmpty { detailTitle = title }
+              }
+          } else if let top = entries.last {
             top.view
               .onPreferenceChange(_NavigationTitlePreferenceKey.self) { title in
                 if let title, !title.isEmpty { detailTitle = title }
@@ -1896,6 +2007,7 @@ public struct NavigationStack<Data, Root: View>: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environment(\._navigationActions, actions)
+        .environment(\._navigationDestinations, registry)
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity),
       backAction: { actions.pop?() }
@@ -1904,35 +2016,113 @@ public struct NavigationStack<Data, Root: View>: View {
   }
 }
 
+private struct _RawBoxPayload: Hashable {
+  let typeID: ObjectIdentifier
+  let hashable: AnyHashable
+  let raw: Any
+  let label: String
+
+  static func == (lhs: _RawBoxPayload, rhs: _RawBoxPayload) -> Bool {
+    lhs.typeID == rhs.typeID && lhs.hashable == rhs.hashable
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine(typeID)
+    hasher.combine(hashable)
+  }
+}
+
 public struct NavigationLink<Label: View, Destination: View>: View {
   let label: Label
-  let destination: Destination
+  private let destinationBuilder: (() -> AnyView)?
   let fallbackTitle: String
+  private let valuePush: (@MainActor (_NavigationActions) -> Void)?
   @Environment(\._navigationActions) private var navActions
 
   public init(@ViewBuilder destination: () -> Destination, @ViewBuilder label: () -> Label) {
-    self.destination = destination()
+    let dest = destination()
+    self.destinationBuilder = { AnyView(dest) }
     self.label = label()
     self.fallbackTitle = ""
+    self.valuePush = nil
   }
   public init(_ titleKey: LocalizedStringKey, @ViewBuilder destination: () -> Destination)
   where Label == Text {
-    self.destination = destination()
+    let dest = destination()
+    self.destinationBuilder = { AnyView(dest) }
     self.label = Text(titleKey)
     self.fallbackTitle = titleKey.resolved()
+    self.valuePush = nil
   }
   @_disfavoredOverload
   public init<S: StringProtocol>(_ title: S, @ViewBuilder destination: () -> Destination)
   where Label == Text {
     let str = String(title)
-    self.destination = destination()
+    let dest = destination()
+    self.destinationBuilder = { AnyView(dest) }
     self.label = Text(verbatim: str)
     self.fallbackTitle = str
+    self.valuePush = nil
+  }
+
+  public init<P: Hashable>(
+    value: P?,
+    @ViewBuilder label: () -> Label
+  ) where Destination == Never {
+    self.destinationBuilder = nil
+    self.label = label()
+    self.fallbackTitle = value.map { String(describing: $0) } ?? ""
+    if let value {
+      self.valuePush = { actions in
+        actions.pushValue?(ObjectIdentifier(P.self), AnyHashable(value), value, String(describing: value))
+      }
+    } else {
+      self.valuePush = nil
+    }
+  }
+
+  public init<P: Hashable>(
+    _ titleKey: LocalizedStringKey,
+    value: P?
+  ) where Label == Text, Destination == Never {
+    self.destinationBuilder = nil
+    self.label = Text(titleKey)
+    self.fallbackTitle = titleKey.resolved()
+    if let value {
+      let title = titleKey.resolved()
+      self.valuePush = { actions in
+        actions.pushValue?(ObjectIdentifier(P.self), AnyHashable(value), value, title)
+      }
+    } else {
+      self.valuePush = nil
+    }
+  }
+
+  @_disfavoredOverload
+  public init<S: StringProtocol, P: Hashable>(
+    _ title: S,
+    value: P?
+  ) where Label == Text, Destination == Never {
+    let str = String(title)
+    self.destinationBuilder = nil
+    self.label = Text(verbatim: str)
+    self.fallbackTitle = str
+    if let value {
+      self.valuePush = { actions in
+        actions.pushValue?(ObjectIdentifier(P.self), AnyHashable(value), value, str)
+      }
+    } else {
+      self.valuePush = nil
+    }
   }
 
   public var body: some View {
     Button {
-      navActions.push?(fallbackTitle, AnyView(destination))
+      if let valuePush {
+        valuePush(navActions)
+      } else if let destinationBuilder {
+        navActions.push?(fallbackTitle, destinationBuilder())
+      }
     } label: {
       HStack(spacing: 8) {
         label

@@ -46,10 +46,26 @@ import SwiftUIRuntime
   }
 }
 
+@MainActor
+private func _webFlattenScenes(_ scene: any Scene) -> [any Scene] {
+  if let composite = scene as? any _CompositeScene {
+    return composite._childScenes.flatMap { _webFlattenScenes($0) }
+  }
+  if scene is EmptyScene || scene is any _WindowScene || scene is any _MenuBarExtraScene {
+    return [scene]
+  }
+  let body = scene.body
+  if body is EmptyScene { return [scene] }
+  return _webFlattenScenes(body)
+}
+
 @MainActor public func runApp<A: App>(_ app: A) {
   JavaScriptEventLoop.installGlobalExecutor()
   installWebResources()
-  guard let scene = app.body as? any _WindowScene else {
+  let scenes = _webFlattenScenes(app.body)
+  guard let scene = scenes.first(where: { ($0 as? any _WindowScene)?._opensAtLaunch == true }) as? any _WindowScene
+    ?? scenes.first(where: { $0 is any _WindowScene }) as? any _WindowScene
+  else {
     fatalError("CrossSwiftUI requires WindowGroup as the top-level Scene")
   }
   let document = JSObject.global.document.object!

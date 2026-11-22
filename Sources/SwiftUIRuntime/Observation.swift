@@ -32,26 +32,98 @@ public struct Bindable<Value: AnyObject & Observable> {
 
 public protocol ObservableObject: AnyObject {}
 public final class ObservableObjectPublisher {
+  private let lock = NSLock()
+  private var listeners: [UUID: () -> Void] = [:]
+
   public init() {}
-  public func send() { StateRegistry.shared.notifyChange() }
+
+  public func send() {
+    lock.lock()
+    let current = Array(listeners.values)
+    lock.unlock()
+    for listener in current {
+      listener()
+    }
+    StateRegistry.shared.notifyChange()
+  }
+
+  public func _subscribe(_ listener: @escaping () -> Void) -> () -> Void {
+    let id = UUID()
+    lock.lock()
+    listeners[id] = listener
+    lock.unlock()
+    return { [weak self] in
+      guard let self else { return }
+      self.lock.lock()
+      self.listeners.removeValue(forKey: id)
+      self.lock.unlock()
+    }
+  }
 }
 extension ObservableObject {
   public var objectWillChange: ObservableObjectPublisher { ObservableObjectPublisher() }
 }
 @propertyWrapper public struct Published<Value> {
-  private final class Storage {
+  fileprivate final class Storage {
+    let lock = NSLock()
     var value: Value
+    var listeners: [UUID: (Value) -> Void] = [:]
     init(_ value: Value) { self.value = value }
+
+    func get() -> Value {
+      lock.lock()
+      defer { lock.unlock() }
+      return value
+    }
+
+    func set(_ newValue: Value) {
+      lock.lock()
+      value = newValue
+      let current = Array(listeners.values)
+      lock.unlock()
+      for listener in current {
+        listener(newValue)
+      }
+    }
+
+    func subscribe(_ listener: @escaping (Value) -> Void) -> () -> Void {
+      let id = UUID()
+      lock.lock()
+      listeners[id] = listener
+      let current = value
+      lock.unlock()
+      listener(current)
+      return { [weak self] in
+        guard let self else { return }
+        self.lock.lock()
+        self.listeners.removeValue(forKey: id)
+        self.lock.unlock()
+      }
+    }
   }
+
+  public struct Publisher {
+    private let storage: Storage
+    fileprivate init(storage: Storage) {
+      self.storage = storage
+    }
+
+    public func _subscribe(_ listener: @escaping (Value) -> Void) -> () -> Void {
+      storage.subscribe(listener)
+    }
+  }
+
   private let storage: Storage
   public var wrappedValue: Value {
-    get { storage.value }
+    get { storage.get() }
     nonmutating set {
-      storage.value = newValue
+      storage.set(newValue)
       StateRegistry.shared.notifyChange()
     }
   }
+  public var projectedValue: Publisher { Publisher(storage: storage) }
   public init(wrappedValue: Value) { storage = Storage(wrappedValue) }
+  public init(initialValue: Value) { storage = Storage(initialValue) }
 }
 @propertyWrapper @dynamicMemberLookup public struct ObservedObject<Object: ObservableObject> {
   public var wrappedValue: Object

@@ -5,6 +5,8 @@ import Foundation
 #endif
 #if os(Windows)
   import CAppKitWindows
+#elseif os(Linux)
+  import Glibc
 #endif
 
 open class NSRunningApplication: NSObject, @unchecked Sendable {
@@ -69,6 +71,23 @@ open class NSRunningApplication: NSObject, @unchecked Sendable {
         bundleURL: url,
         executableURL: url,
         localizedName: stem.isEmpty ? (winTitle.isEmpty ? "Application" : winTitle) : stem
+      )
+    #elseif os(Linux)
+      let exeLink = "/proc/\(pid)/exe"
+      var buf = [CChar](repeating: 0, count: 1024)
+      let len = readlink(exeLink, &buf, buf.count - 1)
+      let exePath: String? = len > 0 ? String(cString: buf) : nil
+      let comm = (try? String(contentsOfFile: "/proc/\(pid)/comm", encoding: .utf8))?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      guard exePath != nil || (comm != nil && !comm!.isEmpty) else { return nil }
+      let exeURL = exePath.map { URL(fileURLWithPath: $0) }
+      let name = comm ?? exeURL?.lastPathComponent ?? "Process \(pid)"
+      self.init(
+        processIdentifier: pid,
+        bundleIdentifier: exePath?.lowercased() ?? "pid.\(pid)",
+        bundleURL: exeURL,
+        executableURL: exeURL,
+        localizedName: name
       )
     #else
       self.init(
@@ -140,6 +159,10 @@ open class NSRunningApplication: NSObject, @unchecked Sendable {
       let ok = cak_terminate_pid(UInt32(processIdentifier), 0) != 0
       if ok { isTerminated = true }
       return ok
+    #elseif os(Linux)
+      let ok = kill(pid_t(processIdentifier), SIGTERM) == 0
+      if ok { isTerminated = true }
+      return ok
     #else
       return false
     #endif
@@ -149,6 +172,10 @@ open class NSRunningApplication: NSObject, @unchecked Sendable {
   public func forceTerminate() -> Bool {
     #if os(Windows)
       let ok = cak_terminate_pid(UInt32(processIdentifier), 1) != 0
+      if ok { isTerminated = true }
+      return ok
+    #elseif os(Linux)
+      let ok = kill(pid_t(processIdentifier), SIGKILL) == 0
       if ok { isTerminated = true }
       return ok
     #else
@@ -214,6 +241,18 @@ open class NSWorkspace: NSObject, @unchecked Sendable {
         }
       }
       return result
+    #elseif os(Linux)
+      guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/proc") else {
+        return [NSRunningApplication.current]
+      }
+      var result: [NSRunningApplication] = []
+      for name in entries {
+        guard let pid = Int32(name), pid > 0 else { continue }
+        if let app = NSRunningApplication(processIdentifier: pid) {
+          result.append(app)
+        }
+      }
+      return result
     #else
       return []
     #endif
@@ -249,6 +288,16 @@ open class NSWorkspace: NSObject, @unchecked Sendable {
           if cak_open_with_app(appPath, arg) == 0 { ok = false }
         }
         completionHandler?(ok ? frontmostApplication : nil, nil)
+      }
+    #elseif os(Linux)
+      let proc = Process()
+      proc.executableURL = applicationURL
+      proc.arguments = configuration.arguments + urls.map { $0.isFileURL ? $0.path : $0.absoluteString }
+      do {
+        try proc.run()
+        completionHandler?(NSRunningApplication(processIdentifier: proc.processIdentifier), nil)
+      } catch {
+        completionHandler?(nil, error)
       }
     #else
       completionHandler?(nil, nil)
@@ -322,6 +371,8 @@ open class NSWorkspace: NSObject, @unchecked Sendable {
     guard let first = fileURLs.first else { return }
     #if os(Windows)
       _ = cak_reveal_in_explorer(first.path)
+    #elseif os(Linux)
+      _ = selectFile(first.path, inFileViewerRootedAtPath: "")
     #endif
   }
 
@@ -329,6 +380,10 @@ open class NSWorkspace: NSObject, @unchecked Sendable {
     guard let fullPath else { return false }
     #if os(Windows)
       return cak_reveal_in_explorer(fullPath) != 0
+    #elseif os(Linux)
+      let targetURL = URL(fileURLWithPath: fullPath)
+      let parentDir = targetURL.deletingLastPathComponent()
+      return open(parentDir)
     #else
       return false
     #endif

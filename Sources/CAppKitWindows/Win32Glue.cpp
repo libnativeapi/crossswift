@@ -18,6 +18,7 @@
 #include <commctrl.h>
 #include <imm.h>
 #include <bcrypt.h>
+#include <wincred.h>
 #include <objidl.h>
 #include <gdiplus.h>
 #pragma comment(lib, "comctl32.lib")
@@ -2173,6 +2174,55 @@ int cak_getattrlistbulk(int dirfd, void *attrbuf, size_t attrbuf_size) {
     FindClose(state.find_handle);
   }
   return count;
+}
+
+int cak_cred_write(const char *utf8_target, const char *utf8_user, const uint8_t *secret, size_t len) {
+  if (!utf8_target || !*utf8_target) return 0;
+  std::wstring target = ToWide(utf8_target);
+  std::wstring user = utf8_user ? ToWide(utf8_user) : L"";
+  CREDENTIALW cred = {};
+  cred.Type = CRED_TYPE_GENERIC;
+  cred.TargetName = const_cast<LPWSTR>(target.c_str());
+  cred.UserName = user.empty() ? nullptr : const_cast<LPWSTR>(user.c_str());
+  cred.CredentialBlobSize = static_cast<DWORD>(len);
+  cred.CredentialBlob = (len > 0 && secret) ? const_cast<LPBYTE>(secret) : nullptr;
+  cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
+  return CredWriteW(&cred, 0) ? 1 : 0;
+}
+
+uint8_t *cak_cred_read(const char *utf8_target, size_t *out_len) {
+  if (out_len) *out_len = 0;
+  if (!utf8_target || !*utf8_target) return nullptr;
+  std::wstring target = ToWide(utf8_target);
+  PCREDENTIALW cred = nullptr;
+  if (!CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred) || !cred) {
+    return nullptr;
+  }
+  size_t n = static_cast<size_t>(cred->CredentialBlobSize);
+  uint8_t *copy = static_cast<uint8_t *>(std::malloc(n > 0 ? n : 1));
+  if (copy && n > 0 && cred->CredentialBlob) {
+    std::memcpy(copy, cred->CredentialBlob, n);
+  }
+  if (out_len) *out_len = n;
+  CredFree(cred);
+  return copy;
+}
+
+int cak_cred_delete(const char *utf8_target) {
+  if (!utf8_target || !*utf8_target) return 0;
+  std::wstring target = ToWide(utf8_target);
+  return CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0) ? 1 : 0;
+}
+
+int cak_cred_exists(const char *utf8_target) {
+  if (!utf8_target || !*utf8_target) return 0;
+  std::wstring target = ToWide(utf8_target);
+  PCREDENTIALW cred = nullptr;
+  if (!CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred) || !cred) {
+    return 0;
+  }
+  CredFree(cred);
+  return 1;
 }
 
 } // extern "C"

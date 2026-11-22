@@ -91,7 +91,14 @@ public struct Text: View {
   public init(_ content: AttributedString) {
     self.content = String(content.characters)
     runs = content.runs.map { run in
-      Run(text: String(content.characters[run.range]), font: nil, color: nil, link: run.link)
+      #if !os(macOS)
+        let slice = content[run.range]
+        let font = slice[AttributeScopes.SwiftUIAttributes.FontAttribute.self]
+        let color = slice[AttributeScopes.SwiftUIAttributes.ForegroundColorAttribute.self]
+        return Run(text: String(content.characters[run.range]), font: font, color: color, link: run.link)
+      #else
+        return Run(text: String(content.characters[run.range]), font: nil, color: nil, link: run.link)
+      #endif
     }
   }
 

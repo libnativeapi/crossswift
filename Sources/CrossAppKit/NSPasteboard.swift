@@ -212,6 +212,27 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
           ) != 0
         }
       }
+    #elseif os(Linux)
+      if isSystemGeneral {
+        let clipboard = NativeAPI.Clipboard.shared
+        let ok: Bool
+        switch dataType {
+        case .string, .URL:
+          ok = clipboard.writeText(string)
+        case .html:
+          ok = clipboard.writeHtml(string)
+        case .rtf:
+          ok = clipboard.writeRtf(string)
+        case .fileURL:
+          let path = (URL(string: string)?.isFileURL == true) ? URL(string: string)!.path : string
+          ok = clipboard.writeFilePaths([path])
+        default:
+          knownCustomTypes.insert(dataType)
+          ok = clipboard.writeFormatBase64(dataType.rawValue, base64Data: Data(string.utf8).base64EncodedString())
+        }
+        localChangeCount += 1
+        return ok
+      }
     #endif
     localChangeCount += 1
     return true
@@ -221,6 +242,13 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
     #if os(Windows)
       if isSystemGeneral {
         return readSystemString(forType: dataType)
+      }
+    #elseif os(Linux)
+      if isSystemGeneral {
+        if let local = localItems.first?.string(forType: dataType) {
+          return local
+        }
+        return readLinuxSystemString(forType: dataType)
       }
     #endif
     return localItems.first?.string(forType: dataType)
@@ -255,6 +283,30 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
           ) != 0
         }
       }
+    #elseif os(Linux)
+      if isSystemGeneral {
+        let clipboard = NativeAPI.Clipboard.shared
+        let ok: Bool
+        switch dataType {
+        case .fileURL:
+          if let url = Self.decodeFileURL(from: data) {
+            ok = clipboard.writeFilePaths([url.path])
+          } else {
+            ok = false
+          }
+        case .string, .URL:
+          ok = String(data: data, encoding: .utf8).map { clipboard.writeText($0) } ?? false
+        case .html:
+          ok = String(data: data, encoding: .utf8).map { clipboard.writeHtml($0) } ?? false
+        case .rtf:
+          ok = String(data: data, encoding: .utf8).map { clipboard.writeRtf($0) } ?? false
+        default:
+          knownCustomTypes.insert(dataType)
+          ok = clipboard.writeFormatBase64(dataType.rawValue, base64Data: data.base64EncodedString())
+        }
+        localChangeCount += 1
+        return ok
+      }
     #endif
     localChangeCount += 1
     return true
@@ -264,6 +316,13 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
     #if os(Windows)
       if isSystemGeneral {
         return readSystemData(forType: dataType)
+      }
+    #elseif os(Linux)
+      if isSystemGeneral {
+        if let local = localItems.first?.data(forType: dataType) {
+          return local
+        }
+        return readLinuxSystemData(forType: dataType)
       }
     #endif
     return localItems.first?.data(forType: dataType)
@@ -381,10 +440,10 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
   }
 
   public var types: [PasteboardType]? {
-    #if os(Windows)
+    #if os(Windows) || os(Linux)
       if isSystemGeneral {
         let sys = querySystemTypes()
-        return sys.isEmpty ? nil : sys
+        if !sys.isEmpty { return sys }
       }
     #endif
     guard let items = pasteboardItems, let first = items.first else { return nil }
@@ -424,21 +483,7 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
     }
   }
 
-  #if os(Windows)
-    private func writeSystemFiles(_ paths: [String], clearFirst: Bool) -> Bool {
-      guard !paths.isEmpty else { return false }
-      let cStrings = paths.map { _strdup($0) }
-      defer { for p in cStrings { free(p) } }
-      let ptrs: [UnsafePointer<CChar>?] = cStrings.map { UnsafePointer($0) }
-      return ptrs.withUnsafeBufferPointer { buf in
-        if clearFirst {
-          return cak_clipboard_set_files(buf.baseAddress, Int32(buf.count)) != 0
-        } else {
-          return cak_clipboard_add_files(buf.baseAddress, Int32(buf.count)) != 0
-        }
-      }
-    }
-
+  #if os(Windows) || os(Linux)
     private func querySystemTypes() -> [PasteboardType] {
       let clipboard = NativeAPI.Clipboard.shared
       var out: [PasteboardType] = []
@@ -456,6 +501,73 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
       if clipboard.hasRtf() { out.append(.rtf) }
       if clipboard.hasHtml() { out.append(.html) }
       return out
+    }
+  #endif
+
+  #if os(Linux)
+    private func runClipboardReader(_ args: [String]) -> Data? {
+      let candidates = ["/usr/bin/wl-paste", "/usr/bin/xclip", "/usr/bin/xsel"]
+      for tool in candidates where FileManager.default.isExecutableFile(atPath: tool) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: tool)
+        if tool.hasSuffix("wl-paste") {
+          proc.arguments = ["--no-newline"] + args
+        } else if tool.hasSuffix("xclip") {
+          proc.arguments = ["-o", "-selection", "clipboard"] + args
+        } else {
+          proc.arguments = ["-ob"]
+        }
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        do {
+          try proc.run()
+          proc.waitUntilExit()
+          if proc.terminationStatus == 0 {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if !data.isEmpty { return data }
+          }
+        } catch {
+          continue
+        }
+      }
+      return nil
+    }
+
+    private func readLinuxSystemData(forType dataType: PasteboardType) -> Data? {
+      switch dataType {
+      case .string, .URL:
+        return runClipboardReader([])
+      case .png:
+        return runClipboardReader(["-t", "image/png"])
+      case .html:
+        return runClipboardReader(["-t", "text/html"])
+      case .fileURL:
+        return runClipboardReader(["-t", "text/uri-list"])
+      default:
+        return runClipboardReader(["-t", dataType.rawValue])
+      }
+    }
+
+    private func readLinuxSystemString(forType dataType: PasteboardType) -> String? {
+      guard let data = readLinuxSystemData(forType: dataType) else { return nil }
+      return String(data: data, encoding: .utf8)
+    }
+  #endif
+
+  #if os(Windows)
+    private func writeSystemFiles(_ paths: [String], clearFirst: Bool) -> Bool {
+      guard !paths.isEmpty else { return false }
+      let cStrings = paths.map { _strdup($0) }
+      defer { for p in cStrings { free(p) } }
+      let ptrs: [UnsafePointer<CChar>?] = cStrings.map { UnsafePointer($0) }
+      return ptrs.withUnsafeBufferPointer { buf in
+        if clearFirst {
+          return cak_clipboard_set_files(buf.baseAddress, Int32(buf.count)) != 0
+        } else {
+          return cak_clipboard_add_files(buf.baseAddress, Int32(buf.count)) != 0
+        }
+      }
     }
 
     fileprivate func readSystemString(forType dataType: PasteboardType) -> String? {

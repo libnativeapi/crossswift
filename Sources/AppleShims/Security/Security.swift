@@ -1,5 +1,10 @@
 import Foundation
 import CoreFoundation
+#if os(Windows)
+  import CAppKitWindows
+#elseif os(Linux)
+  import Glibc
+#endif
 
 #if !os(macOS)
   public typealias OSStatus = Int32
@@ -24,23 +29,232 @@ import CoreFoundation
   public let kSecReturnAttributes: CFString = "r_Attributes"
   public let kSecUseDataProtectionKeychain: CFString = "nleg"
 
-  public func SecItemCopyMatching(_ query: CFDictionary, _ result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
+  private struct _KeychainLookup {
+    let secClass: String
+    let service: String
+    let account: String
+    let returnData: Bool
+    let returnAttributes: Bool
+    let matchAll: Bool
+    let valueData: Data?
+
+    var targetKey: String {
+      "crossswift:\(secClass):\(service):\(account)"
+    }
+
+    static func parse(_ dict: CFDictionary) -> _KeychainLookup? {
+      guard let map = dict as? [String: Any] else { return nil }
+      let secClass = (map[kSecClass] as? String) ?? kSecClassGenericPassword
+      let service = (map[kSecAttrService] as? String) ?? ""
+      let account = (map[kSecAttrAccount] as? String) ?? ""
+      let returnData = (map[kSecReturnData] as? Bool) ?? false
+      let returnAttributes = (map[kSecReturnAttributes] as? Bool) ?? false
+      let matchAll = (map[kSecMatchLimit] as? String) == kSecMatchLimitAll
+      let valueData = map[kSecValueData] as? Data
+      return _KeychainLookup(
+        secClass: secClass,
+        service: service,
+        account: account,
+        returnData: returnData,
+        returnAttributes: returnAttributes,
+        matchAll: matchAll,
+        valueData: valueData
+      )
+    }
+  }
+
+  #if os(Linux)
+    private final class _LinuxKeychainStore: @unchecked Sendable {
+      static let shared = _LinuxKeychainStore()
+      private let lock = NSLock()
+
+      private var storeURL: URL {
+        let base: URL
+        if let xdg = ProcessInfo.processInfo.environment["XDG_DATA_HOME"], !xdg.isEmpty {
+          base = URL(fileURLWithPath: xdg)
+        } else {
+          base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share")
+        }
+        return base.appendingPathComponent("crossswift/keychain.json")
+      }
+
+      private func loadUnlocked() -> [String: String] {
+        guard let data = try? Data(contentsOf: storeURL),
+              let dict = try? JSONDecoder().decode([String: String].self, from: data)
+        else { return [:] }
+        return dict
+      }
+
+      private func saveUnlocked(_ dict: [String: String]) throws {
+        let url = storeURL
+        let dir = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        _ = chmod(dir.path, 0o700)
+        let data = try JSONEncoder().encode(dict)
+        try data.write(to: url, options: .atomic)
+        _ = chmod(url.path, 0o600)
+      }
+
+      func exists(key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return loadUnlocked()[key] != nil
+      }
+
+      func read(key: String) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let b64 = loadUnlocked()[key] else { return nil }
+        return Data(base64Encoded: b64)
+      }
+
+      func write(key: String, data: Data) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        var dict = loadUnlocked()
+        dict[key] = data.base64EncodedString()
+        return (try? saveUnlocked(dict)) != nil
+      }
+
+      func delete(key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        var dict = loadUnlocked()
+        guard dict.removeValue(forKey: key) != nil else { return false }
+        return (try? saveUnlocked(dict)) != nil
+      }
+    }
+  #endif
+
+  public func SecItemCopyMatching(
+    _ query: CFDictionary,
+    _ result: UnsafeMutablePointer<CFTypeRef?>?
+  ) -> OSStatus {
     result?.pointee = nil
-    return errSecItemNotFound
+    guard let q = _KeychainLookup.parse(query) else { return errSecParam }
+    guard !q.service.isEmpty || !q.account.isEmpty else { return errSecParam }
+
+    let foundData: Data?
+    #if os(Windows)
+      var len: Int = 0
+      if let ptr = cak_cred_read(q.targetKey, &len) {
+        foundData = len > 0 ? Data(bytes: ptr, count: len) : Data()
+        cak_free(ptr)
+      } else {
+        foundData = nil
+      }
+    #elseif os(Linux)
+      foundData = _LinuxKeychainStore.shared.read(key: q.targetKey)
+    #else
+      foundData = nil
+    #endif
+
+    guard let data = foundData else {
+      return errSecItemNotFound
+    }
+
+    if let result {
+      if q.returnAttributes && q.returnData {
+        let entry: [String: Any] = [
+          kSecClass: q.secClass,
+          kSecAttrService: q.service,
+          kSecAttrAccount: q.account,
+          kSecValueData: data,
+        ]
+        result.pointee = q.matchAll ? ([entry] as AnyObject) : (entry as AnyObject)
+      } else if q.returnAttributes {
+        let entry: [String: Any] = [
+          kSecClass: q.secClass,
+          kSecAttrService: q.service,
+          kSecAttrAccount: q.account,
+        ]
+        result.pointee = q.matchAll ? ([entry] as AnyObject) : (entry as AnyObject)
+      } else if q.returnData {
+        result.pointee = q.matchAll ? ([data] as AnyObject) : (data as AnyObject)
+      }
+    }
+    return errSecSuccess
   }
-  public func SecItemAdd(_ attributes: CFDictionary, _ result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
-    errSecUnimplemented
+
+  public func SecItemAdd(
+    _ attributes: CFDictionary,
+    _ result: UnsafeMutablePointer<CFTypeRef?>?
+  ) -> OSStatus {
+    guard let q = _KeychainLookup.parse(attributes), let data = q.valueData else {
+      return errSecParam
+    }
+    guard !q.service.isEmpty || !q.account.isEmpty else { return errSecParam }
+
+    #if os(Windows)
+      if cak_cred_exists(q.targetKey) != 0 {
+        return errSecDuplicateItem
+      }
+      let ok = data.withUnsafeBytes { raw -> Int32 in
+        cak_cred_write(q.targetKey, q.account, raw.bindMemory(to: UInt8.self).baseAddress, data.count)
+      }
+      guard ok != 0 else { return errSecParam }
+      if let result, q.returnData { result.pointee = data as AnyObject }
+      return errSecSuccess
+    #elseif os(Linux)
+      if _LinuxKeychainStore.shared.exists(key: q.targetKey) {
+        return errSecDuplicateItem
+      }
+      guard _LinuxKeychainStore.shared.write(key: q.targetKey, data: data) else {
+        return errSecParam
+      }
+      if let result, q.returnData { result.pointee = data as AnyObject }
+      return errSecSuccess
+    #else
+      return errSecUnimplemented
+    #endif
   }
-  public func SecItemUpdate(_ query: CFDictionary, _ attributesToUpdate: CFDictionary) -> OSStatus {
-    errSecUnimplemented
+
+  public func SecItemUpdate(
+    _ query: CFDictionary,
+    _ attributesToUpdate: CFDictionary
+  ) -> OSStatus {
+    guard let q = _KeychainLookup.parse(query),
+          let updates = _KeychainLookup.parse(attributesToUpdate),
+          let newData = updates.valueData
+    else { return errSecParam }
+    guard !q.service.isEmpty || !q.account.isEmpty else { return errSecParam }
+
+    #if os(Windows)
+      guard cak_cred_exists(q.targetKey) != 0 else { return errSecItemNotFound }
+      let ok = newData.withUnsafeBytes { raw -> Int32 in
+        cak_cred_write(q.targetKey, q.account, raw.bindMemory(to: UInt8.self).baseAddress, newData.count)
+      }
+      return ok != 0 ? errSecSuccess : errSecParam
+    #elseif os(Linux)
+      guard _LinuxKeychainStore.shared.exists(key: q.targetKey) else { return errSecItemNotFound }
+      return _LinuxKeychainStore.shared.write(key: q.targetKey, data: newData) ? errSecSuccess : errSecParam
+    #else
+      return errSecUnimplemented
+    #endif
   }
+
   public func SecItemDelete(_ query: CFDictionary) -> OSStatus {
-    errSecItemNotFound
+    guard let q = _KeychainLookup.parse(query) else { return errSecParam }
+    guard !q.service.isEmpty || !q.account.isEmpty else { return errSecParam }
+
+    #if os(Windows)
+      return cak_cred_delete(q.targetKey) != 0 ? errSecSuccess : errSecItemNotFound
+    #elseif os(Linux)
+      return _LinuxKeychainStore.shared.delete(key: q.targetKey) ? errSecSuccess : errSecItemNotFound
+    #else
+      return errSecItemNotFound
+    #endif
   }
 
   public final class SecRandom: @unchecked Sendable {}
   public let kSecRandomDefault: SecRandom? = nil
   public func SecRandomCopyBytes(_ rnd: SecRandom?, _ count: Int, _ bytes: UnsafeMutableRawPointer) -> Int32 {
+    #if os(Windows)
+      let ptr = bytes.assumingMemoryBound(to: UInt8.self)
+      if cak_random_bytes(ptr, count) != 0 {
+        return errSecSuccess
+      }
+    #endif
     let ptr = bytes.assumingMemoryBound(to: UInt8.self)
     for i in 0..<count { ptr[i] = UInt8.random(in: 0...255) }
     return errSecSuccess
