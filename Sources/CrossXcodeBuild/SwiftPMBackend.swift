@@ -112,13 +112,40 @@ public final class SwiftPMBackend {
       guard let nativeAPISwiftRoot else {
         throw BuildBackendError.nativeAPINotFound(crossSwiftRoot.deletingLastPathComponent().path)
       }
+      let adaptedPackages = try prepareAdaptedPackages(
+        project: project,
+        platform: platform,
+        buildRoot: buildRoot,
+        crossSwiftRoot: crossSwiftRoot
+      )
+      var dependencyRoots: [URL] = []
+      var seenRoots = Set<String>()
+      let cacheRoot = buildRoot.deletingLastPathComponent().appendingPathComponent("AdaptedPackageCache")
+      for remote in project.remotePackages {
+        if let adapted = adaptedPackages.remote[remote.id] {
+          if seenRoots.insert(adapted.standardizedFileURL.path).inserted {
+            dependencyRoots.append(adapted)
+          }
+        } else if let checkout = try? PackageDependencyAdapter.checkoutRemotePackage(remote, cacheRoot: cacheRoot) {
+          if seenRoots.insert(checkout.standardizedFileURL.path).inserted {
+            dependencyRoots.append(checkout)
+          }
+        }
+      }
+      for local in project.localPackages {
+        let root = adaptedPackages.local[local.id] ?? local.path
+        if seenRoots.insert(root.standardizedFileURL.path).inserted {
+          dependencyRoots.append(root)
+        }
+      }
       let harmony = try HarmonyBuilder.build(
         project: project,
         configuration: configuration,
         buildRoot: buildRoot,
         compiledAssets: compiledAssets,
         crossSwiftRoot: crossSwiftRoot,
-        nativeAPISwiftRoot: nativeAPISwiftRoot
+        nativeAPISwiftRoot: nativeAPISwiftRoot,
+        dependencyPackages: dependencyRoots
       )
       let swiftExe = (try? locateSwiftExecutable()) ?? URL(fileURLWithPath: "/usr/bin/swift")
       return BuiltTargetArtifacts(
@@ -131,7 +158,8 @@ public final class SwiftPMBackend {
         swiftExecutableURL: swiftExe,
         crossSwiftRoot: crossSwiftRoot,
         wasmPackageDirectory: nil,
-        harmonyArtifacts: harmony
+        harmonyArtifacts: harmony,
+        adaptedRemotePackageDirectories: Array(adaptedPackages.remote.values)
       )
     }
 
@@ -846,7 +874,7 @@ public final class SwiftPMBackend {
     var adaptedLocal: [String: URL] = [:]
     let cacheRoot = buildRoot.deletingLastPathComponent().appendingPathComponent("AdaptedPackageCache")
     let stagingRoot = buildRoot.appendingPathComponent("AdaptedPackages")
-    let allowedModules: Set<String> = (platform == .wasm || platform == .android)
+    let allowedModules: Set<String> = (platform == .wasm || platform == .android || platform == .harmonyos)
       ? ["SwiftUI", "SwiftUIRuntime"]
       : PackageDependencyAdapter.crossSwiftProvidedModules
 
@@ -876,7 +904,7 @@ public final class SwiftPMBackend {
         crossSwiftRoot: crossSwiftRoot,
         consumerReferences: consumerRefs,
         allowedCrossSwiftModules: allowedModules,
-        useWasmBundleShim: platform == .wasm || platform == .android
+        useWasmBundleShim: platform == .wasm || platform == .android || platform == .harmonyos
       ) {
         adaptedRemote[remote.id] = adaptedURL
         remoteOverrides[remote.repositoryURL.lowercased()] = adaptedURL
@@ -900,7 +928,7 @@ public final class SwiftPMBackend {
         crossSwiftRoot: crossSwiftRoot,
         consumerReferences: consumerRefs,
         allowedCrossSwiftModules: allowedModules,
-        useWasmBundleShim: platform == .wasm || platform == .android,
+        useWasmBundleShim: platform == .wasm || platform == .android || platform == .harmonyos,
         adaptedRemoteOverrides: remoteOverrides,
         resolveRelativePaths: true
       ) {

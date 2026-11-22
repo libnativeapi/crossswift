@@ -938,6 +938,118 @@ final class CrossXcodeBuildTests: XCTestCase {
     XCTAssertFalse(fm.fileExists(atPath: compiled.resourcesDirectory.appendingPathComponent("Localizable.strings").path))
   }
 
+  func testHarmonyAppHostUsesFormalSwiftUIHarmonyAndConfiguresResources() {
+    let generated = HarmonyBuilder.renderHarmonyAppHostSwift(appTypeName: "DemoApp")
+    XCTAssertTrue(generated.contains("import SwiftUIHarmony"))
+    XCTAssertTrue(generated.contains("swift_configure_resources"))
+    XCTAssertTrue(generated.contains("HarmonyHost.configureResources"))
+    XCTAssertTrue(generated.contains("swift_set_color_scheme"))
+    XCTAssertTrue(generated.contains("case 16:"))
+  }
+
+  func testHarmonyStageProjectUsesFormalArkTSTemplateAndConfigurableSettings() throws {
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory.appendingPathComponent("CrossXcodeBuildHarmonyStage-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: tmp) }
+
+    let runtimeSrc = tmp.appendingPathComponent("runtimeSrc")
+    let resSrc = tmp.appendingPathComponent("resSrc")
+    let destDir = tmp.appendingPathComponent("staged")
+    try fm.createDirectory(at: runtimeSrc, withIntermediateDirectories: true)
+    try fm.createDirectory(at: resSrc, withIntermediateDirectories: true)
+    try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+
+    let target = ResolvedTarget(
+      name: "SampleApp",
+      productName: "SampleApp",
+      executableName: "SampleApp",
+      bundleIdentifier: "dev.example.sample",
+      marketingVersion: "1.0.0",
+      buildVersion: "7",
+      productType: "com.apple.product-type.application",
+      swiftVersion: "5.9",
+      defaultActorIsolation: nil,
+      activeCompilationConditions: [],
+      preprocessorDefinitions: [],
+      infoPlistFile: nil,
+      infoPlistKeys: [:],
+      copyright: nil,
+      categoryType: nil,
+      isAccessoryApp: false,
+      generateAssetSymbols: false,
+      appIconName: "AppIcon",
+      swiftSources: [],
+      cSources: [],
+      assetCatalogs: [],
+      stringCatalogs: [],
+      otherResources: [],
+      buildSettings: [
+        "PRODUCT_NAME": "SampleApp",
+        "HARMONY_SDK_VERSION": "20.0.0",
+        "HARMONY_ABIS": "arm64-v8a, x86_64",
+        "HARMONY_UI_STYLE": "harmony",
+      ],
+      importedModules: []
+    )
+    let project = ResolvedXcodeProject(
+      projectURL: tmp.appendingPathComponent("SampleApp.xcodeproj"),
+      projectRootURL: tmp,
+      projectName: "SampleApp",
+      configuration: .release,
+      mainTarget: target,
+      internalTargets: [],
+      remotePackages: [],
+      localPackages: [],
+      productDependencies: [],
+      inferredCrossSwiftModules: [],
+      skippedDarwinOnlyProducts: []
+    )
+    let artifacts = HarmonyBuildArtifacts(
+      runtimeDirectory: runtimeSrc,
+      appObjectURL: runtimeSrc.appendingPathComponent("SampleApp.o"),
+      internalObjectNames: ["FluentIcons.o"],
+      staticLinuxSDKURL: tmp,
+      nativeAPISwiftRoot: tmp
+    )
+    let compiledAssets = CompiledAssets(
+      resourcesDirectory: resSrc,
+      infoPlistURL: resSrc.appendingPathComponent("Info.plist"),
+      windowsIconURL: nil,
+      windowsResourceScriptURL: nil,
+      windowsManifestURL: nil,
+      linuxIconVariants: [],
+      generatedSymbolsSwiftURL: nil,
+      usesSQLite3: false
+    )
+    _ = try HarmonyBuilder.stageProject(
+      project: project,
+      harmonyArtifacts: artifacts,
+      compiledAssets: compiledAssets,
+      crossSwiftRoot: repositoryRoot,
+      destinationDir: destDir
+    )
+
+    let buildProfile = try String(contentsOf: destDir.appendingPathComponent("build-profile.json5"), encoding: .utf8)
+    XCTAssertTrue(buildProfile.contains("\"targetSdkVersion\": \"20.0.0\""))
+
+    let entryProfile = try String(contentsOf: destDir.appendingPathComponent("entry/build-profile.json5"), encoding: .utf8)
+    XCTAssertTrue(entryProfile.contains("\"arm64-v8a\", \"x86_64\""))
+
+    let cmake = try String(contentsOf: destDir.appendingPathComponent("entry/src/main/cpp/CMakeLists.txt"), encoding: .utf8)
+    XCTAssertTrue(cmake.contains("SwiftUIHarmony.o"))
+    XCTAssertTrue(cmake.contains("FluentIcons.o"))
+
+    let indexEts = try String(contentsOf: destDir.appendingPathComponent("entry/src/main/ets/pages/Index.ets"), encoding: .utf8)
+    XCTAssertTrue(indexEts.contains("libsampleapp.so"))
+    XCTAssertTrue(indexEts.contains("uiStyle: string = 'harmony'"))
+    XCTAssertTrue(indexEts.contains("nativeApp.setColorScheme"))
+    XCTAssertFalse(indexEts.contains("{{NATIVE_LIB_NAME}}"))
+
+    let abilityEts = try String(contentsOf: destDir.appendingPathComponent("entry/src/main/ets/entryability/EntryAbility.ets"), encoding: .utf8)
+    XCTAssertTrue(abilityEts.contains("nativeApp.configureResources"))
+    XCTAssertTrue(abilityEts.contains("onConfigurationUpdate"))
+  }
+
   private func makeMinimalPNG(width: Int, height: Int) -> Data {
     var data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
     data.append(contentsOf: [0, 0, 0, 13]) // IHDR length

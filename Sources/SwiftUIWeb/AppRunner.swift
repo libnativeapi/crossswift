@@ -59,6 +59,10 @@ import SwiftUIRuntime
   document.title = .string(scene._windowTitle.isEmpty ? "CrossSwiftUI" : scene._windowTitle)
 
   let backend = WebBackend(document: document, host: host)
+  backend.environment.openURL = OpenURLAction { url in
+    _ = JSObject.global.window.object?.open!(url.absoluteString, "_blank", "noopener")
+    return .handled
+  }
   let renderer = Renderer(
     backend: backend,
     root: scene._makeRootView(),

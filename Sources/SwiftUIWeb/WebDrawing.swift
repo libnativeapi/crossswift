@@ -146,8 +146,13 @@ extension WebBackend {
       if let image = node.content {
         image.alt = .string(props.accessibilityLabel)
         image.style.objectFit = .string(props.aspectFit ? "contain" : "fill")
-        if props.imagePath.hasPrefix("sf://"),
-           let vector = VectorImage.loadSymbol(String(props.imagePath.dropFirst(5)))
+        let isVector =
+          props.imagePath.hasPrefix("sf://")
+          || props.imagePath.lowercased().hasSuffix(".svg")
+          || props.imagePath.lowercased().hasSuffix(".pdf")
+        if isVector,
+           let vector = VectorImage.load(props.imagePath),
+           !vector.layers.isEmpty
         {
           image.style.display = .string("none")
           _ = image.removeAttribute!("src")
@@ -174,20 +179,23 @@ extension WebBackend {
           _ = svg.setAttribute!("viewBox", "\(b.minX) \(b.minY) \(b.width) \(b.height)")
           _ = svg.setAttribute!("preserveAspectRatio", props.aspectFit ? "xMidYMid meet" : "none")
           _ = svg.replaceChildren!()
-          for path in vector.paths {
-            let d = path.svgData
+          let isTemplate = props.imagePath.hasPrefix("sf://") || props.imageTemplate
+          for layer in vector.layers {
+            let d = layer.path.svgData
             guard !d.isEmpty else { continue }
             let pathEl = svgElement("path")
             _ = pathEl.setAttribute!("d", d)
-            if vector.strokeWidth > 0 {
+            if let fill = layer.fill {
+              _ = pathEl.setAttribute!("fill", isTemplate ? "currentColor" : fill.css)
+              _ = pathEl.setAttribute!("fill-rule", "evenodd")
+            } else {
               _ = pathEl.setAttribute!("fill", "none")
-              _ = pathEl.setAttribute!("stroke", "currentColor")
-              _ = pathEl.setAttribute!("stroke-width", vector.strokeWidth)
+            }
+            if let stroke = layer.stroke, layer.strokeWidth > 0 {
+              _ = pathEl.setAttribute!("stroke", isTemplate ? "currentColor" : stroke.css)
+              _ = pathEl.setAttribute!("stroke-width", layer.strokeWidth)
               _ = pathEl.setAttribute!("stroke-linecap", "round")
               _ = pathEl.setAttribute!("stroke-linejoin", "round")
-            } else {
-              _ = pathEl.setAttribute!("fill", "currentColor")
-              _ = pathEl.setAttribute!("fill-rule", "evenodd")
             }
             _ = svg.appendChild!(pathEl)
           }

@@ -4,6 +4,7 @@ import SwiftUIRuntime
 final class WebBackend: RenderBackend {
   var tapHandler: ((NodeID) -> Void)?
   var animationTickHandler: (() -> Bool)?
+  var environment = EnvironmentValues()
   var needsRenderCommands: Bool { false }
 
   let document: JSObject
@@ -12,6 +13,8 @@ final class WebBackend: RenderBackend {
   private var renderScheduled = false
   private var animationScheduled = false
   private var resizeObserver: JSObject?
+  private var colorSchemeMediaQuery: JSObject?
+  private var syncingScrollID: NodeID?
 
   struct Node {
     let dom: JSObject
@@ -64,6 +67,21 @@ final class WebBackend: RenderBackend {
   func perform(_ commands: [RenderCommand]) {}
 
   func connect(_ renderer: Renderer) {
+    if let matchMedia: ((ConvertibleToJSValue...) -> JSValue) = JSObject.global.window.object?["matchMedia"],
+       let mq = matchMedia("(prefers-color-scheme: dark)").object
+    {
+      environment.colorScheme = mq.matches.boolean == true ? .dark : .light
+      colorSchemeMediaQuery = mq
+      listen("change", on: mq) { [weak self, weak renderer] event in
+        guard let self else { return }
+        let next: ColorScheme = event.matches.boolean == true ? .dark : .light
+        guard self.environment.colorScheme != next else { return }
+        self.environment.colorScheme = next
+        renderer?.setNeedsRender()
+        renderer?.renderIfNeeded()
+      }
+    }
+
     let resize = JSClosure { [weak self, weak renderer] _ in
       if let self { renderer?.resize(to: self.size) }
       return .undefined
@@ -168,6 +186,7 @@ final class WebBackend: RenderBackend {
 
     listen("scroll", on: host, capture: true) { [weak self, weak renderer] event in
       guard let self, let id = self.targetID(event, selector: "[data-scroll][data-node]"),
+        self.syncingScrollID != id,
         let dom = self.nodes[id]?.dom, dom == event.target.object
       else { return }
       renderer?.scroll(
@@ -310,6 +329,16 @@ final class WebBackend: RenderBackend {
       } else if let contentStyle = node.content?.style.object {
         contentStyle.width = .string("0px")
         contentStyle.height = .string("0px")
+      }
+      if node.props?.scrollOffset != props.scrollOffset {
+        let currentX = dom.scrollLeft.number ?? 0
+        let currentY = dom.scrollTop.number ?? 0
+        if abs(currentX - props.scrollOffset.x) > 1 || abs(currentY - props.scrollOffset.y) > 1 {
+          syncingScrollID = id
+          dom.scrollLeft = .number(props.scrollOffset.x)
+          dom.scrollTop = .number(props.scrollOffset.y)
+          syncingScrollID = nil
+        }
       }
     }
     var children =

@@ -43,8 +43,9 @@ import PackageDescription
 // SwiftPM evaluates the manifest on the host. Select the cross-build graph
 // explicitly so it never resolves desktop SDK dependencies.
 let buildForAndroid = ProcessInfo.processInfo.environment["CROSS_SWIFTUI_ANDROID"] == "1"
-let buildForWeb = !buildForAndroid && ProcessInfo.processInfo.environment["CROSS_SWIFTUI_WEB"] == "1"
-let buildForDesktop = !buildForWeb && !buildForAndroid
+let buildForHarmony = !buildForAndroid && ProcessInfo.processInfo.environment["CROSS_SWIFTUI_HARMONY"] == "1"
+let buildForWeb = !buildForAndroid && !buildForHarmony && ProcessInfo.processInfo.environment["CROSS_SWIFTUI_WEB"] == "1"
+let buildForDesktop = !buildForWeb && !buildForAndroid && !buildForHarmony
 let explicitNativeAPIPath = ProcessInfo.processInfo.environment["NATIVEAPI_SWIFT_PATH"]
 #if os(macOS)
 let buildDesktopNative = false
@@ -182,6 +183,25 @@ if buildForAndroid {
   products += [
     .library(name: "SwiftUI", targets: ["SwiftUI"]),
     .library(name: "AndroidCounter", type: .dynamic, targets: ["AndroidCounter"]),
+  ]
+}
+if buildForHarmony {
+  targets += [
+    .target(
+      name: "SwiftUIHarmony",
+      dependencies: ["SwiftUIRuntime"],
+      exclude: ["ArkTS"],
+      swiftSettings: [.define("CROSS_SWIFTUI_HARMONY")]
+    ),
+    .target(
+      name: "SwiftUI",
+      dependencies: ["SwiftUIRuntime", "SwiftUIHarmony"],
+      swiftSettings: [.define("CROSS_SWIFTUI_HARMONY")]
+    ),
+  ]
+  products += [
+    .library(name: "SwiftUIHarmony", targets: ["SwiftUIHarmony"]),
+    .library(name: "SwiftUI", targets: ["SwiftUI"]),
   ]
 }
 if buildForWeb {
@@ -373,7 +393,7 @@ if buildForDesktop {
 }
 
 #if os(macOS)
-let buildCounter = !buildForAndroid
+let buildCounter = !buildForAndroid && !buildForHarmony
 #else
 let buildCounter = buildForWeb || buildDesktopNative
 #endif

@@ -22,6 +22,7 @@ private struct EncodedAlertAction: Encodable {
 
 private struct SnapshotEnvelope: Encodable {
   let nodes: [RenderNode]
+  let hasActiveAnimations: Bool
 }
 
 private struct RenderNode: Encodable {
@@ -31,6 +32,7 @@ private struct RenderNode: Encodable {
   let text: String
   let placeholder: String?
   let secure: Bool
+  let multiline: Bool
   let imagePath: String?
   let vectorBounds: [Double]?
   let vectorLayers: [EncodedVectorLayer]?
@@ -43,6 +45,14 @@ private struct RenderNode: Encodable {
   let lineLimit: Int?
   let enabled: Bool
   let opacity: Double
+  let rotation: Double
+  let scaleX: Double
+  let scaleY: Double
+  let clipCommands: [Double]?
+  let shadowColor: UInt32?
+  let shadowRadius: Double
+  let shadowX: Double
+  let shadowY: Double
   let foreground: UInt32?
   let background: UInt32?
   let borderColor: UInt32?
@@ -54,10 +64,13 @@ private struct RenderNode: Encodable {
   // Scroll & clip container properties
   let scrollVertical: Bool
   let scrollHorizontal: Bool
+  let scrollOffsetX: Double
+  let scrollOffsetY: Double
   let contentWidth: Double
   let contentHeight: Double
   let children: [RenderNode]?
   // Gradient properties
+  let gradientKind: String?
   let gradientColors: [UInt32]?
   let gradientStops: [Double]?
   let gradientStartX: Double
@@ -100,6 +113,7 @@ private struct RenderNode: Encodable {
     var resolvedImagePath: String? = nil
     var resolvedVectorBounds: [Double]? = nil
     var resolvedVectorLayers: [EncodedVectorLayer]? = nil
+    var resolvedGradKind: String? = nil
     var resolvedGradColors: [UInt32]? = nil
     var resolvedGradStops: [Double]? = nil
     var gSX = 0.0, gSY = 0.0, gEX = 0.0, gEY = 1.0
@@ -117,6 +131,7 @@ private struct RenderNode: Encodable {
       case .gradient:
         resolvedKind = "gradient"
         if let grad = props.gradient {
+          resolvedGradKind = "linear"
           resolvedGradColors = grad.colors.map(encodeARGB)
           resolvedGradStops = nil
           gSX = Double(grad.start.x)
@@ -177,6 +192,7 @@ private struct RenderNode: Encodable {
     text = props.renderedText ?? props.text
     placeholder = element.kind == .textField ? props.placeholder : nil
     secure = props.secure
+    multiline = props.multiline
     imagePath = resolvedImagePath
     vectorBounds = resolvedVectorBounds
     vectorLayers = resolvedVectorLayers
@@ -194,6 +210,26 @@ private struct RenderNode: Encodable {
     lineLimit = props.lineLimit
     enabled = inheritedEnabled && props.enabled && props.hitTesting
     opacity = props.opacity
+    rotation = props.rotation
+    scaleX = props.scaleX
+    scaleY = props.scaleY
+    if let clipBuilder = element.clipPathBuilder {
+      let cmds = clipBuilder(CGRect(x: 0, y: 0, width: element.frame.width, height: element.frame.height)).commands
+      clipCommands = cmds.isEmpty ? nil : cmds
+    } else {
+      clipCommands = nil
+    }
+    if let firstShadow = props.shadows.first, firstShadow.color.opacity > 0 {
+      shadowColor = encodeARGB(firstShadow.color)
+      shadowRadius = firstShadow.radius
+      shadowX = firstShadow.x
+      shadowY = firstShadow.y
+    } else {
+      shadowColor = nil
+      shadowRadius = 0
+      shadowX = 0
+      shadowY = 0
+    }
     foreground = props.foreground.map(encodeARGB)
     background = props.background.map(encodeARGB)
     borderColor = props.borderWidth > 0 ? encodeARGB(props.borderColor) : nil
@@ -205,10 +241,13 @@ private struct RenderNode: Encodable {
 
     scrollVertical = resolvedKind == "scroll" && props.scrollAxes.contains(.vertical)
     scrollHorizontal = resolvedKind == "scroll" && props.scrollAxes.contains(.horizontal)
+    scrollOffsetX = resolvedKind == "scroll" ? props.scrollOffset.x : 0
+    scrollOffsetY = resolvedKind == "scroll" ? props.scrollOffset.y : 0
     self.contentWidth = contentWidth
     self.contentHeight = contentHeight
     self.children = children
 
+    gradientKind = resolvedGradKind
     gradientColors = resolvedGradColors
     gradientStops = resolvedGradStops
     gradientStartX = gSX
@@ -243,8 +282,22 @@ private struct RenderNode: Encodable {
 
 private final class AndroidBackend: RenderBackend {
   var tapHandler: ((NodeID) -> Void)?
+  var animationTickHandler: (() -> Bool)?
+  var environment = EnvironmentValues()
   let needsRenderCommands = false
   private(set) var nodes: [RenderNode] = []
+  var isInSynchronousUpdate = false
+  var pendingAsyncRender: (() -> Void)?
+  var onScheduleAsyncRender: (() -> Void)?
+
+  func requestRender(_ render: @escaping () -> Void) -> Bool {
+    if isInSynchronousUpdate {
+      return false
+    }
+    pendingAsyncRender = render
+    onScheduleAsyncRender?()
+    return true
+  }
 
   func perform(_ commands: [RenderCommand]) {}
 
@@ -432,6 +485,7 @@ public final class AndroidHost {
   private let renderer: Renderer
   private let backend: AndroidBackend
   private let textMeasurer: TextMeasurer
+  private var bridge: OpaquePointer?
 
   private init(root: AnyView) {
     let backend = AndroidBackend()
@@ -443,6 +497,17 @@ public final class AndroidHost {
       layoutEngine: LayoutEngine(
         metrics: TextMetrics(buttonHorizontalPadding: 16, buttonVerticalPadding: 16),
         textMeasurer: textMeasurer.measure))
+    backend.onScheduleAsyncRender = { [weak self] in
+      guard let self, let bridge = self.bridge else { return }
+      swiftui_android_bridge_schedule_render(bridge)
+    }
+    backend.environment.openURL = OpenURLAction { [weak self] url in
+      guard let self, let bridge = self.bridge else { return .discarded }
+      url.absoluteString.withCString { cStr in
+        swiftui_android_bridge_open_url(bridge, cStr)
+      }
+      return .handled
+    }
   }
 
   public static func retain(root: AnyView) -> Int64 {
@@ -542,19 +607,73 @@ public final class AndroidHost {
     Unmanaged.fromOpaque(UnsafeRawPointer(bitPattern: Int(handle))!)
   }
 
+  fileprivate func ensureBridge(env: SwiftUIJNIEnvironment, host: jobject) {
+    if bridge == nil {
+      bridge = swiftui_android_bridge_create(env, host)
+    }
+  }
+
+  fileprivate func destroyBridge(env: SwiftUIJNIEnvironment) {
+    if let bridge {
+      self.bridge = nil
+      swiftui_android_bridge_destroy(env, bridge)
+    }
+  }
+
   fileprivate func update(
     env: SwiftUIJNIEnvironment, host: jobject, change: (Renderer) -> Void
   ) -> jstring? {
+    ensureBridge(env: env, host: host)
     if textMeasurer.method == nil {
       textMeasurer.method = swiftui_android_text_measurer(env, host)
     }
     guard let method = textMeasurer.method else { return nil }
     textMeasurer.context = TextMeasurer.Context(env: env, host: host, method: method)
-    defer { textMeasurer.context = nil }
+    backend.isInSynchronousUpdate = true
+    defer {
+      backend.isInSynchronousUpdate = false
+      textMeasurer.context = nil
+    }
     change(renderer)
-    let envelope = SnapshotEnvelope(nodes: backend.nodes)
+    if let pending = backend.pendingAsyncRender {
+      backend.pendingAsyncRender = nil
+      pending()
+    }
+    let hasAnimations = renderer.hasActiveAnimations || (renderer.tree?.hasLayoutAnimation ?? false)
+    let envelope = SnapshotEnvelope(nodes: backend.nodes, hasActiveAnimations: hasAnimations)
     guard let data = try? JSONEncoder().encode(envelope) else { return nil }
     return javaString(String(decoding: data, as: UTF8.self), in: env)
+  }
+
+  fileprivate func flushAsyncRender(env: SwiftUIJNIEnvironment, host: jobject) -> jstring? {
+    update(env: env, host: host) { renderer in
+      if let pending = backend.pendingAsyncRender {
+        backend.pendingAsyncRender = nil
+        pending()
+      } else {
+        renderer.renderIfNeeded()
+      }
+    }
+  }
+
+  fileprivate func tickAnimation(env: SwiftUIJNIEnvironment, host: jobject) -> jstring? {
+    update(env: env, host: host) { renderer in
+      _ = renderer.stepAnimations()
+    }
+  }
+
+  fileprivate func setColorScheme(
+    env: SwiftUIJNIEnvironment, host: jobject, isDark: Bool
+  ) -> jstring? {
+    let target: ColorScheme = isDark ? .dark : .light
+    guard backend.environment.colorScheme != target else {
+      return nil
+    }
+    backend.environment.colorScheme = target
+    return update(env: env, host: host) { renderer in
+      renderer.setNeedsRender()
+      renderer.renderIfNeeded()
+    }
   }
 }
 
@@ -659,7 +778,41 @@ public func androidDismissPresentation(
   }
 }
 
+@MainActor @_cdecl("Java_dev_crossswiftui_android_SwiftUIComposeHost_nativeFlushRender")
+public func androidFlushRender(
+  _ env: SwiftUIJNIEnvironment, _ host: jobject, _ handle: jlong
+) -> jstring? {
+  AndroidHost.fromHandle(handle).takeUnretainedValue().flushAsyncRender(env: env, host: host)
+}
+
+@MainActor @_cdecl("Java_dev_crossswiftui_android_SwiftUIComposeHost_nativeTickAnimation")
+public func androidTickAnimation(
+  _ env: SwiftUIJNIEnvironment, _ host: jobject, _ handle: jlong
+) -> jstring? {
+  AndroidHost.fromHandle(handle).takeUnretainedValue().tickAnimation(env: env, host: host)
+}
+
+@MainActor @_cdecl("Java_dev_crossswiftui_android_SwiftUIComposeHost_nativeSetColorScheme")
+public func androidSetColorScheme(
+  _ env: SwiftUIJNIEnvironment, _ host: jobject, _ handle: jlong, _ isDark: jboolean
+) -> jstring? {
+  AndroidHost.fromHandle(handle).takeUnretainedValue().setColorScheme(
+    env: env, host: host, isDark: isDark != 0
+  )
+}
+
+@MainActor @_cdecl("Java_dev_crossswiftui_android_SwiftUIComposeHost_nativeSubmit")
+public func androidSubmit(
+  _ env: SwiftUIJNIEnvironment, _ host: jobject, _ handle: jlong, _ id: jlong
+) -> jstring? {
+  AndroidHost.fromHandle(handle).takeUnretainedValue().update(env: env, host: host) {
+    _ = $0.input(id: NodeID(rawValue: Int(id)), event: 6, value: 13)
+  }
+}
+
 @MainActor @_cdecl("Java_dev_crossswiftui_android_SwiftUIComposeHost_nativeDestroy")
 public func androidDestroy(_ env: SwiftUIJNIEnvironment, _ host: jobject, _ handle: jlong) {
-  AndroidHost.fromHandle(handle).release()
+  let unmanaged = AndroidHost.fromHandle(handle)
+  unmanaged.takeUnretainedValue().destroyBridge(env: env)
+  unmanaged.release()
 }

@@ -8,7 +8,9 @@
   @_exported import SwiftUIWeb
 #elseif os(Android)
   @_exported import SwiftUIAndroid
-#elseif !CROSS_SWIFTUI_HARMONY
+#elseif CROSS_SWIFTUI_HARMONY
+  @_exported import SwiftUIHarmony
+#else
   @_exported import CrossSwiftUI
   #if !os(macOS)
     @_exported import CrossAppKit

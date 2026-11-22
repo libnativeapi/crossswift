@@ -1,9 +1,14 @@
 package dev.crossswiftui.android
 
+import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.Looper
+import android.view.Choreographer
 import androidx.annotation.Keep
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -11,6 +16,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -19,6 +25,7 @@ import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ListItem
@@ -41,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -51,10 +59,12 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.hideFromAccessibility
@@ -72,8 +82,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -83,12 +95,23 @@ class SwiftUIComposeHost(
     private var handle: Long,
     initialStyle: AndroidUIStyle = AndroidUIStyle.ANDROID_NATIVE,
     private val showStyleSwitcher: Boolean = false,
+    private val onOpenURL: ((String) -> Unit)? = null,
 ) : AutoCloseable {
     private var controls by mutableStateOf(emptyList<Control>())
     var uiStyle by mutableStateOf(initialStyle)
         private set
     private var bottomSystemBarInsetDp by mutableStateOf(0.dp)
     private var textMetrics: TextMetrics? = null
+    private var hostContext: Context? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val asyncRenderPending = AtomicBoolean(false)
+    private var animationFrameScheduled = false
+    private val animationFrameCallback = Choreographer.FrameCallback {
+        animationFrameScheduled = false
+        if (handle != 0L && textMetrics != null) {
+            update(nativeTickAnimation(handle))
+        }
+    }
 
     init {
         requireMainThread()
@@ -105,12 +128,54 @@ class SwiftUIComposeHost(
         uiStyle = if (uiStyle == AndroidUIStyle.IOS) AndroidUIStyle.ANDROID_NATIVE else AndroidUIStyle.IOS
     }
 
+    /** Called from Swift (potentially off the UI thread) when async state/task/observable writes occur. */
+    @Keep
+    fun scheduleAsyncRender() {
+        if (!asyncRenderPending.compareAndSet(false, true)) return
+        mainHandler.post {
+            asyncRenderPending.set(false)
+            if (handle != 0L && textMetrics != null) {
+                update(nativeFlushRender(handle))
+            }
+        }
+    }
+
+    /** Called from Swift's OpenURLAction environment hook. */
+    @Keep
+    fun openURL(url: String) {
+        if (url.isEmpty()) return
+        mainHandler.post {
+            val custom = onOpenURL
+            if (custom != null) {
+                custom(url)
+                return@post
+            }
+            val ctx = hostContext ?: return@post
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(intent)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun scheduleAnimationFrameIfNeeded(hasActiveAnimations: Boolean) {
+        if (hasActiveAnimations && !animationFrameScheduled && handle != 0L) {
+            animationFrameScheduled = true
+            Choreographer.getInstance().postFrameCallback(animationFrameCallback)
+        }
+    }
+
     @Composable
     fun Content(modifier: Modifier = Modifier, bottomSystemBarInset: Dp = 0.dp) {
         bottomSystemBarInsetDp = bottomSystemBarInset
+        hostContext = LocalContext.current
         var viewport by remember(this) { mutableStateOf(IntSize.Zero) }
         val measurer = rememberTextMeasurer()
         val density = LocalDensity.current
+        val dark = isSystemInDarkTheme()
         val metrics = remember(measurer, density) { TextMetrics(measurer, density) }
 
         // Mount after Compose has measured the viewport, outside its measure/layout pass.
@@ -118,6 +183,7 @@ class SwiftUIComposeHost(
             if (handle != 0L && viewport.width > 0 && viewport.height > 0) {
                 val invalidateMeasurements = textMetrics != metrics
                 textMetrics = metrics
+                nativeSetColorScheme(handle, dark)
                 update(
                     nativeResize(
                         handle,
@@ -126,6 +192,13 @@ class SwiftUIComposeHost(
                         invalidateMeasurements,
                     )
                 )
+            }
+        }
+
+        // Keep SwiftUI's EnvironmentValues.colorScheme in sync with Android dark mode changes.
+        LaunchedEffect(this, dark, metrics) {
+            if (handle != 0L && textMetrics != null && viewport.width > 0 && viewport.height > 0) {
+                update(nativeSetColorScheme(handle, dark))
             }
         }
 
@@ -170,7 +243,34 @@ class SwiftUIComposeHost(
 
     @Composable
     private fun RenderControl(control: Control, metrics: TextMetrics) {
-        val baseModifier = Modifier.alpha(control.opacity).semantics {
+        var baseModifier: Modifier = Modifier
+        if (control.shadowColor != null && control.shadowRadius > 0.0) {
+            val shape = RoundedCornerShape(control.cornerRadius.dp)
+            baseModifier = baseModifier.shadow(
+                elevation = control.shadowRadius.dp,
+                shape = shape,
+                ambientColor = control.shadowColor,
+                spotColor = control.shadowColor,
+            )
+        }
+        if (control.rotation != 0.0 || control.scaleX != 1.0 || control.scaleY != 1.0) {
+            baseModifier = baseModifier.graphicsLayer(
+                rotationZ = control.rotation.toFloat(),
+                scaleX = control.scaleX.toFloat(),
+                scaleY = control.scaleY.toFloat(),
+            )
+        }
+        val clipCmds = control.clipCommands
+        if (clipCmds != null && clipCmds.isNotEmpty()) {
+            val scale = metrics.density.density
+            val clipShape = remember(clipCmds, scale) {
+                GenericShape { _, _ ->
+                    addPath(buildComposePath(clipCmds, scale, 0f, 0f))
+                }
+            }
+            baseModifier = baseModifier.clip(clipShape)
+        }
+        baseModifier = baseModifier.alpha(control.opacity).semantics {
             if (control.accessibilityLabel.isNotEmpty()) contentDescription = control.accessibilityLabel
             if (control.accessibilityHidden) hideFromAccessibility()
         }
@@ -179,12 +279,31 @@ class SwiftUIComposeHost(
 
         when (control.kind) {
             "scroll" -> {
+                val vScroll = rememberScrollState()
+                val hScroll = rememberScrollState()
+                val densityPx = metrics.density.density
+                LaunchedEffect(control.scrollOffsetY) {
+                    if (control.scrollVertical && control.scrollOffsetY > 0.0) {
+                        val targetPx = (control.scrollOffsetY * densityPx).roundToInt()
+                        if (kotlin.math.abs(vScroll.value - targetPx) > 2) {
+                            vScroll.scrollTo(targetPx)
+                        }
+                    }
+                }
+                LaunchedEffect(control.scrollOffsetX) {
+                    if (control.scrollHorizontal && control.scrollOffsetX > 0.0) {
+                        val targetPx = (control.scrollOffsetX * densityPx).roundToInt()
+                        if (kotlin.math.abs(hScroll.value - targetPx) > 2) {
+                            hScroll.scrollTo(targetPx)
+                        }
+                    }
+                }
                 var scrollMod = baseModifier.fillMaxSize().clipToBounds()
                 if (control.scrollVertical) {
-                    scrollMod = scrollMod.verticalScroll(rememberScrollState())
+                    scrollMod = scrollMod.verticalScroll(vScroll)
                 }
                 if (control.scrollHorizontal) {
-                    scrollMod = scrollMod.horizontalScroll(rememberScrollState())
+                    scrollMod = scrollMod.horizontalScroll(hScroll)
                 }
                 val contentW = control.contentWidth.coerceAtLeast(control.width).dp
                 val extraBottom = if (control.scrollVertical) bottomSystemBarInsetDp else 0.dp
@@ -497,22 +616,55 @@ class SwiftUIComposeHost(
                 val radiusPx = with(metrics.density) { control.cornerRadius.dp.toPx() }
                 Canvas(modifier = baseModifier.fillMaxSize()) {
                     if (colors.size >= 2) {
-                        val start = Offset(
-                            control.gradientStartX.toFloat() * size.width,
-                            control.gradientStartY.toFloat() * size.height,
-                        )
-                        val end = Offset(
-                            control.gradientEndX.toFloat() * size.width,
-                            control.gradientEndY.toFloat() * size.height,
-                        )
-                        val brush = if (stops.size == colors.size) {
-                            Brush.linearGradient(
-                                colorStops = Array(colors.size) { i -> stops[i].toFloat() to colors[i] },
-                                start = start,
-                                end = end,
-                            )
-                        } else {
-                            Brush.linearGradient(colors = colors, start = start, end = end)
+                        val colorStops = if (stops.size == colors.size) {
+                            Array(colors.size) { i -> stops[i].toFloat() to colors[i] }
+                        } else null
+                        val brush = when (control.gradientKind) {
+                            "radial" -> {
+                                val center = Offset(
+                                    control.gradientStartX.toFloat() * size.width,
+                                    control.gradientStartY.toFloat() * size.height,
+                                )
+                                val radius = max(
+                                    1f,
+                                    if (control.gradientEndX > 0.0) {
+                                        with(metrics.density) { control.gradientEndX.dp.toPx() }
+                                    } else {
+                                        max(size.width, size.height) * 0.5f
+                                    },
+                                )
+                                if (colorStops != null) {
+                                    Brush.radialGradient(colorStops = colorStops, center = center, radius = radius)
+                                } else {
+                                    Brush.radialGradient(colors = colors, center = center, radius = radius)
+                                }
+                            }
+                            "angular" -> {
+                                val center = Offset(
+                                    control.gradientStartX.toFloat() * size.width,
+                                    control.gradientStartY.toFloat() * size.height,
+                                )
+                                if (colorStops != null) {
+                                    Brush.sweepGradient(colorStops = colorStops, center = center)
+                                } else {
+                                    Brush.sweepGradient(colors = colors, center = center)
+                                }
+                            }
+                            else -> {
+                                val start = Offset(
+                                    control.gradientStartX.toFloat() * size.width,
+                                    control.gradientStartY.toFloat() * size.height,
+                                )
+                                val end = Offset(
+                                    control.gradientEndX.toFloat() * size.width,
+                                    control.gradientEndY.toFloat() * size.height,
+                                )
+                                if (colorStops != null) {
+                                    Brush.linearGradient(colorStops = colorStops, start = start, end = end)
+                                } else {
+                                    Brush.linearGradient(colors = colors, start = start, end = end)
+                                }
+                            }
                         }
                         val cr = CornerRadius(radiusPx, radiusPx)
                         drawRoundRect(brush = brush, size = size, cornerRadius = cr, style = Fill)
@@ -737,12 +889,16 @@ class SwiftUIComposeHost(
                     text = control.text,
                     placeholder = control.placeholder,
                     secure = control.secure,
+                    multiline = control.multiline,
                     enabled = control.enabled,
                     textColor = control.color,
                     textStyle = style,
                     modifier = baseModifier,
                     onValueChange = { newText ->
                         if (handle != 0L) update(nativeTextInput(handle, control.id, newText))
+                    },
+                    onSubmit = {
+                        if (handle != 0L) update(nativeSubmit(handle, control.id))
                     },
                 )
             }
@@ -835,6 +991,7 @@ class SwiftUIComposeHost(
             }
             val nodes = env.optJSONArray("nodes") ?: JSONArray()
             controls = List(nodes.length()) { Control(nodes.getJSONObject(it)) }
+            scheduleAnimationFrameIfNeeded(env.optBoolean("hasActiveAnimations", false))
         } else {
             val nodes = JSONArray(trimmed)
             controls = List(nodes.length()) { Control(nodes.getJSONObject(it)) }
@@ -856,6 +1013,13 @@ class SwiftUIComposeHost(
         val oldHandle = handle
         if (oldHandle == 0L) return
         handle = 0
+        if (animationFrameScheduled) {
+            animationFrameScheduled = false
+            Choreographer.getInstance().removeFrameCallback(animationFrameCallback)
+        }
+        mainHandler.removeCallbacksAndMessages(null)
+        asyncRenderPending.set(false)
+        hostContext = null
         textMetrics = null
         nativeDestroy(oldHandle)
         controls = emptyList()
@@ -901,6 +1065,7 @@ class SwiftUIComposeHost(
         val text: String,
         val placeholder: String?,
         val secure: Boolean,
+        val multiline: Boolean,
         val imagePath: String?,
         val vectorBounds: DoubleArray?,
         val vectorLayers: List<VectorLayerData>?,
@@ -914,6 +1079,14 @@ class SwiftUIComposeHost(
         val lineLimit: Int?,
         val enabled: Boolean,
         val opacity: Float,
+        val rotation: Double,
+        val scaleX: Double,
+        val scaleY: Double,
+        val clipCommands: DoubleArray?,
+        val shadowColor: Color?,
+        val shadowRadius: Double,
+        val shadowX: Double,
+        val shadowY: Double,
         val color: Color,
         val background: Color?,
         val borderColor: Color?,
@@ -923,9 +1096,12 @@ class SwiftUIComposeHost(
         val accessibilityHidden: Boolean,
         val scrollVertical: Boolean,
         val scrollHorizontal: Boolean,
+        val scrollOffsetX: Double,
+        val scrollOffsetY: Double,
         val contentWidth: Double,
         val contentHeight: Double,
         val children: List<Control>,
+        val gradientKind: String?,
         val gradientColors: List<Color>,
         val gradientStops: List<Double>,
         val gradientStartX: Double,
@@ -955,6 +1131,7 @@ class SwiftUIComposeHost(
             text = node.optString("text", ""),
             placeholder = if (node.has("placeholder") && !node.isNull("placeholder")) node.getString("placeholder") else null,
             secure = node.optBoolean("secure", false),
+            multiline = node.optBoolean("multiline", false),
             imagePath = if (node.has("imagePath") && !node.isNull("imagePath")) node.getString("imagePath") else null,
             vectorBounds = node.optJSONArray("vectorBounds")?.let { arr ->
                 DoubleArray(arr.length()) { arr.getDouble(it) }
@@ -985,6 +1162,16 @@ class SwiftUIComposeHost(
             lineLimit = if (node.has("lineLimit") && !node.isNull("lineLimit")) node.getInt("lineLimit") else null,
             enabled = node.optBoolean("enabled", true),
             opacity = node.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
+            rotation = node.optDouble("rotation", 0.0),
+            scaleX = node.optDouble("scaleX", 1.0),
+            scaleY = node.optDouble("scaleY", 1.0),
+            clipCommands = node.optJSONArray("clipCommands")?.let { arr ->
+                DoubleArray(arr.length()) { arr.getDouble(it) }
+            },
+            shadowColor = if (node.has("shadowColor") && !node.isNull("shadowColor")) Color(node.getLong("shadowColor").toInt()) else null,
+            shadowRadius = node.optDouble("shadowRadius", 0.0),
+            shadowX = node.optDouble("shadowX", 0.0),
+            shadowY = node.optDouble("shadowY", 0.0),
             color = if (node.has("foreground") && !node.isNull("foreground")) Color(node.getLong("foreground").toInt()) else Color.Unspecified,
             background = if (node.has("background") && !node.isNull("background")) Color(node.getLong("background").toInt()) else null,
             borderColor = if (node.has("borderColor") && !node.isNull("borderColor")) Color(node.getLong("borderColor").toInt()) else null,
@@ -994,11 +1181,14 @@ class SwiftUIComposeHost(
             accessibilityHidden = node.optBoolean("accessibilityHidden", false),
             scrollVertical = node.optBoolean("scrollVertical", false),
             scrollHorizontal = node.optBoolean("scrollHorizontal", false),
+            scrollOffsetX = node.optDouble("scrollOffsetX", 0.0),
+            scrollOffsetY = node.optDouble("scrollOffsetY", 0.0),
             contentWidth = node.optDouble("contentWidth", 0.0),
             contentHeight = node.optDouble("contentHeight", 0.0),
             children = node.optJSONArray("children")?.let { arr ->
                 List(arr.length()) { Control(arr.getJSONObject(it)) }
             } ?: emptyList(),
+            gradientKind = if (node.has("gradientKind") && !node.isNull("gradientKind")) node.getString("gradientKind") else null,
             gradientColors = node.optJSONArray("gradientColors")?.let { arr ->
                 List(arr.length()) { Color(arr.getLong(it).toInt()) }
             } ?: emptyList(),
@@ -1052,5 +1242,9 @@ class SwiftUIComposeHost(
     private external fun nativeBack(handle: Long, id: Long): String?
     private external fun nativeDrag(handle: Long, id: Long, phase: Int, x: Double, y: Double): String?
     private external fun nativeDismissPresentation(handle: Long): String?
+    private external fun nativeFlushRender(handle: Long): String?
+    private external fun nativeTickAnimation(handle: Long): String?
+    private external fun nativeSetColorScheme(handle: Long, isDark: Boolean): String?
+    private external fun nativeSubmit(handle: Long, id: Long): String?
     private external fun nativeDestroy(handle: Long)
 }

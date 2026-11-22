@@ -1,8 +1,16 @@
 #pragma once
 
 #include <jni.h>
+#include <stdbool.h>
 
 typedef JNIEnv *SwiftUIJNIEnvironment;
+
+typedef struct SwiftUIAndroidBridge SwiftUIAndroidBridge;
+
+SwiftUIAndroidBridge *swiftui_android_bridge_create(JNIEnv *env, jobject host);
+void swiftui_android_bridge_destroy(JNIEnv *env, SwiftUIAndroidBridge *bridge);
+void swiftui_android_bridge_schedule_render(SwiftUIAndroidBridge *bridge);
+void swiftui_android_bridge_open_url(SwiftUIAndroidBridge *bridge, const char *url);
 
 static inline jstring swiftui_android_string(JNIEnv *env, const jchar *text, jsize length) {
   return (*env)->NewString(env, text, length);

@@ -158,6 +158,17 @@ public enum PackageDependencyAdapter {
     }
   }
 
+  /// Lists `.target(...)` declarations from a SwiftPM package manifest, independent of adaptation status.
+  public static func listLibraryTargets(in packageRoot: URL) -> [(name: String, relativePath: String)] {
+    let manifestURL = packageRoot.appendingPathComponent("Package.swift")
+    guard let manifest = try? String(contentsOf: manifestURL, encoding: .utf8) else {
+      return []
+    }
+    return parseTargetDeclarations(from: manifest).map { decl in
+      (name: decl.name, relativePath: decl.path ?? "Sources/\(decl.name)")
+    }
+  }
+
   /// Inspects a local Swift package directory to determine whether any of its
   /// targets need CrossSwiftUI module dependencies or undeclared `.xcassets` resources.
   public static func inspect(
@@ -580,7 +591,7 @@ public enum PackageDependencyAdapter {
 
       if useWasmBundleShim && (!target.undeclaredAssetCatalogs.isEmpty || !target.largeAssetCatalogs.isEmpty) {
         let shimSource = """
-        #if os(WASI) || os(Android)
+        #if os(WASI) || os(Android) || CROSS_SWIFTUI_HARMONY
         import Foundation
 
         extension Foundation.Bundle {

@@ -38,6 +38,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -95,6 +97,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -763,24 +766,34 @@ internal fun RenderDualStyleTextField(
     text: String,
     placeholder: String?,
     secure: Boolean,
+    multiline: Boolean = false,
     enabled: Boolean,
     textColor: Color,
     textStyle: TextStyle,
     modifier: Modifier,
     onValueChange: (String) -> Unit,
+    onSubmit: (() -> Unit)? = null,
 ) {
-    val visualTransformation = if (secure) PasswordVisualTransformation() else VisualTransformation.None
+    val visualTransformation = if (secure && !multiline) PasswordVisualTransformation() else VisualTransformation.None
+    val keyboardOptions = if (multiline) KeyboardOptions.Default else KeyboardOptions(imeAction = ImeAction.Done)
+    val keyboardActions = if (!multiline && onSubmit != null) {
+        KeyboardActions(onDone = { onSubmit() })
+    } else {
+        KeyboardActions.Default
+    }
     when (uiStyle) {
         AndroidUIStyle.ANDROID_NATIVE -> {
             OutlinedTextField(
                 value = text,
                 onValueChange = onValueChange,
                 enabled = enabled,
-                singleLine = true,
+                singleLine = !multiline,
                 placeholder = if (!placeholder.isNullOrEmpty()) {
-                    { Text(placeholder, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    { Text(placeholder, maxLines = if (multiline) Int.MAX_VALUE else 1, overflow = TextOverflow.Ellipsis) }
                 } else null,
                 visualTransformation = visualTransformation,
+                keyboardOptions = keyboardOptions,
+                keyboardActions = keyboardActions,
                 modifier = modifier.fillMaxSize(),
             )
         }
@@ -798,15 +811,15 @@ internal fun RenderDualStyleTextField(
                     .clip(shape)
                     .background(fillBg)
                     .border(0.6.dp, Ios27Palette.specularRimBrush(dark), shape)
-                    .padding(horizontal = 14.dp),
-                contentAlignment = Alignment.CenterStart,
+                    .padding(horizontal = 14.dp, vertical = if (multiline) 10.dp else 0.dp),
+                contentAlignment = if (multiline) Alignment.TopStart else Alignment.CenterStart,
             ) {
                 if (text.isEmpty() && !placeholder.isNullOrEmpty()) {
                     Text(
                         text = placeholder,
                         color = placeholderColor,
                         style = textStyle,
-                        maxLines = 1,
+                        maxLines = if (multiline) Int.MAX_VALUE else 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
@@ -814,11 +827,13 @@ internal fun RenderDualStyleTextField(
                     value = text,
                     onValueChange = onValueChange,
                     enabled = enabled,
-                    singleLine = true,
+                    singleLine = !multiline,
                     textStyle = textStyle.copy(color = resolvedTextColor),
                     cursorBrush = SolidColor(Ios27Palette.SystemBlue),
                     visualTransformation = visualTransformation,
-                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = keyboardOptions,
+                    keyboardActions = keyboardActions,
+                    modifier = if (multiline) Modifier.fillMaxSize() else Modifier.fillMaxWidth(),
                 )
             }
         }
