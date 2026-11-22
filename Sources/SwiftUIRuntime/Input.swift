@@ -195,6 +195,11 @@ extension View {
         } else {
           el.action = cb
         }
+      } else if let spatial = gesture as? SpatialTapGesture, spatial.count == 2 {
+        el.doubleTapLocationAction = { pt in
+          spatial.ended?(
+            DragGesture.Value(location: pt, startLocation: pt, translation: .zero, time: Date()))
+        }
       } else {
         el.dragAction = { value, ended in
           if ended { gesture.ended?(value) } else { gesture.changed?(value) }

@@ -1134,10 +1134,110 @@ struct DirectWriteEngine {
     }
     return true;
   }
+
+  bool DrawSpanPixels(Graphics &g_px, UINT dpi, const std::wstring &span,
+                      const std::wstring &family, float dip_size, float weight,
+                      uint32_t argb, float px_x0, float px_x1,
+                      float center_y_px) {
+    const uint32_t alpha = (argb >> 24) & 0xFFu;
+    if (span.empty() || alpha == 0) return false;
+    auto *fmt = Format(family, dip_size, weight);
+    if (!fmt) return false;
+    const float scale = max(1.f, (dpi ? dpi : 96u) / 96.f);
+
+    IDWriteTextLayout *layout = nullptr;
+    if (FAILED(dwrite->CreateTextLayout(span.c_str(), UINT32(span.size()), fmt,
+                                        1e6f, 1e6f, &layout)) || !layout) {
+      return false;
+    }
+    DWRITE_TEXT_METRICS tm{};
+    layout->GetMetrics(&tm);
+    const float layout_w = max(1.f, max(tm.width, tm.widthIncludingTrailingWhitespace));
+    const float layout_h = max(1.f, tm.height);
+    layout->SetMaxWidth(layout_w);
+    layout->SetMaxHeight(layout_h);
+    DWRITE_OVERHANG_METRICS overhang{};
+    layout->GetOverhangMetrics(&overhang);
+    const float pad_left = max(0.f, overhang.left) + 2.f;
+    const float pad_top = max(0.f, overhang.top) + 2.f;
+    const float pad_right = max(0.f, overhang.right) + 2.f;
+    const float pad_bottom = max(0.f, overhang.bottom) + 2.f;
+    const float log_w = layout_w + pad_left + pad_right;
+    const float log_h = layout_h + pad_top + pad_bottom;
+    const UINT px_w = UINT(std::ceil(log_w * scale));
+    const UINT px_h = UINT(std::ceil(log_h * scale));
+    if (px_w == 0 || px_h == 0 || px_w > 4096 || px_h > 2048) {
+      layout->Release();
+      return false;
+    }
+    if (!scratch || scratch->capacity_width < px_w || scratch->capacity_height < px_h) {
+      scratch = std::make_unique<Framebuffer>(max(px_w, 256u), max(px_h, 64u), true);
+    }
+    scratch->width = px_w;
+    scratch->height = px_h;
+    const size_t stride = size_t(scratch->stride_pixels);
+    for (UINT y = 0; y < px_h; ++y) {
+      std::fill_n(scratch->pixels + size_t(y) * stride, px_w, 0u);
+    }
+    RECT bind_rect{0, 0, LONG(px_w), LONG(px_h)};
+    if (FAILED(rt->BindDC(scratch->dc, &bind_rect))) {
+      layout->Release();
+      return false;
+    }
+    const float r = ((argb >> 16) & 255u) / 255.f;
+    const float gr = ((argb >> 8) & 255u) / 255.f;
+    const float b = (argb & 255u) / 255.f;
+    brush->SetColor(D2D1::ColorF(r, gr, b, 1.f));
+    rt->BeginDraw();
+    rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
+    rt->DrawTextLayout(D2D1::Point2F(pad_left, pad_top), layout, brush,
+                       static_cast<D2D1_DRAW_TEXT_OPTIONS>(0x00000004));
+    layout->Release();
+    if (FAILED(rt->EndDraw())) return false;
+    GdiFlush();
+    if (alpha < 255u) {
+      for (UINT y = 0; y < px_h; ++y) {
+        uint32_t *row = scratch->pixels + size_t(y) * stride;
+        for (UINT x = 0; x < px_w; ++x) {
+          uint32_t px = row[x];
+          if (px == 0) continue;
+          uint32_t b_c = ((px & 0xFFu) * alpha + 127u) / 255u;
+          uint32_t g_c = (((px >> 8) & 0xFFu) * alpha + 127u) / 255u;
+          uint32_t r_c = (((px >> 16) & 0xFFu) * alpha + 127u) / 255u;
+          uint32_t a_c = (((px >> 24) & 0xFFu) * alpha + 127u) / 255u;
+          row[x] = b_c | (g_c << 8) | (r_c << 16) | (a_c << 24);
+        }
+      }
+    }
+    const float draw_px_x =
+        px_x0 + ((px_x1 - px_x0) - layout_w * scale) * 0.5f - pad_left * scale;
+    const float draw_px_y =
+        center_y_px - (layout_h * scale) * 0.5f - pad_top * scale;
+    g_px.DrawImage(scratch->bitmap.get(),
+                   RectF(draw_px_x, draw_px_y, REAL(px_w), REAL(px_h)),
+                   0.f, 0.f, REAL(px_w), REAL(px_h), UnitPixel);
+    return true;
+  }
 };
 DirectWriteEngine &DWrite() {
   static auto *engine = new DirectWriteEngine();
   return *engine;
+}
+
+bool HasEmoji(const std::wstring &text) {
+  for (wchar_t ch : text) {
+    if (ch >= 0xD800 && ch <= 0xDFFF)
+      return true;
+    if (ch == 0xFE0F || ch == 0x200D || ch == 0x20E3)
+      return true;
+    if (ch >= 0x2600 && ch <= 0x27BF)
+      return true;
+    if (ch >= 0x231A && ch <= 0x23FA)
+      return true;
+    if (ch == 0x2B50 || ch == 0x2B55 || ch == 0x2B1B || ch == 0x2B1C)
+      return true;
+  }
+  return false;
 }
 
 uint32_t SampleGradientARGB(const std::vector<uint32_t> &colors,
@@ -1979,6 +2079,15 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
       (GetWindowTextLengthW(hwnd) == 0) && !hook.ime_composing;
   uint32_t alpha_scale = 255;
 
+  struct EmojiEditSpan {
+    size_t start;
+    size_t len;
+    int x0;
+    int x1;
+  };
+  std::wstring edit_text;
+  std::vector<EmojiEditSpan> emoji_spans;
+
   if (empty_idle) {
     alpha_scale = (hook.placeholder_argb >> 24) & 0xFF;
     if (!hook.placeholder.empty() && alpha_scale > 0) {
@@ -2037,6 +2146,106 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
     if (saved_style & WS_DISABLED) {
       SetWindowLongPtrW(hwnd, GWL_STYLE, saved_style);
     }
+
+    if (!hook.multiline && !hook.ime_composing) {
+      int tlen = GetWindowTextLengthW(hwnd);
+      if (tlen > 0 && tlen <= 1024) {
+        edit_text.resize(size_t(tlen) + 1);
+        GetWindowTextW(hwnd, edit_text.data(), tlen + 1);
+        edit_text.resize(size_t(tlen));
+        DWORD sel_s = 0, sel_e = 0;
+        SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_s),
+                     reinterpret_cast<LPARAM>(&sel_e));
+        if (sel_s == sel_e && HasEmoji(edit_text)) {
+          auto decode_cp = [&](size_t idx, size_t &step) -> uint32_t {
+            wchar_t c0 = edit_text[idx];
+            if (c0 >= 0xD800 && c0 <= 0xDBFF && idx + 1 < edit_text.size()) {
+              wchar_t c1 = edit_text[idx + 1];
+              if (c1 >= 0xDC00 && c1 <= 0xDFFF) {
+                step = 2;
+                return 0x10000u + ((uint32_t(c0 - 0xD800) << 10) |
+                                   uint32_t(c1 - 0xDC00));
+              }
+            }
+            step = 1;
+            return uint32_t(c0);
+          };
+          auto is_emoji_base = [](uint32_t cp) -> bool {
+            return (cp >= 0x1F000u && cp <= 0x1FAFFu) ||
+                   (cp >= 0x2600u && cp <= 0x27BFu) ||
+                   (cp >= 0x231Au && cp <= 0x23FAu) || cp == 0x2B50u ||
+                   cp == 0x2B55u || cp == 0x2B1Bu || cp == 0x2B1Cu;
+          };
+          HFONT hfont =
+              reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
+          for (size_t idx = 0; idx < edit_text.size();) {
+            size_t step = 1;
+            uint32_t cp = decode_cp(idx, step);
+            bool next_vs = (idx + step < edit_text.size()) &&
+                           (edit_text[idx + step] == 0xFE0F ||
+                            edit_text[idx + step] == 0x20E3);
+            if (!is_emoji_base(cp) && !next_vs) {
+              idx += step;
+              continue;
+            }
+            size_t end_idx = idx + step;
+            bool is_flag_first = (cp >= 0x1F1E6u && cp <= 0x1F1FFu);
+            while (end_idx < edit_text.size()) {
+              size_t s2 = 1;
+              uint32_t cp2 = decode_cp(end_idx, s2);
+              if (cp2 == 0xFE0Eu || cp2 == 0xFE0Fu || cp2 == 0x20E3u ||
+                  (cp2 >= 0x1F3FBu && cp2 <= 0x1F3FFu) ||
+                  (cp2 >= 0xE0020u && cp2 <= 0xE007Fu)) {
+                end_idx += s2;
+              } else if (is_flag_first && cp2 >= 0x1F1E6u && cp2 <= 0x1F1FFu) {
+                end_idx += s2;
+                is_flag_first = false;
+              } else if (cp2 == 0x200Du && end_idx + s2 < edit_text.size()) {
+                size_t s3 = 1;
+                decode_cp(end_idx + s2, s3);
+                end_idx += s2 + s3;
+              } else {
+                break;
+              }
+            }
+            LRESULT p0 = SendMessageW(hwnd, EM_POSFROMCHAR, idx, 0);
+            if (p0 != -1) {
+              int x0 = int(short(LOWORD(p0)));
+              int x1 = x0;
+              if (end_idx < edit_text.size()) {
+                LRESULT p1 = SendMessageW(hwnd, EM_POSFROMCHAR, end_idx, 0);
+                if (p1 != -1)
+                  x1 = int(short(LOWORD(p1)));
+              }
+              if (x1 <= x0) {
+                HGDIOBJ old_f = hfont ? SelectObject(pass_b.dc, hfont) : nullptr;
+                SIZE sz{};
+                if (GetTextExtentPoint32W(pass_b.dc, edit_text.c_str() + idx,
+                                          int(end_idx - idx), &sz)) {
+                  x1 = x0 + sz.cx;
+                }
+                if (old_f)
+                  SelectObject(pass_b.dc, old_f);
+              }
+              if (x1 > 0 && x0 < w && x1 > x0) {
+                const int cx0 = max(0, x0);
+                const int cx1 = min(w, x1);
+                for (int cy = 0; cy < h; ++cy) {
+                  uint32_t *rb = pass_b.pixels + size_t(cy) * size_t(w);
+                  uint32_t *rw = pass_w.pixels + size_t(cy) * size_t(w);
+                  for (int cx = cx0; cx < cx1; ++cx) {
+                    rb[cx] = 0xFF000000u;
+                    rw[cx] = 0xFFFFFFFFu;
+                  }
+                }
+                emoji_spans.push_back({idx, end_idx - idx, x0, x1});
+              }
+            }
+            idx = end_idx;
+          }
+        }
+      }
+    }
   }
 
   const int buf_w = int(s->buffer->width);
@@ -2083,6 +2292,24 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
       b_row[x] = (outA << 24) | (outR << 16) | (outG << 8) | outB;
     }
   }
+  if (!emoji_spans.empty()) {
+    const UINT dpi = s->buffer_dpi ? s->buffer_dpi : 96;
+    const float scale = float(dpi) / 96.f;
+    float logical_px = hook.lf_height != 0
+                           ? float(std::abs(hook.lf_height)) / scale
+                           : 16.f;
+    const float center_y_px =
+        hook.line_center > 0.0 ? float(hook.line_center) * scale : float(h) * 0.5f;
+    const float weight = float(hook.lf_weight ? hook.lf_weight : 400);
+    Graphics g_edit(pass_b.bitmap.get());
+    g_edit.SetCompositingMode(CompositingModeSourceOver);
+    g_edit.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    for (const auto &sp : emoji_spans) {
+      DWrite().DrawSpanPixels(g_edit, dpi, edit_text.substr(sp.start, sp.len),
+                              hook.face, logical_px, weight, hook.text_argb,
+                              float(sp.x0), float(sp.x1), center_y_px);
+    }
+  }
   BitBlt(target_dc, 0, 0, w, h, pass_b.dc, 0, 0, SRCCOPY);
 }
 
@@ -2114,6 +2341,11 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
   } else if (msg == WM_KILLFOCUS || msg == WM_NCDESTROY) {
     found->second.caret_hidden = false;
     found->second.ime_composing = false;
+  }
+  if (msg == WM_PASTE) {
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (root && !IsWindowVisible(root))
+      return 0;
   }
   if (transparent) {
     if (msg == WM_ERASEBKGND)

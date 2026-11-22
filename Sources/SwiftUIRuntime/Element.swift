@@ -367,6 +367,8 @@ public struct Element {
   var tapLocationAction: ((CGPoint) -> Void)?
   var doubleTapLocationAction: ((CGPoint) -> Void)?
   var doubleTapAction: (() -> Void)? = nil
+  var continuousHoverAction: ((HoverPhase) -> Void)? = nil
+  var continuousHoverGlobal = false
   var keyAction: ((KeyPress) -> KeyPress.Result)? = nil
   var scrollTarget: ScrollTarget?
   var completeScrollTarget: (() -> Void)?
@@ -582,6 +584,7 @@ func resolveEnvironment(
   inheritedForeground: Color? = nil,
   inheritedDisabled: Bool = false,
   inheritedOpacity: Double = 1,
+  inheritedBlurRadius: Double = 0,
   inheritedVisible: Bool = true,
   inheritedLineLimit: Int? = nil,
   inheritedLineSpacing: Double = 0,
@@ -617,6 +620,7 @@ func resolveEnvironment(
   element.props.enabled = !disabled
   element.props.visible = element.props.visible && inheritedVisible
   element.props.opacity *= inheritedOpacity
+  element.props.blurRadius = max(element.props.blurRadius, inheritedBlurRadius)
   element.props.lineLimit = element.props.lineLimit ?? inheritedLineLimit
   if element.props.lineSpacing == 0 { element.props.lineSpacing = inheritedLineSpacing }
 
@@ -653,6 +657,7 @@ func resolveEnvironment(
       inheritedForeground: foreground,
       inheritedDisabled: disabled,
       inheritedOpacity: element.props.opacity,
+      inheritedBlurRadius: element.props.blurRadius,
       inheritedVisible: element.props.visible,
       inheritedLineLimit: element.props.lineLimit,
       inheritedLineSpacing: element.props.lineSpacing,

@@ -536,6 +536,7 @@ public final class ApplicationStager {
     if lowerName.hasPrefix("d3d") { return true }
     let systemNames: Set<String> = [
       "kernel32.dll", "user32.dll", "gdi32.dll", "gdiplus.dll", "advapi32.dll",
+      "d2d1.dll", "dwrite.dll",
       "shell32.dll", "ole32.dll", "oleaut32.dll", "uuid.dll", "comctl32.dll",
       "comdlg32.dll", "dwmapi.dll", "imm32.dll", "bcrypt.dll", "crypt32.dll",
       "ncrypt.dll", "shlwapi.dll", "version.dll", "psapi.dll", "winsqlite3.dll",

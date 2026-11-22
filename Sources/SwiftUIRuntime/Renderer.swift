@@ -28,6 +28,8 @@ import Foundation
   private var mounted: Element?
   private var normalized: Element?
   private var hoverActions: [NodeID: (Bool) -> Void] = [:]
+  private var continuousHoverActions: [NodeID: (HoverPhase) -> Void] = [:]
+  private var lastContinuousHoverPoints: [NodeID: CGPoint] = [:]
   public private(set) var isRendering = false
   public var onDidFinishRenderPasses: (() -> Void)?
   private var needsRender = false
@@ -295,9 +297,10 @@ import Foundation
   private func finishTransaction() {
     if transactionDepth == 1 && hoverPending {
       hoverPending = false
+      let pt = hoverPoint
       let chain =
-        hoverPoint.flatMap { point in tree.map { hitChain($0, point: point, hover: true) } } ?? []
-      updateHover(chain)
+        pt.flatMap { point in tree.map { hitChain($0, point: point, hover: true) } } ?? []
+      updateHover(chain, point: pt)
     }
     transactionDepth -= 1
     if transactionDepth == 0 && needsRender && !isRendering { requestRender() }
@@ -428,20 +431,37 @@ import Foundation
     case .pressed(let value): node.pressedAction?(value && node.props.enabled)
     }
   }
-  private func updateHover(_ chain: [Element]) {
+  private func updateHover(_ chain: [Element], point: CGPoint? = nil) {
     let ids = chain.map(\.id)
-    guard hoveredNodeIDs != ids else { return }
-    let previous = Set(hoveredNodeIDs)
-    let next = Set(ids)
-    let old = hoveredNodeIDs
-    hoveredNodeIDs = ids
-    for id in old where !next.contains(id) {
-      hoverActions.removeValue(forKey: id)?(false)
+    if hoveredNodeIDs != ids {
+      let previous = Set(hoveredNodeIDs)
+      let next = Set(ids)
+      let old = hoveredNodeIDs
+      hoveredNodeIDs = ids
+      for id in old where !next.contains(id) {
+        hoverActions.removeValue(forKey: id)?(false)
+        lastContinuousHoverPoints.removeValue(forKey: id)
+        continuousHoverActions.removeValue(forKey: id)?(.ended)
+      }
+      for node in chain where !previous.contains(node.id) {
+        if let action = node.hoverAction {
+          hoverActions[node.id] = action
+          action(true)
+        }
+      }
     }
-    for node in chain where !previous.contains(node.id) {
-      if let action = node.hoverAction {
-        hoverActions[node.id] = action
-        action(true)
+    if let point {
+      for node in chain {
+        guard let cont = node.continuousHoverAction else { continue }
+        let reported =
+          node.continuousHoverGlobal
+          ? point
+          : CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY)
+        if lastContinuousHoverPoints[node.id] != reported {
+          lastContinuousHoverPoints[node.id] = reported
+          continuousHoverActions[node.id] = cont
+          cont(.active(reported))
+        }
       }
     }
   }
@@ -520,9 +540,8 @@ import Foundation
       return true
     }
     if (event == 2 || event == 4 || event == 9),
-      let top = chain.first,
-      top.kind == .hostedView,
-      let handler = top.hostedViewMouseInput,
+      let hosted = chain.first(where: { $0.kind == .hostedView }),
+      let handler = hosted.hostedViewMouseInput,
       handler(event, point, modifiers)
     {
       return true
@@ -673,12 +692,14 @@ import Foundation
       node.secondaryAction?(CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY))
       return true
     }
-    if event == 4, let node = chain.first(where: { $0.doubleTapAction != nil }) {
-      if let action = node.doubleTapLocationAction {
-        action(CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY))
-      } else {
-        node.doubleTapAction?()
-      }
+    if event == 4,
+      let node = chain.first(where: {
+        $0.doubleTapAction != nil || $0.doubleTapLocationAction != nil
+      })
+    {
+      node.doubleTapAction?()
+      node.doubleTapLocationAction?(
+        CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY))
       return true
     }
     if event == 5 {
@@ -819,7 +840,9 @@ import Foundation
       node.action != nil || node.highPriorityAction != nil || !node.simultaneousActions.isEmpty
       || node.dragAction != nil || node.highPriorityDragAction != nil || !node.simultaneousDragActions.isEmpty
       || node.longPressAction != nil || node.scrollAction != nil
-      || node.secondaryAction != nil || node.doubleTapAction != nil || node.hoverAction != nil
+      || node.secondaryAction != nil || node.doubleTapAction != nil
+      || node.doubleTapLocationAction != nil || node.hoverAction != nil
+      || node.continuousHoverAction != nil
       || node.focusAction != nil || node.props.focusable
     let painted: Bool
     switch node.kind {
@@ -1125,9 +1148,14 @@ import Foundation
       for id in hoveredNodeIDs {
         let node = chain.first { $0.id == id } ?? find(id, in: tree)
         hoverActions[id] = node?.hoverAction
+        continuousHoverActions[id] = node?.continuousHoverAction
       }
       return
     }
-    for id in hoveredNodeIDs { hoverActions[id] = find(id, in: tree)?.hoverAction }
+    for id in hoveredNodeIDs {
+      let node = find(id, in: tree)
+      hoverActions[id] = node?.hoverAction
+      continuousHoverActions[id] = node?.continuousHoverAction
+    }
   }
 }

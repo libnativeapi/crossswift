@@ -1503,7 +1503,7 @@ extension View {
 
   public func blur(radius: CGFloat, opaque: Bool = false) -> some View {
     TransformView(content: self) { el in
-      el.props.blurRadius = max(0, Double(radius))
+      el.props.blurRadius = max(el.props.blurRadius, max(0, Double(radius)))
     }
   }
 
@@ -1582,8 +1582,14 @@ extension View {
     coordinateSpace: some CoordinateSpaceProtocol = .local,
     perform action: @escaping (HoverPhase) -> Void
   ) -> some View {
-    onHover { hovering in
-      action(hovering ? .active(.zero) : .ended)
+    let isGlobal = (coordinateSpace.coordinateSpace == .global)
+    return TransformView(content: self) { el in
+      let prev = el.continuousHoverAction
+      el.continuousHoverGlobal = isGlobal
+      el.continuousHoverAction = { phase in
+        action(phase)
+        prev?(phase)
+      }
     }
   }
 
@@ -1634,6 +1640,13 @@ extension View {
           }
         } else {
           el.simultaneousActions.append(cb)
+        }
+      } else if let spatial = gesture as? SpatialTapGesture, spatial.count == 2 {
+        let prev = el.doubleTapLocationAction
+        el.doubleTapLocationAction = { pt in
+          spatial.ended?(
+            DragGesture.Value(location: pt, startLocation: pt, translation: .zero, time: Date()))
+          prev?(pt)
         }
       } else {
         el.simultaneousDragActions.append { val, ended in
