@@ -260,7 +260,7 @@ if buildDesktopNative {
     .target(name: "CDarwinShims", path: "Sources/AppleShims/CDarwinShims", publicHeadersPath: "include"),
     .target(name: "Darwin", dependencies: darwinDeps, path: "Sources/AppleShims/Darwin"),
     .target(name: "ApplicationServices", dependencies: appServicesDeps, path: "Sources/AppleShims/ApplicationServices"),
-    .target(name: "ServiceManagement", path: "Sources/AppleShims/ServiceManagement"),
+    .target(name: "ServiceManagement", dependencies: winGlueDependencies, path: "Sources/AppleShims/ServiceManagement"),
     .target(name: "Security", dependencies: ["CoreFoundation"] + winGlueDependencies, path: "Sources/AppleShims/Security"),
     .target(name: "CloudKit", path: "Sources/AppleShims/CloudKit"),
     .target(name: "EventKit", dependencies: ["CoreGraphics"], path: "Sources/AppleShims/EventKit"),

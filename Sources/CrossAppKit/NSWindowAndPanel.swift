@@ -48,6 +48,8 @@ open class CAMediaTimingFunction: NSObject {
   public init(controlPoints c1x: Float, _ c1y: Float, _ c2x: Float, _ c2y: Float) { super.init() }
 }
 
+public typealias CAMediaTimingFunctionName = CAMediaTimingFunction.Name
+
 open class NSAnimationContext: NSObject {
   nonisolated(unsafe) public static let current = NSAnimationContext()
   public var duration: TimeInterval = 0.2
@@ -548,7 +550,12 @@ open class NSWindow: NSResponder {
       case .focused:
         becomeKey()
       case .blurred:
-        if isKeyWindow && Self._suppressResignKeyCount == 0 { resignKey() }
+        #if os(Windows)
+          let bgPasting = cak_is_background_pasting() != 0
+        #else
+          let bgPasting = false
+        #endif
+        if isKeyWindow && Self._suppressResignKeyCount == 0 && !bgPasting { resignKey() }
       case .moved(_, let newPos):
         let currentSize = storedFrame.size
         #if os(Windows)
@@ -956,6 +963,9 @@ open class NSWindow: NSResponder {
     #if os(Windows)
       nativeEnvelopeTopLeft = nil
       nativeContentOffset = .zero
+      if let hwnd = nativeWindow?.nativeObject {
+        cak_window_relinquish_focus(hwnd)
+      }
     #endif
     if isKeyWindow { resignKey() }
     #if !os(macOS)

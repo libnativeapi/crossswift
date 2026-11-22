@@ -26,6 +26,7 @@
 #include "CAppKitWindows.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cstdlib>
 #include <cerrno>
@@ -1356,8 +1357,65 @@ static int SendCtrlLetterChord(WORD letter) {
   return SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT)) == inputs.size() ? 1 : 0;
 }
 
+static std::atomic<int> g_background_pasting{0};
+
+int cak_is_background_pasting(void) {
+  return g_background_pasting.load();
+}
+
+void cak_window_relinquish_focus(void *hwnd_ptr) {
+  HWND hwnd = static_cast<HWND>(hwnd_ptr);
+  if (!hwnd) return;
+  HWND fg = GetForegroundWindow();
+  if (fg == hwnd) {
+    AllowSetForegroundWindow(GetCurrentProcessId());
+  }
+  HWND focused = GetFocus();
+  if (focused && (focused == hwnd || IsChild(hwnd, focused))) {
+    SetFocus(nullptr);
+  }
+}
+
 int cak_send_paste_chord(void) {
+  HWND fg = GetForegroundWindow();
+  if (!fg) return 0;
+  DWORD fg_pid = 0;
+  GetWindowThreadProcessId(fg, &fg_pid);
+  if (fg_pid == GetCurrentProcessId()) {
+    if (!IsWindowVisible(fg) || (GetWindowLongPtrW(fg, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) {
+      return 0;
+    }
+  }
   return SendCtrlLetterChord('V');
+}
+
+int cak_send_paste_chord_to_pid(uint32_t pid) {
+  if (pid == 0 || pid == GetCurrentProcessId()) return 0;
+  HWND prev_fg = GetForegroundWindow();
+  HWND prev_focus = GetFocus();
+  g_background_pasting.store(1);
+  int ok = 0;
+  if (cak_activate_pid(pid)) {
+    Sleep(25);
+    HWND now_fg = GetForegroundWindow();
+    DWORD now_pid = 0;
+    if (now_fg) GetWindowThreadProcessId(now_fg, &now_pid);
+    if (now_pid == pid) {
+      ok = SendCtrlLetterChord('V');
+      Sleep(25);
+    }
+  }
+  if (prev_fg && IsWindow(prev_fg) && IsWindowVisible(prev_fg)) {
+    AllowSetForegroundWindow(GetCurrentProcessId());
+    BringWindowToTop(prev_fg);
+    SetForegroundWindow(prev_fg);
+    SetActiveWindow(prev_fg);
+    if (prev_focus && IsWindow(prev_focus)) {
+      SetFocus(prev_focus);
+    }
+  }
+  g_background_pasting.store(0);
+  return ok;
 }
 
 int cak_send_copy_chord(void) {
@@ -2239,6 +2297,239 @@ int cak_cred_exists(const char *utf8_target) {
   }
   CredFree(cred);
   return 1;
+}
+
+static constexpr const wchar_t *kRunKeyPath = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+int cak_login_item_status(const char *utf8_app_name) {
+  std::wstring name = ToWide(utf8_app_name);
+  if (name.empty()) return 0;
+  LSTATUS st = RegGetValueW(
+      HKEY_CURRENT_USER,
+      kRunKeyPath,
+      name.c_str(),
+      RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+      nullptr,
+      nullptr,
+      nullptr);
+  return st == ERROR_SUCCESS ? 1 : 0;
+}
+
+int cak_login_item_set(const char *utf8_app_name, const char *utf8_command) {
+  std::wstring name = ToWide(utf8_app_name);
+  std::wstring cmd = ToWide(utf8_command);
+  if (name.empty() || cmd.empty()) return 0;
+  HKEY hKey = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) {
+    return 0;
+  }
+  const DWORD bytes = static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t));
+  LSTATUS st = RegSetValueExW(hKey, name.c_str(), 0, REG_SZ, reinterpret_cast<const BYTE *>(cmd.c_str()), bytes);
+  RegCloseKey(hKey);
+  return st == ERROR_SUCCESS ? 1 : 0;
+}
+
+int cak_login_item_remove(const char *utf8_app_name) {
+  std::wstring name = ToWide(utf8_app_name);
+  if (name.empty()) return 0;
+  HKEY hKey = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS) {
+    return 1;
+  }
+  LSTATUS st = RegDeleteValueW(hKey, name.c_str());
+  RegCloseKey(hKey);
+  return (st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND) ? 1 : 0;
+}
+
+} // extern "C"
+
+namespace {
+
+constexpr UINT kSingleInstanceDeliverMsg = WM_APP + 0x241;
+constexpr ULONG_PTR kSingleInstanceCopyDataMagic = 0x43414B52u; // 'CAKR'
+constexpr const wchar_t *kSingleInstanceClassName = L"CrossAppKit.SingleInstance";
+
+HANDLE g_single_instance_mutex = nullptr;
+HWND g_single_instance_hwnd = nullptr;
+cak_single_instance_callback g_single_instance_cb = nullptr;
+std::mutex g_single_instance_queue_mtx;
+std::vector<std::string> g_single_instance_queue;
+
+std::wstring BuildSingleInstanceKey(const char *utf8_app_id) {
+  std::wstring raw = ToWide(utf8_app_id);
+  if (raw.empty()) {
+    wchar_t exe_buf[MAX_PATH * 2] = {};
+    DWORD n = GetModuleFileNameW(nullptr, exe_buf, MAX_PATH * 2);
+    raw.assign(exe_buf, n);
+    if (!raw.empty()) {
+      CharLowerBuffW(raw.data(), static_cast<DWORD>(raw.size()));
+    }
+  }
+  HDESK hDesk = GetThreadDesktop(GetCurrentThreadId());
+  if (hDesk) {
+    wchar_t desk_name[256] = {};
+    DWORD needed = 0;
+    if (GetUserObjectInformationW(hDesk, UOI_NAME, desk_name, sizeof(desk_name), &needed) && desk_name[0]) {
+      raw += L"@";
+      raw += desk_name;
+    }
+  }
+
+  uint64_t hash = 14695981039346656037ull;
+  for (wchar_t ch : raw) {
+    hash ^= static_cast<uint64_t>(static_cast<uint16_t>(ch));
+    hash *= 1099511628211ull;
+  }
+
+  std::wstring sanitized;
+  const size_t limit = std::min<size_t>(raw.size(), 120);
+  sanitized.reserve(limit + 18);
+  for (size_t i = 0; i < limit; ++i) {
+    wchar_t c = raw[i];
+    bool safe = (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') ||
+                (c >= L'0' && c <= L'9') || c == L'.' || c == L'-' || c == L'@';
+    sanitized.push_back(safe ? c : L'_');
+  }
+  wchar_t hex[20] = {};
+  wsprintfW(hex, L"_%08X%08X", static_cast<uint32_t>(hash >> 32), static_cast<uint32_t>(hash & 0xFFFFFFFFu));
+  sanitized += hex;
+  return sanitized;
+}
+
+LRESULT CALLBACK SingleInstanceWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (msg == WM_COPYDATA && lp != 0) {
+    const auto *cds = reinterpret_cast<const COPYDATASTRUCT *>(lp);
+    if (cds->dwData == kSingleInstanceCopyDataMagic) {
+      std::string payload;
+      if (cds->lpData && cds->cbData > 0) {
+        const char *raw = static_cast<const char *>(cds->lpData);
+        size_t len = cds->cbData;
+        while (len > 0 && raw[len - 1] == '\0') --len;
+        payload.assign(raw, len);
+      }
+      {
+        std::lock_guard<std::mutex> lk(g_single_instance_queue_mtx);
+        g_single_instance_queue.push_back(std::move(payload));
+      }
+      PostMessageW(hwnd, kSingleInstanceDeliverMsg, 0, 0);
+      return TRUE;
+    }
+  } else if (msg == kSingleInstanceDeliverMsg) {
+    std::vector<std::string> batch;
+    {
+      std::lock_guard<std::mutex> lk(g_single_instance_queue_mtx);
+      batch.swap(g_single_instance_queue);
+    }
+    cak_single_instance_callback cb = g_single_instance_cb;
+    if (cb) {
+      for (const auto &item : batch) {
+        cb(item.c_str());
+      }
+    }
+    return 0;
+  }
+  return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+} // namespace
+
+extern "C" {
+
+int cak_single_instance_acquire(
+    const char *utf8_app_id,
+    const char *utf8_payload,
+    int notify_primary,
+    int wait_ms,
+    cak_single_instance_callback callback
+) {
+  if (g_single_instance_mutex != nullptr) {
+    return 1;
+  }
+  const std::wstring key = BuildSingleInstanceKey(utf8_app_id);
+  const std::wstring mutex_name = L"Local\\CrossAppKit.SI." + key;
+  const std::wstring win_title = L"CrossAppKit.SI." + key;
+
+  HANDLE hMutex = CreateMutexW(nullptr, FALSE, mutex_name.c_str());
+  if (!hMutex) {
+    return 1;
+  }
+  const DWORD timeout = wait_ms > 0 ? static_cast<DWORD>(wait_ms) : 0;
+  const DWORD wr = WaitForSingleObject(hMutex, timeout);
+  if (wr == WAIT_OBJECT_0 || wr == WAIT_ABANDONED) {
+    static bool class_registered = false;
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    if (!class_registered) {
+      WNDCLASSEXW wc{};
+      wc.cbSize = sizeof(wc);
+      wc.lpfnWndProc = SingleInstanceWndProc;
+      wc.hInstance = hInst;
+      wc.lpszClassName = kSingleInstanceClassName;
+      RegisterClassExW(&wc);
+      class_registered = true;
+    }
+    HWND hwnd = CreateWindowExW(
+        0,
+        kSingleInstanceClassName,
+        win_title.c_str(),
+        0,
+        0, 0, 0, 0,
+        HWND_MESSAGE,
+        nullptr,
+        hInst,
+        nullptr);
+    if (hwnd) {
+      ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+    }
+    g_single_instance_mutex = hMutex;
+    g_single_instance_hwnd = hwnd;
+    g_single_instance_cb = callback;
+    return 1;
+  }
+
+  CloseHandle(hMutex);
+  if (notify_primary) {
+    HWND target = nullptr;
+    for (int attempt = 0; attempt < 25; ++attempt) {
+      target = FindWindowExW(HWND_MESSAGE, nullptr, kSingleInstanceClassName, win_title.c_str());
+      if (target) break;
+      Sleep(20);
+    }
+    if (target) {
+      DWORD primary_pid = 0;
+      GetWindowThreadProcessId(target, &primary_pid);
+      if (primary_pid != 0) {
+        AllowSetForegroundWindow(primary_pid);
+      }
+      const char *payload = utf8_payload ? utf8_payload : "";
+      COPYDATASTRUCT cds{};
+      cds.dwData = kSingleInstanceCopyDataMagic;
+      cds.cbData = static_cast<DWORD>(std::strlen(payload) + 1);
+      cds.lpData = const_cast<char *>(payload);
+      DWORD_PTR result = 0;
+      SendMessageTimeoutW(
+          target,
+          WM_COPYDATA,
+          0,
+          reinterpret_cast<LPARAM>(&cds),
+          SMTO_ABORTIFHUNG | SMTO_NORMAL,
+          2000,
+          &result);
+    }
+  }
+  return 0;
+}
+
+void cak_single_instance_release(void) {
+  g_single_instance_cb = nullptr;
+  if (g_single_instance_hwnd) {
+    DestroyWindow(g_single_instance_hwnd);
+    g_single_instance_hwnd = nullptr;
+  }
+  if (g_single_instance_mutex) {
+    ReleaseMutex(g_single_instance_mutex);
+    CloseHandle(g_single_instance_mutex);
+    g_single_instance_mutex = nullptr;
+  }
 }
 
 } // extern "C"

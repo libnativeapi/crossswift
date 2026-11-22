@@ -96,7 +96,7 @@ import CoreGraphics
     return id.pointee != 0 ? .success : .invalidUIElement
   }
 
-  public let kAXTrustedCheckOptionPrompt: Unmanaged<CFString> = Unmanaged.passUnretained("AXTrustedCheckOptionPrompt" as CFString)
+  public let kAXTrustedCheckOptionPrompt: Unmanaged<CFString> = Unmanaged.passRetained("AXTrustedCheckOptionPrompt" as NSString)
   public let kAXWindowsAttribute = "AXWindows"
   public let kAXFrontmostAttribute = "AXFrontmost"
   public let kAXHiddenAttribute = "AXHidden"

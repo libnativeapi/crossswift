@@ -357,7 +357,11 @@
           let code = Int(virtualKey)
           if flags.contains(.maskCommand) {
             if code == Int(kVK_ANSI_V) {
-              _ = cak_send_paste_chord()
+              if let pid = targetPid, pid > 0 {
+                _ = cak_send_paste_chord_to_pid(UInt32(pid))
+              } else {
+                _ = cak_send_paste_chord()
+              }
             } else if code == Int(kVK_ANSI_C) {
               _ = cak_send_copy_chord()
             }

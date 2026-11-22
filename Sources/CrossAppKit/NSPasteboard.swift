@@ -109,6 +109,7 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
 
   public let name: Name
   private let isSystemGeneral: Bool
+  private let lock = NSRecursiveLock()
   private var localChangeCount: Int = 0
   private var localItems: [NSPasteboardItem] = []
   private var knownCustomTypes: Set<PasteboardType> = [
@@ -142,6 +143,8 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
 
   @discardableResult
   public func clearContents() -> Int {
+    lock.lock()
+    defer { lock.unlock() }
     localItems.removeAll()
     #if !os(macOS)
       if isSystemGeneral {
@@ -157,6 +160,8 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
 
   @discardableResult
   public func declareTypes(_ newTypes: [PasteboardType], owner newOwner: Any?) -> Int {
+    lock.lock()
+    defer { lock.unlock() }
     for t in newTypes where !Self.isStandardType(t) {
       knownCustomTypes.insert(t)
     }
@@ -189,6 +194,8 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
 
   @discardableResult
   public func setString(_ string: String, forType dataType: PasteboardType) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
     if localItems.isEmpty { localItems.append(NSPasteboardItem()) }
     _ = localItems[0].setString(string, forType: dataType)
     #if os(Windows)
@@ -257,6 +264,8 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
   @discardableResult
   public func setData(_ data: Data?, forType dataType: PasteboardType) -> Bool {
     guard let data else { return false }
+    lock.lock()
+    defer { lock.unlock() }
     if localItems.isEmpty { localItems.append(NSPasteboardItem()) }
     _ = localItems[0].setData(data, forType: dataType)
     #if os(Windows)
@@ -485,12 +494,15 @@ open class NSPasteboard: NSObject, @unchecked Sendable {
 
   #if os(Windows) || os(Linux)
     private func querySystemTypes() -> [PasteboardType] {
+      lock.lock()
+      let customSnapshot = knownCustomTypes
+      lock.unlock()
       let clipboard = NativeAPI.Clipboard.shared
       var out: [PasteboardType] = []
       if clipboard.isConcealed() {
         out.append(PasteboardType("org.nspasteboard.ConcealedType"))
       }
-      for custom in knownCustomTypes {
+      for custom in customSnapshot {
         if !out.contains(custom) && clipboard.hasFormat(custom.rawValue) {
           out.append(custom)
         }

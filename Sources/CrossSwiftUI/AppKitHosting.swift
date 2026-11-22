@@ -120,6 +120,21 @@ extension NSViewRepresentable {
   }
 }
 
+private struct WeakHostingView {
+  weak var view: NSView?
+}
+
+private enum HostingViewEnvironmentKey: EnvironmentKey {
+  static let defaultValue = WeakHostingView(view: nil)
+}
+
+extension EnvironmentValues {
+  fileprivate var _currentHostingView: WeakHostingView {
+    get { self[HostingViewEnvironmentKey.self] }
+    set { self[HostingViewEnvironmentKey.self] = newValue }
+  }
+}
+
 private enum ActiveHostingContext {
   nonisolated(unsafe) static weak var currentHostingView: NSView?
   @MainActor static var mountsByHost: [ObjectIdentifier: [AnyHashable: any _HostedViewMount]] = [:]
@@ -172,6 +187,7 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
   let environment: EnvironmentValues
   weak var hostContainer: NSView?
   var viewKey: AnyHashable?
+  private var fallbackInstance: HostedMountInstance<R>?
 
   init(representable: R, environment: EnvironmentValues, hostContainer: NSView?) {
     self.representable = representable
@@ -180,9 +196,18 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
   }
 
   @MainActor
-  private func ensureInstance(key: AnyHashable?) -> HostedMountInstance<R> {
+  private func lookupInstance(key: AnyHashable?) -> HostedMountInstance<R>? {
     let resolvedKey = key ?? viewKey
     if let existing = ActiveHostingContext.mount(for: hostContainer, key: resolvedKey) as? HostedMountInstance<R> {
+      return existing
+    }
+    return fallbackInstance
+  }
+
+  @MainActor
+  private func ensureInstance(key: AnyHashable?) -> HostedMountInstance<R> {
+    let resolvedKey = key ?? viewKey
+    if let existing = lookupInstance(key: resolvedKey) {
       if let container = hostContainer, existing.typedView.superview !== container {
         container.addSubview(existing.typedView)
       }
@@ -197,7 +222,11 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
     let instance = HostedMountInstance<R>(
       typedView: view, coordinator: coordinator, hostContainer: hostContainer, key: resolvedKey
     )
-    ActiveHostingContext.setMount(instance, for: hostContainer, key: resolvedKey)
+    if hostContainer != nil {
+      ActiveHostingContext.setMount(instance, for: hostContainer, key: resolvedKey)
+    } else {
+      fallbackInstance = instance
+    }
     return instance
   }
 
@@ -295,7 +324,7 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
   func hitTest(key: AnyHashable, event: Int, rootPoint: CGPoint, modifiers: EventModifiers) -> Bool {
     guard event == 2 || event == 3 || event == 4 || event == 9 else { return false }
     return MainActor.assumeIsolated {
-      guard let instance = ActiveHostingContext.mount(for: hostContainer, key: key) as? HostedMountInstance<R> else {
+      guard let instance = lookupInstance(key: key) else {
         return false
       }
       if instance.typedView.ownedNativeView != nil {
@@ -315,7 +344,7 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
   func handleMouseInput(key: AnyHashable, event: Int, rootPoint: CGPoint, modifiers: EventModifiers) -> Bool {
     guard event == 2 || event == 4 || event == 9 else { return false }
     return MainActor.assumeIsolated {
-      guard let instance = ActiveHostingContext.mount(for: hostContainer, key: key) as? HostedMountInstance<R> else {
+      guard let instance = lookupInstance(key: key) else {
         return false
       }
       if instance.typedView.ownedNativeView != nil {
@@ -344,7 +373,7 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
 extension NSViewRepresentable {
   public var body: _HostedViewPrimitive {
     let env = EnvironmentValues.current
-    let host = ActiveHostingContext.currentHostingView
+    let host = env._currentHostingView.view ?? ActiveHostingContext.currentHostingView
     let bridge = HostedViewBridge(representable: self, environment: env, hostContainer: host)
     return _HostedViewPrimitive(
       adapter: bridge,
@@ -393,6 +422,7 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
 
   #if os(Windows)
     private var backend: WindowsDrawingBackend?
+    private var keyWindowObserver: NSObjectProtocol?
     private var isApplyingWindowResize = false
     private var isCommittingPendingWindowBounds = false
     private var pendingWindowBoundsCommit: (() -> Void)?
@@ -647,6 +677,19 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
           nsWin: nsWin, event: event, point: point, value: value, modifiers: modifiers
         )
       }
+      createdBackend.canAcquireControlFocus = { [weak self] in
+        self?.window?.isKeyWindow ?? true
+      }
+      if let obs = keyWindowObserver {
+        NotificationCenter.default.removeObserver(obs)
+      }
+      keyWindowObserver = NotificationCenter.default.addObserver(
+        forName: NSWindow.didBecomeKeyNotification, object: win, queue: nil
+      ) { [weak self] _ in
+        MainActor.assumeIsolated {
+          self?.backend?.applyPendingFocusIfNeeded()
+        }
+      }
 
       let layout = LayoutEngine(textMeasurer: WindowsDrawingBackend.measureText)
       ActiveHostingContext.currentHostingView = self
@@ -763,12 +806,18 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
   }
 
   private func teardownRenderer() {
+    #if os(Windows)
+      if let obs = keyWindowObserver {
+        NotificationCenter.default.removeObserver(obs)
+        keyWindowObserver = nil
+      }
+    #endif
     ActiveHostingContext.mountsByHost.removeValue(forKey: ObjectIdentifier(self))
     renderer = nil
     backend = nil
   }
 
-  private static func keyCharacter(forWin32VK value: Int) -> String {
+  internal static func keyCharacter(forWin32VK value: Int) -> String {
     if (0x30...0x5A).contains(value), let scalar = UnicodeScalar(value) {
       return String(scalar).lowercased()
     }
@@ -788,6 +837,15 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
     case 0x0D: return "\r"
     case 0x08: return "\u{7F}"
     case 0x09: return "\t"
+    case 0x26: return "\u{F700}"
+    case 0x28: return "\u{F701}"
+    case 0x25: return "\u{F702}"
+    case 0x27: return "\u{F703}"
+    case 0x2E: return "\u{F728}"
+    case 0x24: return "\u{F729}"
+    case 0x23: return "\u{F72B}"
+    case 0x21: return "\u{F72C}"
+    case 0x22: return "\u{F72D}"
     default: return ""
     }
   }
@@ -897,7 +955,7 @@ private struct HostingScopeView<Content: SwiftUIRuntime.View>: SwiftUIRuntime.Vi
 
   var body: some SwiftUIRuntime.View {
     let _ = { ActiveHostingContext.currentHostingView = host }()
-    content
+    content.environment(\._currentHostingView, WeakHostingView(view: host))
   }
 }
 

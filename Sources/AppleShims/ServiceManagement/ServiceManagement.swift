@@ -1,4 +1,7 @@
 import Foundation
+#if os(Windows)
+  import CAppKitWindows
+#endif
 
 #if !os(macOS)
   public final class SMAppService: @unchecked Sendable {
@@ -13,18 +16,7 @@ import Foundation
 
     public var status: Status {
       #if os(Windows)
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "C:\\Windows\\System32\\reg.exe")
-        proc.arguments = ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", appName]
-        proc.standardOutput = Pipe()
-        proc.standardError = Pipe()
-        do {
-          try proc.run()
-          proc.waitUntilExit()
-          return proc.terminationStatus == 0 ? .enabled : .notRegistered
-        } catch {
-          return .notRegistered
-        }
+        return cak_login_item_status(appName) != 0 ? .enabled : .notRegistered
       #elseif os(Linux)
         return FileManager.default.fileExists(atPath: linuxAutostartFileURL.path) ? .enabled : .notRegistered
       #else
@@ -36,14 +28,9 @@ import Foundation
       #if os(Windows)
         let exe = Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? ""
         guard !exe.isEmpty else { return }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "C:\\Windows\\System32\\reg.exe")
-        proc.arguments = [
-          "add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-          "/v", appName, "/t", "REG_SZ", "/d", "\"\(exe)\"", "/f",
-        ]
-        try proc.run()
-        proc.waitUntilExit()
+        if cak_login_item_set(appName, "\"\(exe)\" --background") == 0 {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+        }
       #elseif os(Linux)
         let exe = Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? ""
         guard !exe.isEmpty else { return }
@@ -66,14 +53,9 @@ import Foundation
 
     public func unregister() throws {
       #if os(Windows)
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "C:\\Windows\\System32\\reg.exe")
-        proc.arguments = [
-          "delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-          "/v", appName, "/f",
-        ]
-        try proc.run()
-        proc.waitUntilExit()
+        if cak_login_item_remove(appName) == 0 {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+        }
       #elseif os(Linux)
         let fileURL = linuxAutostartFileURL
         if FileManager.default.fileExists(atPath: fileURL.path) {

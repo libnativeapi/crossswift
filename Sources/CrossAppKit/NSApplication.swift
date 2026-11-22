@@ -38,6 +38,15 @@ public var NSApp: NSApplication! {
   set {}
 }
 
+#if os(Windows)
+  private let _singleInstanceCallback: @convention(c) (UnsafePointer<CChar>?) -> Void = { rawPtr in
+    let payload = rawPtr.map { String(cString: $0) } ?? ""
+    MainActor.assumeIsolated {
+      NSApplication.shared._receiveSingleInstancePayload(payload)
+    }
+  }
+#endif
+
 @MainActor
 open class NSApplication: NSResponder, @unchecked Sendable {
   public enum ActivationPolicy: Int, Sendable {
@@ -97,6 +106,12 @@ open class NSApplication: NSResponder, @unchecked Sendable {
   }
   private var trackedWindows: [WeakWindow] = []
   private var appearanceObservers: [UUID: () -> Void] = [:]
+  private var didEnsureSingleInstance = false
+  private var didCompleteFinishLaunching = false
+  private var pendingSingleInstancePayloads: [String] = []
+  #if !os(macOS)
+    public weak var _primarySceneWindow: NativeAPI.Window?
+  #endif
 
   public var windows: [NSWindow] {
     trackedWindows.compactMap(\.window)
@@ -223,6 +238,133 @@ open class NSApplication: NSResponder, @unchecked Sendable {
   public func registerForRemoteNotifications() {}
   public func unregisterForRemoteNotifications() {}
 
+  nonisolated internal static func _parseOpenURLs<S: Sequence>(from rawArgs: S) -> [URL]
+  where S.Element == String {
+    var urls: [URL] = []
+    for raw in rawArgs {
+      let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty, !trimmed.hasPrefix("-") else { continue }
+      if FileManager.default.fileExists(atPath: trimmed) {
+        urls.append(URL(fileURLWithPath: trimmed))
+        continue
+      }
+      if let colon = trimmed.firstIndex(of: ":") {
+        let scheme = trimmed[..<colon]
+        if scheme.count >= 2,
+          let first = scheme.unicodeScalars.first,
+          CharacterSet.letters.contains(first),
+          scheme.unicodeScalars.allSatisfy({
+            CharacterSet.alphanumerics.contains($0) || $0 == "+" || $0 == "-" || $0 == "."
+          }),
+          let url = URL(string: trimmed)
+        {
+          urls.append(url)
+        }
+      }
+    }
+    return urls
+  }
+
+  public func ensureSingleInstance() {
+    guard !didEnsureSingleInstance else { return }
+    didEnsureSingleInstance = true
+    #if os(Windows)
+      let args = CommandLine.arguments
+      if args.contains("--new-instance") || args.contains("--smoke") { return }
+      if ProcessInfo.processInfo.environment["CROSS_ALLOW_MULTIPLE_INSTANCES"] == "1" { return }
+      if let prohibited = Bundle.main.object(forInfoDictionaryKey: "LSMultipleInstancesProhibited") as? Bool,
+        !prohibited
+      {
+        return
+      }
+
+      let forwardArgs = args.dropFirst().filter { !$0.hasPrefix("-") }
+      let payload = forwardArgs.joined(separator: "\n")
+      let isBackground = args.contains("--background")
+      let notifyPrimary: Int32 = (!isBackground || !forwardArgs.isEmpty) ? 1 : 0
+      let waitMs: Int32 = args.contains("--relaunch") ? 5000 : 0
+      let appID = Bundle.main.bundleIdentifier ?? ""
+
+      let acquired = cak_single_instance_acquire(
+        appID,
+        payload,
+        notifyPrimary,
+        waitMs,
+        _singleInstanceCallback
+      )
+      if acquired == 0 {
+        exit(0)
+      }
+    #endif
+  }
+
+  internal func _receiveSingleInstancePayload(_ payload: String) {
+    if !didCompleteFinishLaunching {
+      pendingSingleInstancePayloads.append(payload)
+      return
+    }
+    _deliverSingleInstancePayload(payload)
+  }
+
+  private func _deliverSingleInstancePayload(_ payload: String) {
+    let parts = payload.split(whereSeparator: \.isNewline).map(String.init)
+    let urls = Self._parseOpenURLs(from: parts)
+    if !urls.isEmpty {
+      if let delegate {
+        delegate.application(self, open: urls)
+      } else {
+        #if !os(macOS)
+          if let win = _primarySceneWindow {
+            if win.isMinimized { win.restore() }
+            win.show()
+            win.focus()
+          }
+        #endif
+      }
+      return
+    }
+
+    #if !os(macOS)
+      let primaryVisible = _primarySceneWindow?.isVisible == true
+    #else
+      let primaryVisible = false
+    #endif
+    let hadVisible = windows.contains { $0.isVisible } || primaryVisible
+    let shouldPerformNormalReopen =
+      delegate?.applicationShouldHandleReopen(self, hasVisibleWindows: hadVisible) ?? true
+    if shouldPerformNormalReopen {
+      #if !os(macOS)
+        let primaryVisibleNow = _primarySceneWindow?.isVisible == true
+      #else
+        let primaryVisibleNow = false
+      #endif
+      let hasVisibleNow = windows.contains { $0.isVisible } || primaryVisibleNow
+      if !hasVisibleNow {
+        #if !os(macOS)
+          if let win = _primarySceneWindow {
+            if win.isMinimized { win.restore() }
+            win.show()
+            win.focus()
+            return
+          }
+        #endif
+        if let win = mainWindow ?? windows.first {
+          if win.isMiniaturized { win.deminiaturize(nil) }
+          win.makeKeyAndOrderFront(nil)
+        }
+      } else if let win = keyWindow ?? mainWindow {
+        win.makeKeyAndOrderFront(nil)
+      } else {
+        #if !os(macOS)
+          if let win = _primarySceneWindow, win.isVisible {
+            if win.isMinimized { win.restore() }
+            win.focus()
+          }
+        #endif
+      }
+    }
+  }
+
   public func finishLaunching() {
     let willNote = Notification(name: Self.willFinishLaunchingNotification, object: self)
     NotificationCenter.default.post(willNote)
@@ -231,21 +373,49 @@ open class NSApplication: NSResponder, @unchecked Sendable {
     let didNote = Notification(name: Self.didFinishLaunchingNotification, object: self)
     NotificationCenter.default.post(didNote)
     delegate?.applicationDidFinishLaunching(didNote)
+
+    #if !os(macOS)
+      let initialURLs = Self._parseOpenURLs(from: CommandLine.arguments.dropFirst())
+      if !initialURLs.isEmpty {
+        delegate?.application(self, open: initialURLs)
+      }
+    #endif
+
+    didCompleteFinishLaunching = true
+    if !pendingSingleInstancePayloads.isEmpty {
+      let queued = pendingSingleInstancePayloads
+      pendingSingleInstancePayloads.removeAll()
+      for payload in queued {
+        _deliverSingleInstancePayload(payload)
+      }
+    }
   }
 
   public func run() {
+    ensureSingleInstance()
     guard !isRunning else { return }
     isRunning = true
     #if !os(macOS)
       NativeAPI.Application.shared.installMainQueue()
+      var syncTickCounter = 0
       let runLoopPump = NativeAPI.RunLoopTimer(milliseconds: 25) {
         _ = RunLoop.main.limitDate(forMode: .default)
+        #if os(Windows)
+          syncTickCounter += 1
+          if syncTickCounter >= 40 {
+            syncTickCounter = 0
+            _ = UserDefaults.standard.synchronize()
+          }
+        #endif
       }
     #endif
     finishLaunching()
     #if !os(macOS)
       _ = NativeAPI.Application.shared.run()
       runLoopPump.invalidate()
+      #if os(Windows)
+        _ = UserDefaults.standard.synchronize()
+      #endif
     #endif
     isRunning = false
   }
@@ -270,9 +440,20 @@ open class NSApplication: NSResponder, @unchecked Sendable {
   }
 
   private func performFinalTermination() {
+    for win in windows where win.isVisible {
+      win.orderOut(nil)
+    }
+    NSStatusBar.system._removeAllItemsForTermination()
+    #if os(Windows)
+      _ = UserDefaults.standard.synchronize()
+    #endif
     let termNote = Notification(name: Self.willTerminateNotification, object: self)
     NotificationCenter.default.post(termNote)
     delegate?.applicationWillTerminate(termNote)
+    #if os(Windows)
+      _ = UserDefaults.standard.synchronize()
+      cak_single_instance_release()
+    #endif
     #if !os(macOS)
       NativeAPI.Application.shared.quit(0)
     #endif
@@ -304,6 +485,9 @@ open class NSAppleEventManager: NSObject, @unchecked Sendable {
   public var currentAppleEvent: NSAppleEventDescriptor? {
     #if !os(macOS)
       if CommandLine.arguments.contains("--background") { return nil }
+      if !NSApplication._parseOpenURLs(from: CommandLine.arguments.dropFirst()).isEmpty {
+        return nil
+      }
       let desc = NSAppleEventDescriptor()
       desc.eventClass = kCoreEventClass
       desc.eventID = kAEOpenApplication

@@ -155,6 +155,7 @@
     private let window: NativeAPI.Window?
     public var environmentTransform: ((inout EnvironmentValues) -> Void)?
     public var onPreInput: ((Int, CGPoint, Int, EventModifiers) -> Bool)?
+    public var canAcquireControlFocus: (() -> Bool)?
     public var environment: EnvironmentValues {
       var env: EnvironmentValues = window.map { .hosting($0) } ?? EnvironmentValues()
       environmentTransform?(&env)
@@ -604,6 +605,14 @@
         sui_surface_focus_next(surface, current, backward ? 1 : 0)
       }
     }
+    public func applyPendingFocusIfNeeded() {
+      guard canAcquireControlFocus?() ?? true, let id = desiredFocus else { return }
+      if let edit = edits[id], edit.enabled, !edit.view.isFocused {
+        edit.view.focus()
+      } else if let btn = buttons[id]?.view, btn.isEnabled, !btn.isFocused {
+        btn.focus()
+      }
+    }
     func focusInitialControl() {
       // The top-level HWND initially owns focus. Put it on the first available
       // control so Tab works before the user has clicked anything.
@@ -815,7 +824,7 @@
               sui_button_set_accessibility(handle, label(node), node.props.accessibilityValue)
             }
           }
-        if wantsFocus && !button.isFocused && node.props.enabled && inViewport {
+        if wantsFocus && (canAcquireControlFocus?() ?? true) && !button.isFocused && node.props.enabled && inViewport {
           button.focus()
         }
       }
@@ -918,7 +927,7 @@
               edit.enabled = enabled
             }
             edits[node.id] = edit
-            if wantsFocus && enabled && !edit.view.isFocused && inViewport {
+            if wantsFocus && (canAcquireControlFocus?() ?? true) && enabled && !edit.view.isFocused && inViewport {
               edit.view.focus()
             }
           }
@@ -1064,7 +1073,7 @@
       if canCull && node.children.isEmpty && p.shadows.isEmpty
         && (node.kind == .text || node.kind == .image || node.kind == .shape)
       {
-        let margin = max(2, p.borderWidth)
+        let margin = max(2, max(p.borderWidth, p.blurRadius * 2))
         let ink = Rect(
           x: r.minX - margin, y: r.minY - margin,
           width: r.width + margin * 2, height: r.height + margin * 2)

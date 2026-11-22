@@ -183,6 +183,24 @@ uint8_t *cak_cred_read(const char *utf8_target, size_t *out_len);
 int cak_cred_delete(const char *utf8_target);
 int cak_cred_exists(const char *utf8_target);
 
+int cak_login_item_status(const char *utf8_app_name);
+int cak_login_item_set(const char *utf8_app_name, const char *utf8_command);
+int cak_login_item_remove(const char *utf8_app_name);
+
+void cak_window_relinquish_focus(void *hwnd_ptr);
+int cak_send_paste_chord_to_pid(uint32_t pid);
+int cak_is_background_pasting(void);
+
+typedef void (*cak_single_instance_callback)(const char *utf8_payload);
+int cak_single_instance_acquire(
+    const char *utf8_app_id,
+    const char *utf8_payload,
+    int notify_primary,
+    int wait_ms,
+    cak_single_instance_callback callback
+);
+void cak_single_instance_release(void);
+
 #ifdef __cplusplus
 }
 #endif

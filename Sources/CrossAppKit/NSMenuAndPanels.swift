@@ -390,6 +390,17 @@ open class NSStatusItem: NSObject {
       }
     #endif
   }
+
+  internal func _disposeNativeTrayIcon() {
+    #if !os(macOS)
+      if let lid = listenerId {
+        _ = nativeTrayIcon?.removeListener(lid)
+        listenerId = nil
+      }
+      nativeTrayIcon?.dispose()
+      nativeTrayIcon = nil
+    #endif
+  }
 }
 
 @MainActor
@@ -409,7 +420,16 @@ open class NSStatusBar: NSObject, @unchecked Sendable {
 
   public func removeStatusItem(_ item: NSStatusItem) {
     item.isVisible = false
+    item._disposeNativeTrayIcon()
     activeItems.removeAll { $0 === item }
+  }
+
+  internal func _removeAllItemsForTermination() {
+    let items = activeItems
+    activeItems.removeAll()
+    for item in items {
+      item._disposeNativeTrayIcon()
+    }
   }
 }
 

@@ -460,6 +460,7 @@ private final class MenuBarExtraHost<A: App>: NSMenuDelegate {
 @MainActor
 public func runApp<A: App>(_ app: A) {
   installAssetResolversOnce()
+  NSApplication.shared.ensureSingleInstance()
 
   let rootScene = app.body
   let scenes = flattenScenes(rootScene)
@@ -508,14 +509,13 @@ public func runApp<A: App>(_ app: A) {
       rootView: windowScene._makeRootView(),
       dumpTree: true
     )
+    NSApplication.shared._primarySceneWindow = primary.window
 
     if CommandLine.arguments.contains("--smoke") {
       startSmokeTimer()
     }
 
-    if NSApplication.shared.delegate != nil {
-      NSApplication.shared.finishLaunching()
-    }
+    NSApplication.shared.finishLaunching()
     withExtendedLifetime((coordinator, primary, menuHosts)) {
       _ = application.runWithWindow(primary.window)
     }
@@ -541,6 +541,8 @@ extension App {
   /// The `@main` entry point. `SwiftUI` re-exports this extension, so an app
   /// only needs `import SwiftUI`.
   public static func main() {
+    installAssetResolversOnce()
+    NSApplication.shared.ensureSingleInstance()
     runApp(Self())
   }
 }
