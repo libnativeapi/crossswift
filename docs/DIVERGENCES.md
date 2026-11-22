@@ -32,8 +32,17 @@ native activation and AT-SPI names, descriptions, and roles. Window chrome
 follows light and dark appearances on both Windows and Linux.
 
 On macOS, applications compile directly against Apple's native `SwiftUI` and
-`AppKit` SDKs; `SwiftUIRuntime`, `CrossAppKit`, and `CrossXcodeBuild` build on
-macOS for unit testing and cross-platform `.xcodeproj` compilation.
+`AppKit` SDKs; `SwiftUIRuntime`, `CrossAppKit`, `CrossUIKit`, and
+`CrossXcodeBuild` build on macOS for unit testing and cross-platform
+`.xcodeproj` compilation.
+
+On Windows and Linux, `CrossUIKit` (`import UIKit`) maps `UIWindowScene` and
+`UIWindow` to desktop `NativeAPI.Window` instances, runs an iterative anchor
+solver for programmatic `NSLayoutConstraint` and `UIStackView` hierarchies, and
+backs `UILabel`, `UIButton`, `UITextField`, and `UITextView` with native
+controls while sharing `CrossAppKit`'s offscreen `UIGraphicsImageRenderer`
+pipeline. Storyboards/XIBs (`.storyboard` / `.xib`), Core Animation GPU layer
+compositing, multi-touch physics, and UIKit Dynamics are not implemented.
 
 ## Browser and mobile hosts
 

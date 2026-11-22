@@ -20,6 +20,8 @@ public enum PackageDependencyAdapter {
   public static let crossSwiftProvidedModules: Set<String> = [
     "SwiftUI",
     "AppKit",
+    "UIKit",
+    "QuartzCore",
     "CoreGraphics",
     "Combine",
     "CryptoKit",

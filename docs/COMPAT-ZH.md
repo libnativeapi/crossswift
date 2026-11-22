@@ -165,6 +165,17 @@ Windows 与 Linux 使用 `SwiftUIRuntime` 配合 `CrossSwiftUI`（DirectWrite/GD
 | `NSHostingView`, `NSHostingController` | partial | 在 `CrossAppKit` 窗口、面板与分栏视图中嵌入独立的 `SwiftUIRuntime` `Renderer`（由 `CrossSwiftUI` 提供） |
 | `NSViewRepresentable` | partial | 在 SwiftUI 布局树中挂载并更新 `CrossAppKit.NSView` 实例（由 `CrossSwiftUI` 提供） |
 | `NSApplicationDelegateAdaptor` | supported | 在 Windows 与 Linux 上从 `App` 注入 `CrossAppKit.NSApplicationDelegate`（由 `CrossSwiftUI` 提供） |
+| `UIKit` | partial | Windows 与 Linux 下的跨平台 UIKit 门面模块（`CrossUIKit` + `UIKit`） |
+| `QuartzCore` | partial | 提供 `CALayer`、`CAShapeLayer`、`CAGradientLayer`、`CATextLayer`、`CAAnimation`、`CATransaction`、`CADisplayLink` 兼容垫片 |
+| `UIHostingController`, `_UIHostingView`, `UIHostingConfiguration` | partial | 在 `CrossUIKit` 窗口、视图与单元格内容配置中嵌入独立的 `SwiftUIRuntime` `Renderer`（由 `CrossSwiftUI` 提供） |
+| `UIViewRepresentable`, `UIViewControllerRepresentable` | partial | 在 SwiftUI 布局树中挂载并更新 `CrossUIKit.UIView` 与 `UIViewController` 子树（由 `CrossSwiftUI` 提供） |
+| `UIApplicationDelegateAdaptor` | supported | 在 Windows 与 Linux 上从 `App` 注入 `CrossUIKit.UIApplicationDelegate`（由 `CrossSwiftUI` 提供） |
+| `UIApplication`, `UIWindowScene`, `UIWindow` | partial | 支持 `@main` `UIApplicationDelegate`、场景连接、`NativeAPI.Window` 窗口承载及 `--smoke` 冒烟退出 |
+| `UIView`, `UIStackView`, `NSLayoutConstraint` | partial | 左上角坐标视图层级、`autoresizingMask`、`UIStackView` 与迭代式 Auto Layout 锚点求解器 |
+| `UIViewController`, `UINavigationController`, `UITabBarController`, `UIAlertController` | partial | 生命周期回调、导航栈与标签栏容器、Diffable `UITableView`/`UICollectionView` 数据源及原生模态弹窗 |
+| `UITraitCollection`, `UIColor`, `UIFont`, `UIFontMetrics` | supported | 深浅色特征动态闭包、`.xcassets` `.colorset` 解析、iOS 语义调色板与 Dynamic Type 字号缩放 |
+| `UIImage`, `UIGraphicsImageRenderer`, `UIBezierPath` | partial | SF Symbols、`.imageset` 查找、着色渲染与离屏矢量/文本 PNG 光栅化 |
+| `UIPasteboard`, `UIScreen`, `UIDevice` | partial | 宿主系统剪贴板读写、`NativeAPI.DisplayManager` 显示器度量与设备系统信息 |
 
 ## 尚未实现
 

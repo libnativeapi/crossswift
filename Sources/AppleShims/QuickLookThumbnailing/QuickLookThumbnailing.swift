@@ -1,5 +1,6 @@
 import Foundation
 import CrossAppKit
+import CrossUIKit
 import CoreGraphics
 #if os(Windows)
   import CAppKitWindows
@@ -8,6 +9,12 @@ import CoreGraphics
 #if !os(macOS)
   public final class QLThumbnailRepresentation: NSObject, @unchecked Sendable {
     public let nsImage: NSImage
+    public var uiImage: UIImage {
+      if let data = nsImage.imageData, let img = UIImage(data: data) {
+        return img
+      }
+      return UIImage()
+    }
     public var cgImage: CGImage {
       nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
         ?? CGImage(

@@ -1,5 +1,6 @@
 import CSwiftUIWindowsTestSupport
 import CrossAppKit
+import CrossUIKit
 import NativeAPI
 @testable import CrossSwiftUI
 import SwiftUIRuntime
@@ -269,6 +270,55 @@ final class WindowsDrawingTests: XCTestCase {
     XCTAssertEqual(loaded.bounds, CGRect(x: 0, y: 0, width: 20, height: 20))
     XCTAssertEqual(loaded.paths.count, 1)
   }
+
+  @MainActor
+  func testUIHostingControllerAndUIKitRepresentablesInUIWindow() async throws {
+    let session = UISceneSession(role: .windowApplication)
+    let scene = UIWindowScene(session: session, connectionOptions: .init())
+    let uiWindow = UIWindow(windowScene: scene)
+    uiWindow.frame = CGRect(x: 120, y: 120, width: 640, height: 420)
+
+    let state = UIKitPanelProbeState()
+    var observedWindow: UIWindow?
+    var observedVCFrame: CGRect = .zero
+
+    let hosting = UIHostingController(
+      rootView: UIKitPanelProbeContent(
+        onViewWindow: { observedWindow = $0 },
+        onControllerFrame: { observedVCFrame = $0 }
+      )
+      .environment(state)
+    )
+    uiWindow.rootViewController = hosting
+    uiWindow.makeKeyAndVisible()
+
+    let renderer = try XCTUnwrap(hosting.hostingView.renderer)
+    XCTAssertTrue(observedWindow === uiWindow)
+    XCTAssertEqual(observedVCFrame.width, 196, accuracy: 1.0)
+    XCTAssertEqual(observedVCFrame.height, 28, accuracy: 1.0)
+
+    func hasText(_ needle: String, in node: Element) -> Bool {
+      if node.props.text == needle { return true }
+      return node.children.contains { hasText(needle, in: $0) }
+    }
+    XCTAssertTrue(hasText("UIKit Ready", in: try XCTUnwrap(renderer.tree)))
+
+    state.headline = "UIKit Updated: 99"
+    renderer.renderIfNeeded()
+    XCTAssertTrue(hasText("UIKit Updated: 99", in: try XCTUnwrap(renderer.tree)))
+
+    // Verify UIGraphicsImageRenderer produces real PNG bytes via CSwiftUIWindows offscreen canvas
+    let gfx = UIGraphicsImageRenderer(size: CGSize(width: 48, height: 32))
+    let chartImg = gfx.image { _ in
+      UIColor.systemBlue.setFill()
+      UIBezierPath(roundedRect: CGRect(x: 2, y: 2, width: 44, height: 28), cornerRadius: 6).fill()
+    }
+    let png = try XCTUnwrap(chartImg.pngData())
+    XCTAssertGreaterThan(png.count, 32)
+    XCTAssertNotNil(UIImage(systemName: "sparkles"))
+
+    uiWindow.isHidden = true
+  }
 }
 
 @Observable
@@ -294,6 +344,68 @@ private struct PanelContent: SwiftUIRuntime.View {
       SwiftUIRuntime.Text(state.query)
       WindowProbe(onWindow: onWindow)
         .frame(width: 10, height: 10)
+    }
+    .padding(12)
+  }
+}
+
+@Observable
+private final class UIKitPanelProbeState {
+  var headline = "UIKit Ready"
+}
+
+private struct UIWindowProbeRepresentable: UIViewRepresentable {
+  let onWindow: (UIWindow?) -> Void
+  func makeUIView(context: Context) -> UIView {
+    UIView(frame: .zero)
+  }
+  func updateUIView(_ uiView: UIView, context: Context) {
+    onWindow(uiView.window)
+  }
+}
+
+private final class AutoLayoutProbeViewController: UIViewController {
+  let badgeLabel = UILabel()
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    view.backgroundColor = .secondarySystemBackground
+    badgeLabel.text = "Auto Layout Probe"
+    badgeLabel.translatesAutoresizingMaskIntoConstraints = false
+    view.addSubview(badgeLabel)
+    NSLayoutConstraint.activate([
+      badgeLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+      badgeLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+      badgeLabel.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
+      badgeLabel.heightAnchor.constraint(equalToConstant: 28),
+    ])
+  }
+}
+
+private struct UIControllerProbeRepresentable: UIViewControllerRepresentable {
+  let onFrame: (CGRect) -> Void
+  func makeUIViewController(context: Context) -> AutoLayoutProbeViewController {
+    AutoLayoutProbeViewController()
+  }
+  func updateUIViewController(_ uiViewController: AutoLayoutProbeViewController, context: Context) {
+    uiViewController.view.layoutIfNeeded()
+    onFrame(uiViewController.badgeLabel.frame)
+  }
+}
+
+private struct UIKitPanelProbeContent: SwiftUIRuntime.View {
+  @Environment(UIKitPanelProbeState.self) var state
+  let onViewWindow: (UIWindow?) -> Void
+  let onControllerFrame: (CGRect) -> Void
+
+  var body: some SwiftUIRuntime.View {
+    SwiftUIRuntime.VStack(spacing: 8) {
+      SwiftUIRuntime.Text(state.headline)
+        .foregroundStyle(SwiftUIRuntime.Color(uiColor: .label))
+      UIWindowProbeRepresentable(onWindow: onViewWindow)
+        .frame(width: 24, height: 16)
+      UIControllerProbeRepresentable(onFrame: onControllerFrame)
+        .frame(width: 220, height: 56)
     }
     .padding(12)
   }

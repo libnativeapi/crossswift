@@ -1050,6 +1050,40 @@ final class CrossXcodeBuildTests: XCTestCase {
     XCTAssertTrue(abilityEts.contains("onConfigurationUpdate"))
   }
 
+  func testLoadsUIKitDemoProjectAndGeneratesUIKitAssetSymbolsAndMainAttribute() throws {
+    let uikitDemoProject = repositoryRoot.appendingPathComponent("Examples/UIKitDemo/UIKitDemo.xcodeproj")
+    let loader = XcodeProjectLoader()
+    let resolved = try loader.load(from: uikitDemoProject, configuration: .debug)
+
+    XCTAssertEqual(resolved.mainTarget.name, "UIKitDemo")
+    XCTAssertEqual(resolved.mainTarget.bundleIdentifier, "dev.crossswift.uikitdemo")
+    XCTAssertTrue(resolved.inferredCrossSwiftModules.contains("UIKit"))
+    XCTAssertTrue(resolved.inferredCrossSwiftModules.contains("QuartzCore"))
+    XCTAssertTrue(resolved.inferredCrossSwiftModules.contains("SwiftUI"))
+
+    let fm = FileManager.default
+    let staging = fm.temporaryDirectory.appendingPathComponent("CrossXcodeBuildUIKitAssets-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: staging) }
+
+    let compiled = try AssetAndIconCompiler().compile(project: resolved, stagingRoot: staging)
+    let symbolsURL = try XCTUnwrap(compiled.generatedSymbolsSwiftURL)
+    let symbolsSwift = try String(contentsOf: symbolsURL, encoding: .utf8)
+    XCTAssertTrue(symbolsSwift.contains("static let brandTint = ColorResource("))
+    XCTAssertTrue(symbolsSwift.contains("static let studioBadge = ImageResource("))
+    XCTAssertTrue(symbolsSwift.contains("#if canImport(UIKit)"))
+    XCTAssertTrue(symbolsSwift.contains("extension UIColor"))
+    XCTAssertTrue(symbolsSwift.contains("extension UIImage"))
+
+    let legacyAppDelegate = """
+    import UIKit
+    @UIApplicationMain
+    class LegacyAppDelegate: UIResponder, UIApplicationDelegate {}
+    """
+    let preprocessed = SwiftPMBackend.preprocessSwiftSourceForCrossPlatform(legacyAppDelegate)
+    XCTAssertTrue(preprocessed.contains("@main"))
+    XCTAssertFalse(preprocessed.contains("@UIApplicationMain"))
+  }
+
   private func makeMinimalPNG(width: Int, height: Int) -> Data {
     var data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
     data.append(contentsOf: [0, 0, 0, 13]) // IHDR length

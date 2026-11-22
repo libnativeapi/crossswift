@@ -703,6 +703,60 @@ public final class AssetAndIconCompiler {
       }
       out.append("#endif")
       out.append("")
+
+      out.append("#if canImport(UIKit)")
+      out.append("import UIKit")
+      out.append("#if !os(macOS) && canImport(CrossSwiftUI)")
+      out.append("import CrossSwiftUI")
+      out.append("#endif")
+      out.append("")
+      if !colors.isEmpty {
+        out += [
+          "extension UIColor {",
+          "  convenience init(resource: ColorResource) {",
+          "    #if !os(macOS) && canImport(CrossSwiftUI)",
+          "      _installCrossSwiftUIBootstrap()",
+          "    #endif",
+          "    self.init { traits in",
+          "      let isDark = traits.userInterfaceStyle == .dark",
+          "      return UIColor(",
+          "        red: isDark ? resource.darkRed : resource.lightRed,",
+          "        green: isDark ? resource.darkGreen : resource.lightGreen,",
+          "        blue: isDark ? resource.darkBlue : resource.lightBlue,",
+          "        alpha: isDark ? resource.darkAlpha : resource.lightAlpha",
+          "      )",
+          "    }",
+          "  }",
+          "}",
+          "",
+        ]
+      }
+      if !imageNames.isEmpty {
+        out += [
+          "extension UIImage {",
+          "  convenience init(resource: ImageResource) {",
+          "    #if !os(macOS) && canImport(CrossSwiftUI)",
+          "      _installCrossSwiftUIBootstrap()",
+          "    #endif",
+          "    #if !os(macOS) && canImport(CrossUIKit)",
+          "      if let resolved = Self.resolveAssetPath(named: resource.name, in: resource.bundle),",
+          "         FileManager.default.fileExists(atPath: resolved),",
+          "         UIImage(contentsOfFile: resolved) != nil",
+          "      {",
+          "        self.init(contentsOfFile: resolved)!",
+          "      } else {",
+          "        self.init()",
+          "      }",
+          "    #else",
+          "      self.init(named: resource.name, in: resource.bundle, compatibleWith: nil)!",
+          "    #endif",
+          "  }",
+          "}",
+          "",
+        ]
+      }
+      out.append("#endif")
+      out.append("")
     }
 
     return out.joined(separator: "\n")

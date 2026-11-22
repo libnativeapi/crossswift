@@ -1,4 +1,5 @@
 import CrossAppKit
+import CrossUIKit
 import Foundation
 import NativeAPI
 import Observation
@@ -516,9 +517,11 @@ public func runApp<A: App>(_ app: A) {
     }
 
     NSApplication.shared.finishLaunching()
+    UIApplication.shared._notifyFinishLaunchingFromSwiftUI()
     withExtendedLifetime((coordinator, primary, menuHosts)) {
       _ = application.runWithWindow(primary.window)
     }
+    UIApplication.shared._notifyWillTerminate()
     return
   }
 
@@ -526,9 +529,11 @@ public func runApp<A: App>(_ app: A) {
   if CommandLine.arguments.contains("--smoke") {
     startSmokeTimer()
   }
+  UIApplication.shared._notifyFinishLaunchingFromSwiftUI()
   withExtendedLifetime((coordinator, menuHosts)) {
     NSApplication.shared.run()
   }
+  UIApplication.shared._notifyWillTerminate()
 }
 
 private func startSmokeTimer() {

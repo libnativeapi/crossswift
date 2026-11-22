@@ -1,4 +1,5 @@
 import CrossAppKit
+import CrossUIKit
 import Foundation
 import NativeAPI
 import Observation
@@ -10,10 +11,9 @@ import SwiftUIRuntime
   import CSwiftUIWindows
 #endif
 
-// MARK: - Hosted NSView Bridge Protocols
+// MARK: - Hosted NSView / UIView Bridge Protocols
 
 protocol _HostedViewMount: AnyObject {
-  var nsView: NSView { get }
   func dismantle()
 }
 
@@ -1035,6 +1035,12 @@ internal func installAssetResolversOnce() {
   CrossAppKit.NSImage.symbolLookupHandler = { symbolName in
     VectorImage.hasSymbol(symbolName)
   }
+  CrossUIKit.UIImage.symbolLookupHandler = { symbolName in
+    VectorImage.hasSymbol(symbolName)
+  }
+  CrossUIKit.UIApplication._hostBootstrapHook = {
+    installAssetResolversOnce()
+  }
   #if os(Windows)
     CrossAppKit.NSImage.offscreenRenderer = { size, flipped, ops in
       let scale = 2.0
@@ -1119,6 +1125,7 @@ internal func installAssetResolversOnce() {
       sui_free_bytes(ptr)
       return data
     }
+    CrossUIKit.UIImage.offscreenRenderer = CrossAppKit.NSImage.offscreenRenderer
   #endif
 }
 

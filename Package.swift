@@ -98,6 +98,7 @@ let buildCrossAppKit = buildDesktopNative
 #endif
 if buildCrossAppKit {
   products.append(.library(name: "CrossAppKit", targets: ["CrossAppKit"]))
+  products.append(.library(name: "CrossUIKit", targets: ["CrossUIKit"]))
 }
 
 #if os(Windows)
@@ -155,6 +156,7 @@ if buildDesktopNative {
         "CSwiftUIWindowsTestSupport",
         "CrossSwiftUI",
         "CrossAppKit",
+        "CrossUIKit",
       ]))
 }
 let drawingDependencies: [Target.Dependency] = ["CSwiftUIWindows"]
@@ -246,12 +248,13 @@ if buildDesktopNative {
   let darwinDeps: [Target.Dependency] = ["CoreFoundation", "CDarwinShims"] + winGlueDependencies
   let appServicesDeps: [Target.Dependency] = ["CoreFoundation", "CoreGraphics"] + winGlueDependencies
   let imageIODeps: [Target.Dependency] = ["CoreFoundation", "CoreGraphics"] + winGlueDependencies
-  let qlThumbDeps: [Target.Dependency] = ["CrossAppKit", "CoreGraphics"] + winGlueDependencies
+  let qlThumbDeps: [Target.Dependency] = ["CrossAppKit", "CrossUIKit", "CoreGraphics"] + winGlueDependencies
   let coreGraphicsDeps: [Target.Dependency] = ["CoreFoundation", "Carbon"] + winGlueDependencies
   let crossSwiftUIDeps: [Target.Dependency] = [
     "SwiftUIRuntime",
     .product(name: "NativeAPI", package: "NativeAPI"),
     "CrossAppKit",
+    "CrossUIKit",
   ] + drawingDependencies
 
   let desktopTargets: [Target] = [
@@ -265,7 +268,7 @@ if buildDesktopNative {
     .target(name: "CloudKit", path: "Sources/AppleShims/CloudKit"),
     .target(name: "EventKit", dependencies: ["CoreGraphics"], path: "Sources/AppleShims/EventKit"),
     .target(name: "AVFoundation", dependencies: ["CoreGraphics", "CrossAppKit", "CoreMedia"], path: "Sources/AppleShims/AVFoundation"),
-    .target(name: "AVKit", dependencies: ["CrossAppKit", "AVFoundation"], path: "Sources/AppleShims/AVKit"),
+    .target(name: "AVKit", dependencies: ["CrossAppKit", "CrossUIKit", "AVFoundation"], path: "Sources/AppleShims/AVKit"),
     .target(name: "QuartzCore", dependencies: ["CrossAppKit", "CoreGraphics"], path: "Sources/AppleShims/QuartzCore"),
     .target(name: "CoreAudio", dependencies: ["CoreFoundation"], path: "Sources/AppleShims/CoreAudio"),
     .target(name: "AudioToolbox", path: "Sources/AppleShims/AudioToolbox"),
@@ -299,6 +302,7 @@ if buildDesktopNative {
     .target(name: "Combine"),
     .target(name: "CryptoKit", dependencies: winGlueDependencies),
     .target(name: "AppKit", dependencies: ["CrossAppKit", "CrossFoundation", "CoreFoundation", "CoreGraphics", "CoreText", "UniformTypeIdentifiers", "ApplicationServices"]),
+    .target(name: "UIKit", dependencies: ["CrossUIKit", "CrossFoundation", "CoreFoundation", "CoreGraphics", "CoreText", "UniformTypeIdentifiers", "QuartzCore"]),
     .target(name: "CrossSwiftUI", dependencies: crossSwiftUIDeps),
     .target(
       name: "SwiftUI",
@@ -306,6 +310,7 @@ if buildDesktopNative {
         "SwiftUIRuntime",
         "CrossSwiftUI",
         "CrossAppKit",
+        "CrossUIKit",
         "CrossFoundation",
         "CoreGraphics",
         "Combine",
@@ -361,6 +366,7 @@ if buildDesktopNative {
     .library(name: "NaturalLanguage", targets: ["NaturalLanguage"]),
     .library(name: "Translation", targets: ["Translation"]),
     .library(name: "AppKit", targets: ["AppKit"]),
+    .library(name: "UIKit", targets: ["UIKit"]),
     .library(name: "Carbon", targets: ["Carbon"]),
     .library(name: "CoreGraphics", targets: ["CoreGraphics"]),
     .library(name: "UniformTypeIdentifiers", targets: ["UniformTypeIdentifiers"]),
@@ -382,9 +388,17 @@ if buildCrossAppKit {
       name: "CrossAppKit",
       dependencies: crossAppKitDependencies
     ),
+    .target(
+      name: "CrossUIKit",
+      dependencies: ["CrossAppKit"] + crossAppKitDependencies
+    ),
     .testTarget(
       name: "CrossAppKitTests",
       dependencies: ["CrossAppKit"]
+    ),
+    .testTarget(
+      name: "CrossUIKitTests",
+      dependencies: ["CrossUIKit"]
     ),
   ]
 }

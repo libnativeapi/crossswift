@@ -38,6 +38,7 @@ public final class LinuxDrawingBackend: RenderBackend {
   private var pendingPointer: (event: Int, point: CGPoint, modifiers: EventModifiers)?
   private var controls: [NodeID: Editor] = [:]
   private var buttons: [NodeID: Activation] = [:]
+  private var hostedViews: [NodeID: (mount: any _HostedViewMount, nativeView: NativeAPI.View?)] = [:]
   private var controlBranches: Set<NodeID> = []
   private var modal: NodeID?
   private var signals: [gulong] = []
@@ -159,6 +160,11 @@ public final class LinuxDrawingBackend: RenderBackend {
        g_signal_handler_is_connected(top, windowScrollSignal) != 0 {
       g_signal_handler_disconnect(top, windowScrollSignal)
     }
+    for (_, entry) in hostedViews {
+      if let nv = entry.nativeView { hostView.removeSubview(nv) }
+      entry.mount.dismantle()
+    }
+    hostedViews.removeAll()
     controls.removeAll()
     buttons.removeAll()
     hostView.dispose()
@@ -392,17 +398,26 @@ public final class LinuxDrawingBackend: RenderBackend {
     defer { applying = false }
     var live = Set<NodeID>()
     var liveButtons = Set<NodeID>()
+    var liveHosted = Set<NodeID>()
     var focus: NodeID?
     let defaultBg: SwiftUIRuntime.Color =
       appliedDarkMode == true ? SwiftUIRuntime.Color(red: 0.11, green: 0.11, blue: 0.13) : .white
     updateControls(root, clip: root.frame, background: defaultBg, allowed: true, focus: &focus, modal: modal,
                    inModal: false, accessibilityLabel: "", refreshContent: damage == nil,
-                   live: &live, liveButtons: &liveButtons)
+                   live: &live, liveButtons: &liveButtons, liveHosted: &liveHosted)
     if !controls.isEmpty {
       for id in controls.keys.filter({ !live.contains($0) }) { controls.removeValue(forKey: id) }
     }
     if !buttons.isEmpty {
       for id in buttons.keys.filter({ !liveButtons.contains($0) }) { buttons.removeValue(forKey: id) }
+    }
+    if !hostedViews.isEmpty {
+      for id in hostedViews.keys.filter({ !liveHosted.contains($0) }) {
+        if let entry = hostedViews.removeValue(forKey: id) {
+          if let nv = entry.nativeView { hostView.removeSubview(nv) }
+          entry.mount.dismantle()
+        }
+      }
     }
     if let focus {
       if let edit = controls[focus] {
@@ -546,7 +561,7 @@ public final class LinuxDrawingBackend: RenderBackend {
         modal = node.id
       }
       var hasControls = node.kind == .textField || node.kind == .button || node.kind == .styledButton
-        || node.props.focusable
+        || node.kind == .hostedView || node.props.focusable
       let count = node.children.count
       if count > 0 {
         for i in stride(from: count - 1, through: 0, by: -1) {
@@ -635,7 +650,8 @@ public final class LinuxDrawingBackend: RenderBackend {
   private func updateControls(_ node: Element, clip: Rect, background: SwiftUIRuntime.Color,
                               allowed: Bool, focus: inout NodeID?, modal: NodeID?, inModal: Bool,
                               accessibilityLabel: String, refreshContent: Bool,
-                              live: inout Set<NodeID>, liveButtons: inout Set<NodeID>) {
+                              live: inout Set<NodeID>, liveButtons: inout Set<NodeID>,
+                              liveHosted: inout Set<NodeID>) {
     guard controlBranches.contains(node.id) else { return }
     let props = node.props
     let inModal = inModal || node.id == modal
@@ -679,11 +695,33 @@ public final class LinuxDrawingBackend: RenderBackend {
         if props.focusRequested && active { focus = node.id }
       }
     }
+    if node.kind == .hostedView, shown || hostedViews[node.id] != nil,
+       let adapter = node.hostedViewAdapter as? any _HostedViewBackendBridge
+    {
+      liveHosted.insert(node.id)
+      let r = node.frame
+      let cgRect = CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height)
+      if let existing = hostedViews[node.id] {
+        adapter.updateMount(existing.mount, frame: cgRect)
+        if let nv = existing.nativeView {
+          nv.setFrame(NativeAPI.Rectangle(x: r.minX, y: r.minY, width: max(0, r.width), height: max(0, r.height)))
+          nv.setVisible(shown)
+        }
+      } else {
+        let created = adapter.createMount(frame: cgRect)
+        if let nv = created.nativeView {
+          hostView.addSubview(nv)
+          nv.setFrame(NativeAPI.Rectangle(x: r.minX, y: r.minY, width: max(0, r.width), height: max(0, r.height)))
+          nv.setVisible(shown)
+        }
+        hostedViews[node.id] = (created.mount, created.nativeView)
+      }
+    }
     LinuxDrawing.forEachOrderedChild(node) { child in
       updateControls(child, clip: clip, background: background, allowed: allowed,
                      focus: &focus, modal: modal, inModal: inModal,
                      accessibilityLabel: accessibilityLabel, refreshContent: refreshContent,
-                     live: &live, liveButtons: &liveButtons)
+                     live: &live, liveButtons: &liveButtons, liveHosted: &liveHosted)
       if props.focusRequested && active && focus == nil {
         focus = firstFocusable(child)
       }

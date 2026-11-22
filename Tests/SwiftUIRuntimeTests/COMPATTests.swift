@@ -88,11 +88,17 @@ final class COMPATTests: XCTestCase {
       guard !identifier.isEmpty, !identifier.contains(" ") else { continue }
 
       // The facade's name is the target name, not an identifier in a file.
-      if identifier == "SwiftUI" {
-        let facade = repositoryRoot.appendingPathComponent("Sources/SwiftUI/SwiftUI.swift")
+      let moduleFacades: [String: String] = [
+        "SwiftUI": "Sources/SwiftUI/SwiftUI.swift",
+        "AppKit": "Sources/AppKit/AppKit.swift",
+        "UIKit": "Sources/UIKit/UIKit.swift",
+        "QuartzCore": "Sources/AppleShims/QuartzCore/QuartzCore.swift",
+      ]
+      if let relPath = moduleFacades[identifier] {
+        let facade = repositoryRoot.appendingPathComponent(relPath)
         XCTAssertTrue(
           FileManager.default.fileExists(atPath: facade.path),
-          "docs/COMPAT.md:\(row.line): \(row.symbol) is marked \(row.status) but Sources/SwiftUI is missing"
+          "docs/COMPAT.md:\(row.line): \(row.symbol) is marked \(row.status) but \(relPath) is missing"
         )
         continue
       }

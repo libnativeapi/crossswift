@@ -5,13 +5,14 @@
 English | [简体中文](./README-ZH.md)
 
 CrossSwift (`crossswift`) is an independent Apple-framework compatibility layer
-and `xcodebuild`-compatible build toolchain that compiles SwiftUI and AppKit
-applications — including unmodified macOS/iOS `.xcodeproj` projects — for
+and `xcodebuild`-compatible build toolchain that compiles SwiftUI, AppKit, and
+UIKit applications — including unmodified macOS/iOS `.xcodeproj` projects — for
 **Windows, Linux, WebAssembly, HarmonyOS, and Android**, while letting Apple
 platform builds compile natively against Apple's SDKs.
 
-- **Windows & Linux desktop**: `CrossSwiftUI` and `CrossAppKit` render views and
-  host windows, menus, status items, and native text controls over
+- **Windows & Linux desktop**: `CrossSwiftUI`, `CrossAppKit`, and `CrossUIKit`
+  render views and host windows, scenes, menus, status items, Auto Layout view
+  hierarchies, and native text controls over
   [nativeapi](https://github.com/libnativeapi/nativeapi), backed by
   `CrossFoundation` and Apple framework shims.
 - **WebAssembly**: `SwiftUIWeb` mounts apps in the browser DOM using
@@ -71,13 +72,14 @@ responsibilities are split cleanly across distinct modules:
 | Module | Role |
 | --- | --- |
 | `SwiftUIRuntime` + `SwiftUIRuntimeMacros` | Platform-independent SwiftUI engine: `View`, `@ViewBuilder`, element tree, layout (with `Spacer.minLength`, `.layoutPriority`, layout-preserving `.hidden()`, and `Lazy*` virtualization), sibling diff, `@State` / `@AppStorage` / `@SceneStorage` / `@Binding` / `@Environment` / `@FocusState` / `@FocusedValue`, `@Observable` (`@Bindable`) and `ObservableObject`, `@Entry` & `#Preview` macros, controls (`DisclosureGroup`, `Gauge`, `DatePicker`, `ColorPicker`, `AsyncImage`, `Table`, `ShareLink`, `.fileImporter`/`.fileExporter`), navigation (`NavigationPath`), presentations, SVG/PDF vectors, SF Symbols, `.xcstrings` localization, rich `Canvas`, linear/radial/angular gradients, timed `LongPressGesture`, and color/transition/layout animations. Has no `NativeAPI` dependency, so `SwiftUIRuntimeTests` runs on macOS, Windows, and Linux. |
-| `CrossSwiftUI` (+ `CSwiftUIWindows`) | Desktop `NativeAPI` SwiftUI backend for **Windows** (DirectWrite text, retained GDI+ display list, offscreen layers & blur/brightness/contrast filters, native buttons, transparent matte-composited `EDIT` controls) and **Linux** (GTK 3 drawing area with Cairo/Pango, offscreen filters, and native GTK/ATK controls), multi-scene `App` / `WindowGroup` / `Window` / `Settings` / `Scene.commands` / `MenuBarExtra` (`.menu` & `.window`) runner, and AppKit hosting (`NSHostingView`, `NSHostingController`, `NSViewRepresentable`, `NSApplicationDelegateAdaptor`). |
+| `CrossSwiftUI` (+ `CSwiftUIWindows`) | Desktop `NativeAPI` SwiftUI backend for **Windows** (DirectWrite text, retained GDI+ display list, offscreen layers & blur/brightness/contrast filters, native buttons, transparent matte-composited `EDIT` controls) and **Linux** (GTK 3 drawing area with Cairo/Pango, offscreen filters, and native GTK/ATK controls), multi-scene `App` / `WindowGroup` / `Window` / `Settings` / `Scene.commands` / `MenuBarExtra` (`.menu` & `.window`) runner, and AppKit/UIKit hosting (`NSHostingView`, `NSHostingController`, `NSViewRepresentable`, `NSApplicationDelegateAdaptor`, `_UIHostingView`, `UIHostingController`, `UIHostingConfiguration`, `UIViewRepresentable`, `UIViewControllerRepresentable`, `UIApplicationDelegateAdaptor`). |
 | `SwiftUIWeb` | WebAssembly (`os(WASI)`) DOM/SVG/CSS renderer (dark-mode sync, `openURL`, `scrollTo`, filters, gradients, multi-layer vectors), `WindowGroup` browser runner, and web `.xcassets` / `.xcstrings` / SF Symbol loader. |
 | `SwiftUIAndroid` (+ `CSwiftUIAndroid`) | Android thread-safe JNI async bridge (`AndroidHost`), `Choreographer` animation loop, dark-mode & `openURL` sync, and Jetpack Compose host (`SwiftUIComposeHost`), with dual Material 3 and iOS Liquid Glass renderers. |
 | `SwiftUIHarmony` | Formal HarmonyOS runtime backend (`HarmonyBackend`) and ArkTS Stage-model host (`CrossSwiftUIHost.ets`) with async render push, 60 Hz animation ticks, dark-mode sync, and dual HarmonyOS / iOS Liquid Glass styling. |
-| `SwiftUI` | User-facing `import SwiftUI` facade on non-Apple targets, re-exporting `SwiftUIRuntime` together with the active platform backend (`CrossSwiftUI` + `CrossAppKit` + `CrossFoundation` + `CoreGraphics` on Windows/Linux, `SwiftUIWeb` on WASI, `SwiftUIAndroid` on Android, or `SwiftUIHarmony` on HarmonyOS). |
+| `SwiftUI` | User-facing `import SwiftUI` facade on non-Apple targets, re-exporting `SwiftUIRuntime` together with the active platform backend (`CrossSwiftUI` + `CrossAppKit` + `CrossUIKit` + `CrossFoundation` + `CoreGraphics` on Windows/Linux, `SwiftUIWeb` on WASI, `SwiftUIAndroid` on Android, or `SwiftUIHarmony` on HarmonyOS). |
 | `CrossAppKit` + `AppKit` (+ `CAppKitWindows`) | Cross-platform AppKit implementation (`NSApplication`, `NSWindow`, `NSPanel`, `NSView`, controls, TextKit 1/2, `NSMenu`, `NSStatusItem`, `NSPasteboard`, `NSWorkspace`, `NSColor`, `NSAppearance`, `NSFont`, `NSImage`, `NSBezierPath`, Carbon hotkey bridge). Re-exported as `import AppKit` on Windows and Linux; `CrossAppKit` also builds standalone on macOS for `CrossAppKitTests`. |
-| `CrossFoundation` & Apple shims | Apple `Foundation` extensions missing from `swift-corelibs-foundation`, standalone framework shims (`CoreGraphics`, `Combine`, `CryptoKit`, `Carbon`, `UniformTypeIdentifiers`, `OSLog`, `os`, `SQLite3`), and 34 system/framework shims under `Sources/AppleShims/` (`CoreFoundation`, `Darwin`, `ApplicationServices`, `ServiceManagement`, `Security`, `CoreText`, `ImageIO`, `JavaScriptCore`, `IOKit`, `Network`, `AVFoundation`, `PDFKit`, etc.). |
+| `CrossUIKit` + `UIKit` | Cross-platform UIKit implementation (`UIApplication`, `UIApplicationDelegate`, `UIWindowScene`, `UIWindow`, `UIResponder`, `UIView` + Auto Layout anchor solver & `UIStackView`, `UIControl` + `UIAction` + `UIMenu`, `UILabel` / `UIButton` / `UITextField` / `UITextView` / `UIScrollView`, `UITableView` & `UICollectionView` + diffable data sources, `UIViewController` / `UINavigationController` / `UITabBarController` / `UIAlertController`, `UITraitCollection`, dynamic `UIColor`, `UIFont` & `UIFontMetrics`, `UIImage` + `UIGraphicsImageRenderer` + `UIBezierPath`, `UIPasteboard`, `UIScreen`, `UIDevice`, gesture recognizers, and haptic feedback shims). Re-exported as `import UIKit` on Windows and Linux; `CrossUIKit` also builds standalone on macOS for `CrossUIKitTests`. |
+| `CrossFoundation` & Apple shims | Apple `Foundation` extensions missing from `swift-corelibs-foundation`, standalone framework shims (`CoreGraphics`, `Combine`, `CryptoKit`, `Carbon`, `UniformTypeIdentifiers`, `OSLog`, `os`, `SQLite3`), and 35 system/framework shims under `Sources/AppleShims/` (`QuartzCore`, `CoreFoundation`, `Darwin`, `ApplicationServices`, `ServiceManagement`, `Security`, `CoreText`, `ImageIO`, `JavaScriptCore`, `IOKit`, `Network`, `AVFoundation`, `AVKit`, `PDFKit`, etc.). |
 | `CrossXcodeBuild` + `CrossXcodeBuildCLI` | Pure-Swift `.xcodeproj` / `.xcworkspace` parser, Apple-framework & SwiftPM dependency adapter, `.xcassets` / `.xcstrings` / icon compiler, and the cross-platform `xcodebuild` executable targeting Windows, Linux, WebAssembly, HarmonyOS, and Android. |
 
 ## What this is
@@ -282,20 +284,26 @@ When invoked, `CrossXcodeBuild`:
 [`Examples/XcodeDemo`](Examples/XcodeDemo/XcodeDemo.xcodeproj) is an unmodified
 macOS Xcode project that builds with Apple's `xcodebuild` on macOS and with
 CrossSwift's `xcodebuild` for Windows, Linux, WebAssembly, HarmonyOS, and
-Android.
+Android. [`Examples/UIKitDemo`](Examples/UIKitDemo/UIKitDemo.xcodeproj) is an
+unmodified iOS UIKit + SwiftUI `.xcodeproj` (`@main` `UIApplicationDelegate` +
+`UIWindowSceneDelegate` + `UIHostingController` + `UIViewRepresentable` +
+`UIViewControllerRepresentable` + Auto Layout) that builds for Windows and Linux
+desktop via `xcodebuild`.
 
 ## Repository layout
 
 ```text
 Sources/SwiftUIRuntime/       platform-independent SwiftUI engine (views, layout, diff, state)
 Sources/SwiftUIRuntimeMacros/ compiler-plugin macros (@Entry, #Preview; no swift-syntax dep)
-Sources/CrossSwiftUI/         desktop NativeAPI backends (Windows/Linux), runner, AppKit hosting
+Sources/CrossSwiftUI/         desktop NativeAPI backends (Windows/Linux), runner, AppKit/UIKit hosting
 Sources/CSwiftUIWindows/      Win32/GDI+ retained display list, text & control compositing bridge
 Sources/CrossAppKit/          cross-platform AppKit views, windows, menus, TextKit & pasteboard
 Sources/AppKit/               `import AppKit` facade for Windows and Linux
-Sources/CAppKitWindows/       Win32/DWM/Shell/COM/Accessibility C++ glue for CrossAppKit & shims
+Sources/CrossUIKit/           cross-platform UIKit scenes, windows, views, Auto Layout & controls
+Sources/UIKit/                `import UIKit` facade for Windows and Linux
+Sources/CAppKitWindows/       Win32/DWM/Shell/COM/Accessibility C++ glue for CrossAppKit/UIKit & shims
 Sources/CrossFoundation/      Apple Foundation extensions on Windows and Linux
-Sources/AppleShims/           34 Apple system/framework compatibility modules (CoreText, IOKit, …)
+Sources/AppleShims/           35 Apple system/framework compatibility modules (QuartzCore, CoreText, …)
 Sources/{CoreGraphics,Combine,CryptoKit,Carbon,UniformTypeIdentifiers,OSLog,os,SQLite3}/
                               standalone Apple framework shims
 Sources/SwiftUIWeb/           WebAssembly DOM renderer and browser app runner
@@ -306,6 +314,7 @@ Sources/CrossXcodeBuild/      pure-Swift .xcodeproj parser, package adapter, ass
 Sources/CrossXcodeBuildCLI/   cross-platform `xcodebuild` executable
 Examples/Counter/             minimal SwiftPM counter shared across desktop, Web, and Android
 Examples/XcodeDemo/           unmodified macOS .xcodeproj built for all five non-Apple targets
+Examples/UIKitDemo/           unmodified iOS UIKit + UIHostingController .xcodeproj for Windows & Linux
 Examples/DesktopUIGallery/    desktop SwiftUI component, layout, graphics & navigation gallery
 Examples/MobileUIGallery/     mobile SwiftUI gallery (iOS, Android, HarmonyOS dual-style showcase)
 Examples/{MenuBarDemo,NotesApp,MetricsDashboard,KanbanBoard}/
@@ -315,6 +324,7 @@ Examples/HarmonyRuntimeProbe/ HarmonyOS Stage-model Swift runtime & ArkUI galler
 Web/                          HTML host template for WebAssembly builds
 Tests/SwiftUIRuntimeTests/    headless FakeBackend tests for layout, diff, state & COMPAT.md
 Tests/CrossAppKitTests/       CrossAppKit geometry, appearance, font & asset resolution tests
+Tests/CrossUIKitTests/        CrossUIKit traits, colors, graphics, Auto Layout & controller tests
 Tests/CrossXcodeBuildTests/   .xcodeproj parser, loader, adapter & xcodebuild CLI tests
 Tests/{Windows,Linux}DrawingTests/
                               platform backend drawing, shadow, scroll & editor integration tests

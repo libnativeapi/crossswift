@@ -30,9 +30,13 @@ Apple-framework compatibility shims, and the `.xcodeproj` build toolchain.
   `WindowsDrawingBackend`, `LinuxDrawingBackend`, `NativeViewBackend`, the
   multi-scene `App` / `WindowGroup` / `Window` / `Settings` / `MenuBarExtra`
   (`.menu` and `.window`) / `Scene.commands` runner (`runApp`), native window
-  dark/light chrome synchronization, and `CrossAppKit` hosting (`NSHostingView`,
-  `NSHostingController`, `NSViewRepresentable`, `NSApplicationDelegateAdaptor`,
-  plus `Color`/`Font`/`Image` ↔ `NSColor`/`NSFont`/`NSImage` conversions and
+  dark/light chrome synchronization, and `CrossAppKit` + `CrossUIKit` hosting
+  (`NSHostingView`, `NSHostingController`, `NSViewRepresentable`,
+  `NSApplicationDelegateAdaptor`, `_UIHostingView`, `UIHostingController`,
+  `UIHostingConfiguration`, `UIViewRepresentable`,
+  `UIViewControllerRepresentable`, `UIApplicationDelegateAdaptor`, plus
+  `Color`/`Font`/`Image`/`EdgeInsets` ↔ `NSColor`/`UIColor`, `NSFont`/`UIFont`,
+  `NSImage`/`UIImage`, `UIEdgeInsets`/`NSDirectionalEdgeInsets` conversions and
   `Combine` `Published`/`ObservableObjectPublisher` bridging).
 - `CSwiftUIWindows`: generic Win32/DirectWrite/GDI+ retained display list,
   buffered `WM_PAINT` DIB compositor, DirectWrite text measurement and rendering
@@ -49,13 +53,27 @@ Apple-framework compatibility shims, and the `.xcodeproj` build toolchain.
   `NativeAPI` (with Win32/DWM/Shell/COM/Credential Manager/Accessibility glue
   in `CAppKitWindows` on Windows). `CrossAppKit` compiles standalone on macOS
   for unit tests; `AppKit` is the `import AppKit` facade on Windows and Linux.
+- `CrossUIKit` + `UIKit`: cross-platform UIKit application & scene lifecycle
+  (`UIApplication`, `UIApplicationDelegate.main()`, `UIWindowScene`, `UIWindow`),
+  top-left coordinate `UIView` hierarchy with iterative Auto Layout anchor
+  solving and `UIStackView`, `UIControl` + `UIAction` + `UIMenu`, native-backed
+  controls (`UILabel`, `UIButton`, `UITextField`, `UITextView`, `UIScrollView`),
+  `UITableView` & `UICollectionView` with diffable data sources, view controller
+  containers (`UIViewController`, `UINavigationController`,
+  `UITabBarController`, `UIAlertController`), `UITraitCollection`, dynamic
+  `UIColor`, `UIFont` & `UIFontMetrics`, `UIImage` + `UIGraphicsImageRenderer` +
+  `UIBezierPath` sharing `CrossAppKit`'s offscreen drawing pipeline,
+  `UIPasteboard`, `UIScreen`, and `UIDevice`. `CrossUIKit` compiles standalone
+  on macOS for unit tests; `UIKit` is the `import UIKit` facade on Windows and
+  Linux.
 - `CrossFoundation` + framework shims: Apple `Foundation` extensions missing
   from `swift-corelibs-foundation` on Windows/Linux, standalone framework
   targets (`CoreGraphics`, full `Combine` publishers/operators/schedulers,
   `CryptoKit`, `Carbon`, `UniformTypeIdentifiers`, `OSLog`, `os`, `SQLite3`),
-  and 34 system/framework shims under `Sources/AppleShims/` (including real
-  `Security` Keychain persistence via Win32 Credential Manager / Linux 0600 XDG
-  keystore and `ServiceManagement` login items on Windows and Linux XDG).
+  and 35 system/framework shims under `Sources/AppleShims/` (including
+  `QuartzCore`, real `Security` Keychain persistence via Win32 Credential Manager /
+  Linux 0600 XDG keystore, and `ServiceManagement` login items on Windows and
+  Linux XDG).
 - `SwiftUIWeb`: WebAssembly (`os(WASI)`) `WindowGroup` hosting, DOM/SVG/CSS
   renderer (including live dark-mode sync, `openURL`, `scrollTo` DOM sync, CSS
   filters, conic/radial/linear gradients, and multi-layer SVG/PDF vectors), and
@@ -71,7 +89,7 @@ Apple-framework compatibility shims, and the `.xcodeproj` build toolchain.
   HarmonyOS Native / iOS Liquid Glass dual-style rendering.
 - `SwiftUI`: user-facing `import SwiftUI` facade on non-Apple targets,
   re-exporting `Foundation` and `SwiftUIRuntime` together with `CrossSwiftUI`
-  (+ `CrossAppKit`, `CrossFoundation`, `CoreGraphics`) on Windows/Linux,
+  (+ `CrossAppKit`, `CrossUIKit`, `CrossFoundation`, `CoreGraphics`) on Windows/Linux,
   `SwiftUIWeb` on WASI, `SwiftUIAndroid` on Android, or `SwiftUIHarmony` under
   `CROSS_SWIFTUI_HARMONY` for HarmonyOS.
 - `CrossXcodeBuild` + `CrossXcodeBuildCLI`: pure-Swift `.xcodeproj` /

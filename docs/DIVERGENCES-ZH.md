@@ -12,7 +12,9 @@
 
 在 Linux 上，`CrossSwiftUI`（`LinuxDrawingBackend`）在 GTK 3 绘图区内使用 Cairo 与 Pango 绘制界面（含 `NSHostingView` 离屏 Pango 测量与实时外观同步）：由 GTK 单行输入框与多行文本视图提供原生文本编辑、多行占位符叠加层及键盘焦点，由 GTK 按钮提供原生激活与 AT-SPI 名称、描述及角色。Windows 与 Linux 窗口标题栏边框均会跟随深色/浅色外观同步切换。
 
-在 macOS 上，应用程序直接针对 Apple 原生 `SwiftUI` 与 `AppKit` SDK 编译；`SwiftUIRuntime`、`CrossAppKit` 与 `CrossXcodeBuild` 在 macOS 上编译用于运行单元测试及执行跨平台 `.xcodeproj` 构建。
+在 macOS 上，应用程序直接针对 Apple 原生 `SwiftUI` 与 `AppKit` SDK 编译；`SwiftUIRuntime`、`CrossAppKit`、`CrossUIKit` 与 `CrossXcodeBuild` 在 macOS 上编译用于运行单元测试及执行跨平台 `.xcodeproj` 构建。
+
+在 Windows 与 Linux 上，`CrossUIKit`（`import UIKit`）将 `UIWindowScene` 与 `UIWindow` 映射为桌面端 `NativeAPI.Window`，针对代码声明的 `NSLayoutConstraint` 与 `UIStackView` 运行迭代式锚点求解器，使用原生控件承载 `UILabel`、`UIButton`、`UITextField` 与 `UITextView`，并复用 `CrossAppKit` 的离屏绘制管线实现 `UIGraphicsImageRenderer`。Storyboard / XIB（`.storyboard` / `.xib`）反序列化、Core Animation GPU 图层树合成、多点触控物理模拟及 UIKit Dynamics 尚未实现。
 
 ## 浏览器与移动端宿主
 

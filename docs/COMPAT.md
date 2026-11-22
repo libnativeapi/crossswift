@@ -153,7 +153,7 @@ applications compile against Apple's native SDKs, while `SwiftUIRuntime`,
 | `.border` | supported | shape overlay |
 | `.cornerRadius` | partial | circular clipping geometry |
 
-## Additional portable & AppKit hosting APIs
+## Additional portable, AppKit & UIKit hosting APIs
 
 | symbol | status | note |
 |---|---|---|
@@ -175,6 +175,17 @@ applications compile against Apple's native SDKs, while `SwiftUIRuntime`,
 | `NSHostingView`, `NSHostingController` | partial | embeds a `SwiftUIRuntime` `Renderer` inside `CrossAppKit` windows, panels, and split views (`CrossSwiftUI`) |
 | `NSViewRepresentable` | partial | mounts and updates `CrossAppKit.NSView` instances inside SwiftUI layouts (`CrossSwiftUI`) |
 | `NSApplicationDelegateAdaptor` | supported | installs a `CrossAppKit.NSApplicationDelegate` from `App` on Windows and Linux (`CrossSwiftUI`) |
+| `UIKit` | partial | cross-platform UIKit facade on Windows and Linux (`CrossUIKit` + `UIKit`) |
+| `QuartzCore` | partial | `CALayer`, `CAShapeLayer`, `CAGradientLayer`, `CATextLayer`, `CAAnimation`, `CATransaction`, `CADisplayLink` shim |
+| `UIHostingController`, `_UIHostingView`, `UIHostingConfiguration` | partial | embeds a `SwiftUIRuntime` `Renderer` inside `CrossUIKit` windows, views, and cell content configurations (`CrossSwiftUI`) |
+| `UIViewRepresentable`, `UIViewControllerRepresentable` | partial | mounts and updates `CrossUIKit.UIView` and `UIViewController` subtrees inside SwiftUI layouts (`CrossSwiftUI`) |
+| `UIApplicationDelegateAdaptor` | supported | installs a `CrossUIKit.UIApplicationDelegate` from `App` on Windows and Linux (`CrossSwiftUI`) |
+| `UIApplication`, `UIWindowScene`, `UIWindow` | partial | `@main` `UIApplicationDelegate`, scene session connection, `NativeAPI.Window` hosting, and `--smoke` support |
+| `UIView`, `UIStackView`, `NSLayoutConstraint` | partial | top-left coordinate hierarchy, `autoresizingMask`, `UIStackView`, and iterative Auto Layout anchor solver |
+| `UIViewController`, `UINavigationController`, `UITabBarController`, `UIAlertController` | partial | lifecycle hooks, navigation/tab stacks, diffable `UITableView`/`UICollectionView` data sources, and native modal alerts |
+| `UITraitCollection`, `UIColor`, `UIFont`, `UIFontMetrics` | supported | dynamic light/dark trait providers, `.xcassets` `.colorset` lookup, iOS semantic palette, and Dynamic Type scaling |
+| `UIImage`, `UIGraphicsImageRenderer`, `UIBezierPath` | partial | SF Symbols, `.imageset` lookup, tinting, and offscreen vector/text PNG rendering |
+| `UIPasteboard`, `UIScreen`, `UIDevice` | partial | host clipboard read/write, `NativeAPI.DisplayManager` screen metrics, and system telemetry |
 
 ## Not implemented
 

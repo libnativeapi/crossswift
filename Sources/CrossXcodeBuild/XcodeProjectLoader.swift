@@ -29,6 +29,8 @@ public final class XcodeProjectLoader {
   private static let orderedCrossSwiftModules: [String] = [
     "SwiftUI",
     "AppKit",
+    "UIKit",
+    "QuartzCore",
     "CrossFoundation",
     "CoreFoundation",
     "Darwin",
@@ -328,7 +330,7 @@ public final class XcodeProjectLoader {
     }
     if !inferredModules.contains("SwiftUI") {
       // Ensure SwiftUI/CrossSwiftUI runtime bootstrap is linked when CrossSwift modules are used.
-      if inferredModules.contains("AppKit") || inferredModules.contains("CrossSwiftUI") {
+      if inferredModules.contains("AppKit") || inferredModules.contains("UIKit") || inferredModules.contains("CrossSwiftUI") {
         inferredModules.insert("SwiftUI", at: 0)
       }
     }

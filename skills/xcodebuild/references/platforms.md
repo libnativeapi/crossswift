@@ -93,15 +93,16 @@ these Apple `xcodebuild` flags without error:
 
 - **Imported Apple frameworks** automatically mapped to products of the
   `crossswift` (`Package(name: "CrossSwiftUI")`) SwiftPM package on desktop
-  platforms: `SwiftUI`, `AppKit`, `CrossFoundation`, `CoreFoundation`,
-  `Darwin`, `ApplicationServices`, `ServiceManagement`, `Security`, `CloudKit`,
-  `EventKit`, `AVFoundation`, `AVKit`, `CoreAudio`, `AudioToolbox`, `CoreMedia`,
-  `CoreServices`, `CoreText`, `ImageIO`, `ColorSync`, `PDFKit`, `QuickLookUI`,
-  `QuickLookThumbnailing`, `Network`, `SystemConfiguration`,
-  `AuthenticationServices`, `JavaScriptCore`, `IOKit`, `Compression`, `System`,
-  `AppleArchive`, `Accelerate`, `notify`, `CommonCrypto`, `FoundationModels`,
-  `NaturalLanguage`, `Translation`, `Combine`, `CoreGraphics`, `Carbon`,
-  `CryptoKit`, `OSLog`, `os`, `UniformTypeIdentifiers`, `SQLite3`.
+  platforms: `SwiftUI`, `AppKit`, `UIKit`, `QuartzCore`, `CrossFoundation`,
+  `CoreFoundation`, `Darwin`, `ApplicationServices`, `ServiceManagement`,
+  `Security`, `CloudKit`, `EventKit`, `AVFoundation`, `AVKit`, `CoreAudio`,
+  `AudioToolbox`, `CoreMedia`, `CoreServices`, `CoreText`, `ImageIO`,
+  `ColorSync`, `PDFKit`, `QuickLookUI`, `QuickLookThumbnailing`, `Network`,
+  `SystemConfiguration`, `AuthenticationServices`, `JavaScriptCore`, `IOKit`,
+  `Compression`, `System`, `AppleArchive`, `Accelerate`, `notify`,
+  `CommonCrypto`, `FoundationModels`, `NaturalLanguage`, `Translation`,
+  `Combine`, `CoreGraphics`, `Carbon`, `CryptoKit`, `OSLog`, `os`,
+  `UniformTypeIdentifiers`, `SQLite3`.
   (On Wasm and Android, only `SwiftUI` and `SwiftUIRuntime` are linked from
   the package.)
 - **Darwin-only packages**: Local Darwin-only packages and conditionally

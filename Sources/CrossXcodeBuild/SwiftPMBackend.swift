@@ -826,6 +826,18 @@ public final class SwiftPMBackend {
       )
     }
 
+    // 6. Rewrite legacy `@UIApplicationMain` / `@NSApplicationMain` attributes to `@main`.
+    if let appMainRegex = try? NSRegularExpression(
+      pattern: #"(?<![A-Za-z0-9_])@(?:UI|NS)ApplicationMain(?![A-Za-z0-9_])"#
+    ) {
+      let ns = result as NSString
+      result = appMainRegex.stringByReplacingMatches(
+        in: result,
+        range: NSRange(location: 0, length: ns.length),
+        withTemplate: "@main"
+      )
+    }
+
     return result
   }
 

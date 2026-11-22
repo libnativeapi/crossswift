@@ -1,0 +1,102 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "uikit.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "UIKit Compatibility Workbench"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "UIKit 兼容层工作台"
+          }
+        }
+      }
+    },
+    "uikit.subtitle" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "UIApplicationDelegate · UIWindowScene · UIHostingController · UIViewRepresentable · Auto Layout"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "UIApplicationDelegate · UIWindowScene · UIHostingController · UIViewRepresentable · Auto Layout"
+          }
+        }
+      }
+    },
+    "uikit.tab.hosting" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Representables & Auto Layout"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "视图桥接与自动布局"
+          }
+        }
+      }
+    },
+    "uikit.tab.traits" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Traits, Colors & Fonts"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "特征、色彩与字体"
+          }
+        }
+      }
+    },
+    "uikit.tab.graphics" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Graphics & Symbols"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "离屏绘图与符号"
+          }
+        }
+      }
+    },
+    "uikit.tab.services" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pasteboard & Device"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "剪贴板与设备服务"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}
