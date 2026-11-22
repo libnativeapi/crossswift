@@ -7,6 +7,15 @@ import Foundation
   import CAppKitWindows
 #endif
 
+public struct CACornerMask: OptionSet, Hashable, Sendable {
+  public let rawValue: UInt
+  public init(rawValue: UInt) { self.rawValue = rawValue }
+  public static let layerMinXMinYCorner = CACornerMask(rawValue: 1 << 0)
+  public static let layerMaxXMinYCorner = CACornerMask(rawValue: 1 << 1)
+  public static let layerMinXMaxYCorner = CACornerMask(rawValue: 1 << 2)
+  public static let layerMaxXMaxYCorner = CACornerMask(rawValue: 1 << 3)
+}
+
 public struct CALayerCornerCurve: RawRepresentable, Equatable, Hashable, Sendable {
   public let rawValue: String
   public init(rawValue: String) { self.rawValue = rawValue }
@@ -14,19 +23,258 @@ public struct CALayerCornerCurve: RawRepresentable, Equatable, Hashable, Sendabl
   public static let continuous = CALayerCornerCurve(rawValue: "continuous")
 }
 
+open class CAAnimation: NSObject, NSCopying {
+  public var duration: TimeInterval = 0.25
+  public var beginTime: TimeInterval = 0
+  public var speed: Float = 1.0
+  public var timeOffset: TimeInterval = 0
+  public var repeatCount: Float = 0
+  public var autoreverses: Bool = false
+  public var isRemovedOnCompletion: Bool = true
+  public var timingFunction: CAMediaTimingFunction?
+  public override init() { super.init() }
+  open func copy(with zone: NSZone? = nil) -> Any {
+    let c = CAAnimation()
+    c.duration = duration
+    c.beginTime = beginTime
+    c.speed = speed
+    c.timeOffset = timeOffset
+    c.repeatCount = repeatCount
+    c.autoreverses = autoreverses
+    c.isRemovedOnCompletion = isRemovedOnCompletion
+    c.timingFunction = timingFunction
+    return c
+  }
+}
+
+open class CABasicAnimation: CAAnimation {
+  public var keyPath: String?
+  public var fromValue: Any?
+  public var toValue: Any?
+  public var byValue: Any?
+  public convenience init(keyPath path: String?) {
+    self.init()
+    self.keyPath = path
+  }
+}
+
+open class CASpringAnimation: CABasicAnimation {
+  public var mass: CGFloat = 1.0
+  public var stiffness: CGFloat = 100.0
+  public var damping: CGFloat = 10.0
+  public var initialVelocity: CGFloat = 0.0
+  public var settlingDuration: TimeInterval { max(0.25, duration) }
+}
+
+open class CATransaction: NSObject {
+  nonisolated(unsafe) private static var disableActionsStack: [Bool] = []
+  nonisolated(unsafe) private static var completionStack: [(() -> Void)?] = []
+  nonisolated(unsafe) private static var animationDurationValue: TimeInterval = 0.25
+
+  public static func begin() {
+    disableActionsStack.append(false)
+    completionStack.append(nil)
+  }
+
+  public static func commit() {
+    _ = disableActionsStack.popLast()
+    if let completion = completionStack.popLast() ?? nil {
+      completion()
+    }
+  }
+
+  public static func flush() {}
+
+  public static func disableActions() -> Bool {
+    disableActionsStack.last ?? false
+  }
+
+  public static func setDisableActions(_ flag: Bool) {
+    if disableActionsStack.isEmpty {
+      disableActionsStack.append(flag)
+    } else {
+      disableActionsStack[disableActionsStack.count - 1] = flag
+    }
+  }
+
+  public static func animationDuration() -> TimeInterval { animationDurationValue }
+  public static func setAnimationDuration(_ dur: TimeInterval) { animationDurationValue = dur }
+
+  public static func completionBlock() -> (() -> Void)? {
+    completionStack.last ?? nil
+  }
+
+  public static func setCompletionBlock(_ block: (() -> Void)?) {
+    if completionStack.isEmpty {
+      completionStack.append(block)
+    } else {
+      completionStack[completionStack.count - 1] = block
+    }
+  }
+}
+
+open class CADisplayLink: NSObject {
+  public weak var target: AnyObject?
+  public let selector: Selector
+  public var isPaused: Bool = false
+  public var preferredFramesPerSecond: Int = 60
+  public var timestamp: TimeInterval { ProcessInfo.processInfo.systemUptime }
+  public var duration: TimeInterval { 1.0 / Double(max(preferredFramesPerSecond, 1)) }
+  public var targetTimestamp: TimeInterval { timestamp + duration }
+
+  public init(target: Any, selector sel: Selector) {
+    self.target = target as AnyObject
+    self.selector = sel
+    super.init()
+  }
+
+  public func add(to runloop: RunLoop, forMode mode: RunLoop.Mode) {}
+  public func remove(from runloop: RunLoop, forMode mode: RunLoop.Mode) {}
+  public func invalidate() { isPaused = true }
+}
+
 open class CALayer: NSObject {
+  public var frame: CGRect = .zero {
+    didSet {
+      bounds.size = frame.size
+      position = CGPoint(
+        x: frame.origin.x + frame.size.width * anchorPoint.x,
+        y: frame.origin.y + frame.size.height * anchorPoint.y
+      )
+    }
+  }
+  public var bounds: CGRect = .zero
+  public var position: CGPoint = .zero
+  public var anchorPoint: CGPoint = CGPoint(x: 0.5, y: 0.5)
+  public var zPosition: CGFloat = 0
+  public var isHidden: Bool = false
+  public var contents: Any?
+  public var contentsScale: CGFloat = 1.0
   public var cornerRadius: CGFloat = 0
+  public var maskedCorners: CACornerMask = [
+    .layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner,
+  ]
   public var cornerCurve: CALayerCornerCurve = .circular
   public var masksToBounds: Bool = false
   public var borderWidth: CGFloat = 0
+  public var shadowOpacity: Float = 0
+  public var shadowRadius: CGFloat = 3.0
+  public var shadowOffset: CGSize = CGSize(width: 0, height: -3)
+  public var shouldRasterize: Bool = false
+  public var rasterizationScale: CGFloat = 1.0
   #if !os(macOS)
     public var backgroundColor: CGColor?
     public var borderColor: CGColor?
+    public var shadowColor: CGColor?
+    public var shadowPath: CGPath?
   #endif
   public var opacity: Float = 1.0
+  public private(set) weak var superlayer: CALayer?
   public var sublayers: [CALayer]? = []
-  public func addSublayer(_ layer: CALayer) { sublayers?.append(layer) }
-  public func removeFromSuperlayer() {}
+  private var animations: [String: CAAnimation] = [:]
+
+  public override init() { super.init() }
+  public init(layer: Any) { super.init() }
+
+  public func addSublayer(_ layer: CALayer) {
+    layer.removeFromSuperlayer()
+    if sublayers == nil { sublayers = [] }
+    sublayers?.append(layer)
+    layer.superlayer = self
+  }
+
+  public func insertSublayer(_ layer: CALayer, at idx: UInt32) {
+    layer.removeFromSuperlayer()
+    if sublayers == nil { sublayers = [] }
+    let i = min(Int(idx), sublayers?.count ?? 0)
+    sublayers?.insert(layer, at: i)
+    layer.superlayer = self
+  }
+
+  public func removeFromSuperlayer() {
+    superlayer?.sublayers?.removeAll { $0 === self }
+    superlayer = nil
+  }
+
+  open func setNeedsDisplay() {}
+  open func displayIfNeeded() {}
+  open func setNeedsLayout() {}
+  open func layoutIfNeeded() { layoutSublayers() }
+  open func layoutSublayers() {}
+
+  public func add(_ anim: CAAnimation, forKey key: String?) {
+    animations[key ?? UUID().uuidString] = anim
+  }
+  public func removeAnimation(forKey key: String) {
+    animations.removeValue(forKey: key)
+  }
+  public func removeAllAnimations() {
+    animations.removeAll()
+  }
+  public func animation(forKey key: String) -> CAAnimation? {
+    animations[key]
+  }
+}
+
+open class CAShapeLayer: CALayer {
+  public struct FillRule: RawRepresentable, Equatable, Hashable, Sendable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static let nonZero = FillRule(rawValue: "non-zero")
+    public static let evenOdd = FillRule(rawValue: "even-odd")
+  }
+  public struct LineCap: RawRepresentable, Equatable, Hashable, Sendable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static let butt = LineCap(rawValue: "butt")
+    public static let round = LineCap(rawValue: "round")
+    public static let square = LineCap(rawValue: "square")
+  }
+  public struct LineJoin: RawRepresentable, Equatable, Hashable, Sendable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static let miter = LineJoin(rawValue: "miter")
+    public static let round = LineJoin(rawValue: "round")
+    public static let bevel = LineJoin(rawValue: "bevel")
+  }
+  #if !os(macOS)
+    public var path: CGPath?
+    public var fillColor: CGColor?
+    public var strokeColor: CGColor?
+  #endif
+  public var fillRule: FillRule = .nonZero
+  public var lineWidth: CGFloat = 1.0
+  public var miterLimit: CGFloat = 10.0
+  public var lineCap: LineCap = .butt
+  public var lineJoin: LineJoin = .miter
+  public var strokeStart: CGFloat = 0.0
+  public var strokeEnd: CGFloat = 1.0
+  public var lineDashPhase: CGFloat = 0.0
+  public var lineDashPattern: [NSNumber]?
+}
+
+open class CAGradientLayer: CALayer {
+  public struct GradientType: RawRepresentable, Equatable, Hashable, Sendable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static let axial = GradientType(rawValue: "axial")
+    public static let radial = GradientType(rawValue: "radial")
+    public static let conic = GradientType(rawValue: "conic")
+  }
+  public var colors: [Any]?
+  public var locations: [NSNumber]?
+  public var startPoint: CGPoint = CGPoint(x: 0.5, y: 0.0)
+  public var endPoint: CGPoint = CGPoint(x: 0.5, y: 1.0)
+  public var type: GradientType = .axial
+}
+
+open class CATextLayer: CALayer {
+  public var string: Any?
+  public var fontSize: CGFloat = 36.0
+  public var isWrapped: Bool = false
+  #if !os(macOS)
+    public var foregroundColor: CGColor?
+  #endif
 }
 
 open class NSTrackingArea: NSObject {

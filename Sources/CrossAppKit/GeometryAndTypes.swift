@@ -77,6 +77,7 @@ public struct NSLayoutPriority: RawRepresentable, Equatable, Hashable, Comparabl
   public static let dragThatCannotResizeWindow = NSLayoutPriority(490)
   public static let defaultLow = NSLayoutPriority(250)
   public static let fittingSizeCompression = NSLayoutPriority(50)
+  public static let fittingSizeLevel = NSLayoutPriority(50)
 }
 
 public struct NSDragOperation: OptionSet, Sendable {

@@ -9,23 +9,23 @@ public enum NSLineBreakMode: UInt, Sendable {
   case byTruncatingMiddle = 5
 }
 
+public struct NSUnderlineStyle: OptionSet, Sendable, Hashable {
+  public let rawValue: Int
+  public init(rawValue: Int) { self.rawValue = rawValue }
+  public static let single = NSUnderlineStyle(rawValue: 0x01)
+  public static let thick = NSUnderlineStyle(rawValue: 0x02)
+  public static let double = NSUnderlineStyle(rawValue: 0x09)
+}
+
+public enum NSTextAlignment: Int, Sendable {
+  case left = 0
+  case center = 1
+  case right = 2
+  case justified = 3
+  case natural = 4
+}
+
 #if !os(macOS)
-  public struct NSUnderlineStyle: OptionSet, Sendable, Hashable {
-    public let rawValue: Int
-    public init(rawValue: Int) { self.rawValue = rawValue }
-    public static let single = NSUnderlineStyle(rawValue: 0x01)
-    public static let thick = NSUnderlineStyle(rawValue: 0x02)
-    public static let double = NSUnderlineStyle(rawValue: 0x09)
-  }
-
-  public enum NSTextAlignment: Int, Sendable {
-    case left = 0
-    case right = 1
-    case center = 2
-    case justified = 3
-    case natural = 4
-  }
-
   open class NSTextTab: NSObject, @unchecked Sendable {
     public let alignment: NSTextAlignment
     public let location: CGFloat
@@ -211,16 +211,18 @@ public enum NSLineBreakMode: UInt, Sendable {
 
     public func draw(in rect: NSRect) {
       guard let ctx = _OffscreenDrawingContext.current, !string.isEmpty else { return }
-      let font = (length > 0 ? attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil)
-        ?? .systemFont(ofSize: NSFont.systemFontSize)
-      let color = (length > 0 ? attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor : nil)
-      let argb = color?.packedARGB ?? ctx.fillARGB
-      ctx.ops.append(.text(string: string, rect: rect, fontSize: font.pointSize, colorARGB: argb))
+      let fontPt = (length > 0 ? (attribute(.font, at: 0, effectiveRange: nil) as? any _CrossFontPointSizeProviding)?.pointSize : nil)
+        ?? NSFont.systemFontSize
+      let color = length > 0 ? attribute(.foregroundColor, at: 0, effectiveRange: nil) as? any _CrossPackedColorProviding : nil
+      let argb = color?._packedARGB ?? ctx.fillARGB
+      ctx.ops.append(.text(string: string, rect: rect, fontSize: fontPt, colorARGB: argb))
     }
 
     public func size() -> NSSize {
+      let fontPt = (length > 0 ? (attribute(.font, at: 0, effectiveRange: nil) as? any _CrossFontPointSizeProviding)?.pointSize : nil)
+        ?? NSFont.systemFontSize
       let font = (length > 0 ? attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil)
-        ?? .systemFont(ofSize: NSFont.systemFontSize)
+        ?? .systemFont(ofSize: fontPt)
       let lines = max(1, string.split(separator: "\n", omittingEmptySubsequences: false).count)
       let maxChars = string.split(separator: "\n", omittingEmptySubsequences: false)
         .map(\.count).max() ?? 0
@@ -247,7 +249,8 @@ public enum NSLineBreakMode: UInt, Sendable {
       attributes attrs: [NSAttributedString.Key: Any]? = nil,
       context: Any? = nil
     ) -> NSRect {
-      let font = (attrs?[.font] as? NSFont) ?? .systemFont(ofSize: NSFont.systemFontSize)
+      let fontPt = (attrs?[.font] as? any _CrossFontPointSizeProviding)?.pointSize ?? NSFont.systemFontSize
+      let font = (attrs?[.font] as? NSFont) ?? .systemFont(ofSize: fontPt)
       let lineH = max(14, ceil(font.ascender - font.descender + font.leading))
       let charW = max(5, font.pointSize * 0.56)
       let availW = size.width.isFinite && size.width > 0 ? size.width : 1e6
@@ -263,7 +266,8 @@ public enum NSLineBreakMode: UInt, Sendable {
     }
 
     public func size(withAttributes attrs: [NSAttributedString.Key: Any]? = nil) -> NSSize {
-      let font = (attrs?[.font] as? NSFont) ?? .systemFont(ofSize: NSFont.systemFontSize)
+      let fontPt = (attrs?[.font] as? any _CrossFontPointSizeProviding)?.pointSize ?? NSFont.systemFontSize
+      let font = (attrs?[.font] as? NSFont) ?? .systemFont(ofSize: fontPt)
       let str = self as String
       let lines = max(1, str.split(separator: "\n", omittingEmptySubsequences: false).count)
       let maxChars = str.split(separator: "\n", omittingEmptySubsequences: false)
@@ -283,10 +287,10 @@ public enum NSLineBreakMode: UInt, Sendable {
       guard let ctx = _OffscreenDrawingContext.current else { return }
       let str = self as String
       guard !str.isEmpty else { return }
-      let font = (attrs?[.font] as? NSFont) ?? .systemFont(ofSize: NSFont.systemFontSize)
-      let color = attrs?[.foregroundColor] as? NSColor
-      let argb = color?.packedARGB ?? ctx.fillARGB
-      ctx.ops.append(.text(string: str, rect: rect, fontSize: font.pointSize, colorARGB: argb))
+      let fontPt = (attrs?[.font] as? any _CrossFontPointSizeProviding)?.pointSize ?? NSFont.systemFontSize
+      let color = attrs?[.foregroundColor] as? any _CrossPackedColorProviding
+      let argb = color?._packedARGB ?? ctx.fillARGB
+      ctx.ops.append(.text(string: str, rect: rect, fontSize: fontPt, colorARGB: argb))
     }
 
     public var abbreviatingWithTildeInPath: String {

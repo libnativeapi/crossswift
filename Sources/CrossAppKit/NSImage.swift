@@ -204,29 +204,44 @@ public enum _OffscreenDrawOp: Sendable {
   case text(string: String, rect: NSRect, fontSize: CGFloat, colorARGB: UInt32)
 }
 
-internal final class _OffscreenDrawingContext {
+public protocol _CrossFontPointSizeProviding: AnyObject {
+  var pointSize: CGFloat { get }
+}
+
+public protocol _CrossPackedColorProviding: AnyObject {
+  var _packedARGB: UInt32 { get }
+}
+
+extension NSFont: _CrossFontPointSizeProviding {}
+extension NSColor: _CrossPackedColorProviding {
+  public var _packedARGB: UInt32 { packedARGB }
+}
+
+public final class _OffscreenDrawingContext {
   private static let lock = NSLock()
   nonisolated(unsafe) private static var stacks: [UInt64: [_OffscreenDrawingContext]] = [:]
 
-  var fillARGB: UInt32 = 0xFF000000
-  var strokeARGB: UInt32 = 0xFF000000
-  var ops: [_OffscreenDrawOp] = []
+  public var fillARGB: UInt32 = 0xFF000000
+  public var strokeARGB: UInt32 = 0xFF000000
+  public var ops: [_OffscreenDrawOp] = []
 
-  static var current: _OffscreenDrawingContext? {
+  public init() {}
+
+  public static var current: _OffscreenDrawingContext? {
     let tid = _crossAppKitThreadKey()
     lock.lock()
     defer { lock.unlock() }
     return stacks[tid]?.last
   }
 
-  static func push(_ ctx: _OffscreenDrawingContext) {
+  public static func push(_ ctx: _OffscreenDrawingContext) {
     let tid = _crossAppKitThreadKey()
     lock.lock()
     stacks[tid, default: []].append(ctx)
     lock.unlock()
   }
 
-  static func pop() {
+  public static func pop() {
     let tid = _crossAppKitThreadKey()
     lock.lock()
     if var arr = stacks[tid] {
