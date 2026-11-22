@@ -17,7 +17,7 @@
   final class CrossShimsTests: XCTestCase {
     func testCombineCorePublishersAndOperators() {
       var mapped: [Int] = []
-      let c1 = Publishers.Sequence(sequence: [1, 1, 2, 3, 4, 5])
+      let c1 = [1, 1, 2, 3, 4, 5].publisher
         .removeDuplicates()
         .filter { $0 % 2 == 1 }
         .map { $0 * 10 }
@@ -26,7 +26,7 @@
       c1.cancel()
 
       var scanned: [Int] = []
-      let c2 = Publishers.Sequence(sequence: [1, 2, 3])
+      let c2 = [1, 2, 3].publisher
         .scan(0, +)
         .sink { scanned.append($0) }
       XCTAssertEqual(scanned, [1, 3, 6])

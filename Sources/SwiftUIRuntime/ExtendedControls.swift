@@ -783,7 +783,11 @@ final class _AsyncImageDiskCache {
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let ext = url.pathExtension.isEmpty ? "img" : url.pathExtension
     let fileURL = dir.appendingPathComponent("\(UUID().uuidString).\(ext)")
-    try data.write(to: fileURL, options: .atomic)
+    #if os(WASI)
+      try data.write(to: fileURL)
+    #else
+      try data.write(to: fileURL, options: .atomic)
+    #endif
     lock.lock()
     pathsByURL[url] = fileURL.path
     lock.unlock()
@@ -1121,6 +1125,7 @@ extension EnvironmentValues {
 }
 
 public struct FileDialogUnavailableError: Error, LocalizedError {
+  public init() {}
   public var errorDescription: String? { "No native file dialog provider is attached." }
 }
 

@@ -862,6 +862,24 @@ struct DWriteFormatKeyHash {
     return h;
   }
 };
+struct DWriteCenterKey {
+  std::wstring family;
+  uint32_t size_bits = 0;
+  int weight = 400;
+  UINT dpi = 96;
+  bool operator==(const DWriteCenterKey &o) const {
+    return size_bits == o.size_bits && weight == o.weight && dpi == o.dpi && family == o.family;
+  }
+};
+struct DWriteCenterKeyHash {
+  size_t operator()(const DWriteCenterKey &k) const noexcept {
+    size_t h = std::hash<std::wstring>{}(k.family);
+    h ^= std::hash<uint32_t>{}(k.size_bits) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= std::hash<int>{}(k.weight) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= std::hash<UINT>{}(k.dpi) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    return h;
+  }
+};
 struct DirectWriteEngine {
   bool attempted = false;
   bool ready = false;
@@ -871,6 +889,7 @@ struct DirectWriteEngine {
   ID2D1SolidColorBrush *brush = nullptr;
   std::unique_ptr<Framebuffer> scratch;
   std::unordered_map<DWriteFormatKey, IDWriteTextFormat *, DWriteFormatKeyHash> formats;
+  std::unordered_map<DWriteCenterKey, float, DWriteCenterKeyHash> optical_centers;
 
   bool Ensure() {
     if (attempted) return ready;
@@ -943,7 +962,61 @@ struct DirectWriteEngine {
     return true;
   }
 
-  bool Draw(Graphics &g, UINT dpi, const Command &c) {
+  float OpticalCenter(IDWriteTextFormat *fmt, const std::wstring &raw_family,
+                      float size, float weight, UINT dpi, float fallback_line_h) {
+    const UINT eff_dpi = dpi ? dpi : 96u;
+    const float clamped_size = max(1.f, size);
+    const int w = max(100, min(999, int(std::lround(weight))));
+    DWriteCenterKey key{ResolveFamily(raw_family), FloatBits(clamped_size), w, eff_dpi};
+    auto it = optical_centers.find(key);
+    if (it != optical_centers.end()) return it->second;
+    if (optical_centers.size() >= 256) optical_centers.clear();
+    float result = fallback_line_h * 0.5f;
+    if (clamped_size > 0.f && clamped_size <= 200.f) {
+      IDWriteTextLayout *h_layout = nullptr;
+      if (SUCCEEDED(dwrite->CreateTextLayout(L"H", 1, fmt, 1e4f, 1e4f, &h_layout)) && h_layout) {
+        const float scale = max(1.f, eff_dpi / 96.f);
+        const float pad = 4.f;
+        const UINT pw = max(24u, UINT(std::ceil((clamped_size * 1.5f + pad * 2.f) * scale)));
+        const UINT ph = max(24u, UINT(std::ceil((fallback_line_h + pad * 2.f + 4.f) * scale)));
+        if (!scratch || scratch->capacity_width < pw || scratch->capacity_height < ph) {
+          scratch = std::make_unique<Framebuffer>(max(pw, 256u), max(ph, 64u), true);
+        }
+        const size_t stride = size_t(scratch->stride_pixels);
+        for (UINT y = 0; y < ph; ++y) {
+          std::fill_n(scratch->pixels + size_t(y) * stride, pw, 0u);
+        }
+        RECT bind_rect{0, 0, LONG(pw), LONG(ph)};
+        if (SUCCEEDED(rt->BindDC(scratch->dc, &bind_rect))) {
+          brush->SetColor(D2D1::ColorF(1.f, 1.f, 1.f, 1.f));
+          rt->BeginDraw();
+          rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
+          rt->DrawTextLayout(D2D1::Point2F(pad, pad), h_layout, brush);
+          if (SUCCEEDED(rt->EndDraw())) {
+            GdiFlush();
+            int min_y = int(ph), max_y = -1;
+            for (int py = 0; py < int(ph); ++py) {
+              const uint32_t *row = scratch->pixels + size_t(py) * stride;
+              for (int px = 0; px < int(pw); ++px) {
+                if ((row[px] >> 24) >= 120u) {
+                  min_y = min(min_y, py);
+                  max_y = max(max_y, py);
+                }
+              }
+            }
+            if (max_y >= min_y) {
+              result = ((min_y + max_y + 1) * 0.5f) / scale - pad;
+            }
+          }
+        }
+        h_layout->Release();
+      }
+    }
+    optical_centers.emplace(std::move(key), result);
+    return result;
+  }
+
+  bool Draw(Graphics &g, UINT dpi, const Command &c, bool transformed) {
     if (c.text.empty()) return true;
     auto *fmt = Format(c.family, c.size, c.weight);
     if (!fmt) return false;
@@ -985,6 +1058,7 @@ struct DirectWriteEngine {
       pos = nl + 1;
     }
 
+    const float center = OpticalCenter(fmt, c.family, c.size, c.weight, dpi, base_line_h);
     const float pad = 4.f;
     const float step = base_line_h + c.line_spacing;
     const float total_h = lines.size() <= 1
@@ -1035,11 +1109,29 @@ struct DirectWriteEngine {
     if (FAILED(end_hr)) return false;
     GdiFlush();
 
-    // Vertically center the text block inside c.rect.
+    // Optically center cap-to-baseline ink inside c.rect.
     const float draw_x = c.rect.X - pad;
-    const float draw_y = c.rect.Y + (c.rect.Height - total_h) * 0.5f - pad;
-    g.DrawImage(scratch->bitmap.get(), RectF(draw_x, draw_y, log_w, log_h),
-                0.f, 0.f, REAL(px_w), REAL(px_h), UnitPixel);
+    const float draw_y = lines.size() <= 1
+        ? (c.rect.Y + c.rect.Height * 0.5f - center - pad)
+        : (c.rect.Y + c.rect.Height * 0.5f - center - step * float(lines.size() - 1) * 0.5f - pad);
+    if (!transformed) {
+      Matrix prev;
+      g.GetTransform(&prev);
+      PointF pt(draw_x, draw_y);
+      prev.TransformPoints(&pt, 1);
+      const int dx = int(std::lround(pt.X));
+      const int dy = int(std::lround(pt.Y));
+      const auto prev_offset = g.GetPixelOffsetMode();
+      g.ResetTransform();
+      g.SetPixelOffsetMode(PixelOffsetModeNone);
+      g.DrawImage(scratch->bitmap.get(), Rect(dx, dy, int(px_w), int(px_h)),
+                  0, 0, int(px_w), int(px_h), UnitPixel);
+      g.SetPixelOffsetMode(prev_offset);
+      g.SetTransform(&prev);
+    } else {
+      g.DrawImage(scratch->bitmap.get(), RectF(draw_x, draw_y, log_w, log_h),
+                  0.f, 0.f, REAL(px_w), REAL(px_h), UnitPixel);
+    }
     return true;
   }
 };
@@ -1205,8 +1297,8 @@ void ApplyBrightnessContrastPARGB(uint32_t *pixels, int w, int h, int stride,
 }
 
 void DrawTextCommand(Surface *s, Graphics &g, SolidBrush &brush,
-                     const Command &c) {
-  if (DWrite().Draw(g, s->buffer_dpi, c))
+                     const Command &c, bool transformed) {
+  if (DWrite().Draw(g, s->buffer_dpi, c, transformed))
     return;
   FontKey key{c.family, FloatBits(c.size), c.weight >= 600.f};
   auto found = s->fonts.find(key);
@@ -1623,7 +1715,7 @@ void RenderFrame(Surface *s) {
         }
       } else if (c.rect.Width > 0 && c.rect.Height > 0 && IsRectVisible(c.rect)) {
         if (c.kind == 1) {
-          DrawTextCommand(s, target_g, local_brush, c);
+          DrawTextCommand(s, target_g, local_brush, c, transform_depth > 0);
           continue;
         }
         const bool plain_rect = c.radius < 0.01f;
@@ -2866,7 +2958,20 @@ void sui_surface_edit(void *handle, void *edit, int64_t id,
   if (native_view)
     s->native_views.emplace(hwnd, native_handle_retain(native_view));
   ParentControl(s, hwnd);
-  s->edits.emplace(hwnd, EditHook{id});
+  EditHook hook{id};
+  if (native_view) {
+    if (char *ph = native_text_field_get_placeholder(native_view)) {
+      if (*ph) hook.placeholder = Wide(ph);
+      free_c_str(ph);
+    }
+  }
+  if (hook.placeholder.empty()) {
+    wchar_t cue[256]{};
+    if (SendMessageW(hwnd, EM_GETCUEBANNER, reinterpret_cast<WPARAM>(cue), 256) && cue[0]) {
+      hook.placeholder = cue;
+    }
+  }
+  s->edits.emplace(hwnd, std::move(hook));
   SetWindowSubclass(hwnd, EditProc, subclass_id,
                     reinterpret_cast<DWORD_PTR>(s));
 }

@@ -1159,7 +1159,7 @@ internal func installAssetResolversOnce() {
 
     public func sink(
       receiveCompletion: @escaping (Subscribers.Completion<Never>) -> Void,
-      receiveValue: @escaping (Void) -> Void
+      receiveValue: @escaping (()) -> Void
     ) -> AnyCancellable {
       AnyCancellable(_subscribe { receiveValue(()) })
     }

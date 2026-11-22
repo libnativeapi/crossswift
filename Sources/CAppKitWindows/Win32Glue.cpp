@@ -2176,6 +2176,19 @@ int cak_getattrlistbulk(int dirfd, void *attrbuf, size_t attrbuf_size) {
   return count;
 }
 
+int cak_cred_available(void) {
+  PCREDENTIALW cred = nullptr;
+  if (CredReadW(L"crossswift:__session_probe__", CRED_TYPE_GENERIC, 0, &cred)) {
+    if (cred) CredFree(cred);
+    return 1;
+  }
+  DWORD err = GetLastError();
+  if (err == ERROR_NO_SUCH_LOGON_SESSION || err == ERROR_NOT_SUPPORTED || err == ERROR_ACCESS_DENIED) {
+    return 0;
+  }
+  return 1;
+}
+
 int cak_cred_write(const char *utf8_target, const char *utf8_user, const uint8_t *secret, size_t len) {
   if (!utf8_target || !*utf8_target) return 0;
   std::wstring target = ToWide(utf8_target);
@@ -2187,7 +2200,10 @@ int cak_cred_write(const char *utf8_target, const char *utf8_user, const uint8_t
   cred.CredentialBlobSize = static_cast<DWORD>(len);
   cred.CredentialBlob = (len > 0 && secret) ? const_cast<LPBYTE>(secret) : nullptr;
   cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
-  return CredWriteW(&cred, 0) ? 1 : 0;
+  if (CredWriteW(&cred, 0)) return 1;
+  DWORD err = GetLastError();
+  if (err == ERROR_NO_SUCH_LOGON_SESSION || err == ERROR_NOT_SUPPORTED) return -1;
+  return 0;
 }
 
 uint8_t *cak_cred_read(const char *utf8_target, size_t *out_len) {

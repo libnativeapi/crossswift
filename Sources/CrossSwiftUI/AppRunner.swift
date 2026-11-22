@@ -164,13 +164,13 @@ private final class DesktopSceneCoordinator {
       if let listener = managed.closeListener {
         _ = managed.window.removeListener(listener)
       }
-      managed.window.close()
+      _ = managed.window.close()
     } else if let id, let match = openWindows.first(where: { $0.key == id || $0.key.hasPrefix("\(id)-") }) {
       openWindows.removeValue(forKey: match.key)
       if let listener = match.value.closeListener {
         _ = match.value.window.removeListener(listener)
       }
-      match.value.window.close()
+      _ = match.value.window.close()
     }
   }
 

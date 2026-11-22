@@ -177,6 +177,7 @@ char *cak_realpath(const char *utf8_path);
 int cak_getattrlistbulk(int dirfd, void *attrbuf, size_t attrbuf_size);
 
 // Windows Credential Manager (Keychain shim)
+int cak_cred_available(void);
 int cak_cred_write(const char *utf8_target, const char *utf8_user, const uint8_t *secret, size_t len);
 uint8_t *cak_cred_read(const char *utf8_target, size_t *out_len);
 int cak_cred_delete(const char *utf8_target);

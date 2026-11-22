@@ -103,6 +103,11 @@ public struct DispatchQueueSchedulerInterval: SchedulerTimeIntervalConvertible, 
   public static func < (lhs: Self, rhs: Self) -> Bool { lhs.seconds < rhs.seconds }
 }
 
+private final class _UncheckedActionBox: @unchecked Sendable {
+  let run: () -> Void
+  init(_ run: @escaping () -> Void) { self.run = run }
+}
+
 extension DispatchQueue: Scheduler {
   public typealias SchedulerTimeType = DispatchQueueSchedulerInterval
   public struct SchedulerOptions: Sendable {
@@ -110,7 +115,8 @@ extension DispatchQueue: Scheduler {
   }
 
   public func schedule(options: SchedulerOptions? = nil, _ action: @escaping () -> Void) {
-    async(execute: action)
+    let box = _UncheckedActionBox(action)
+    async { box.run() }
   }
 
   public func schedule(
@@ -119,7 +125,8 @@ extension DispatchQueue: Scheduler {
     options: SchedulerOptions? = nil,
     _ action: @escaping () -> Void
   ) {
-    asyncAfter(deadline: .now() + max(0, delay.seconds), execute: action)
+    let box = _UncheckedActionBox(action)
+    asyncAfter(deadline: .now() + max(0, delay.seconds)) { box.run() }
   }
 }
 
