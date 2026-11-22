@@ -274,22 +274,21 @@ open class NSStatusBarButton: NSButton {
   public var appearsDisabled: Bool = false
   @MainActor internal weak var ownerStatusItem: NSStatusItem?
 
+  private func _syncStatusItemAppearanceIfNeeded() {
+    nonisolated(unsafe) let button = self
+    _performOnMainActor { button.ownerStatusItem?.syncButtonAppearance() }
+  }
+
   public override var image: NSImage? {
-    didSet {
-      MainActor.assumeIsolated { ownerStatusItem?.syncButtonAppearance() }
-    }
+    didSet { _syncStatusItemAppearanceIfNeeded() }
   }
 
   public override var title: String {
-    didSet {
-      MainActor.assumeIsolated { ownerStatusItem?.syncButtonAppearance() }
-    }
+    didSet { _syncStatusItemAppearanceIfNeeded() }
   }
 
   public override var toolTip: String? {
-    didSet {
-      MainActor.assumeIsolated { ownerStatusItem?.syncButtonAppearance() }
-    }
+    didSet { _syncStatusItemAppearanceIfNeeded() }
   }
 
   public override init(frame frameRect: NSRect) {
@@ -367,9 +366,11 @@ open class NSStatusItem: NSObject {
         }
         _ = tray.setVisible(true)
         listenerId = tray.addListener { [weak self] event in
-          MainActor.assumeIsolated {
-            guard let self else { return }
-            switch event {
+          nonisolated(unsafe) let boxSelf = self
+          nonisolated(unsafe) let boxEvent = event
+          _performOnMainActor {
+            guard let self = boxSelf else { return }
+            switch boxEvent {
             case .clicked:
               if let onLeftClick = self.onLeftClick {
                 onLeftClick()

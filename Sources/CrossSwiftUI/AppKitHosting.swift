@@ -1235,8 +1235,14 @@ internal func installAssetResolversOnce() {
           let icoURL = base.appendingPathComponent("Resources/AppIcon.ico")
           if fm.fileExists(atPath: pngURL.path), let nsImg = CrossAppKit.NSImage(contentsOf: pngURL) {
             didConfigureAppIcon = true
-            MainActor.assumeIsolated {
-              CrossAppKit.NSApplication.shared.applicationIconImage = nsImg
+            if Thread.isMainThread {
+              MainActor.assumeIsolated {
+                CrossAppKit.NSApplication.shared.applicationIconImage = nsImg
+              }
+            } else {
+              DispatchQueue.main.async {
+                CrossAppKit.NSApplication.shared.applicationIconImage = nsImg
+              }
             }
             #if os(Windows)
               if fm.fileExists(atPath: icoURL.path) {

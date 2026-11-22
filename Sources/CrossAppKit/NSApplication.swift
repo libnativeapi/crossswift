@@ -38,10 +38,19 @@ public var NSApp: NSApplication! {
   set {}
 }
 
+@inline(__always)
+internal func _performOnMainActor(_ body: @escaping @MainActor @Sendable () -> Void) {
+  if Thread.isMainThread {
+    MainActor.assumeIsolated(body)
+  } else {
+    DispatchQueue.main.async(execute: body)
+  }
+}
+
 #if os(Windows)
   private let _singleInstanceCallback: @convention(c) (UnsafePointer<CChar>?) -> Void = { rawPtr in
     let payload = rawPtr.map { String(cString: $0) } ?? ""
-    MainActor.assumeIsolated {
+    _performOnMainActor {
       NSApplication.shared._receiveSingleInstancePayload(payload)
     }
   }

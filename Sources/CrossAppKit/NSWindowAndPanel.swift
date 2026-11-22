@@ -439,8 +439,10 @@ open class NSWindow: NSResponder {
         let top = CrossAppKitCoordinates.rectToNativeTopLeft(contentRect)
         nw.setBounds(NativeAPI.Rectangle(x: top.x, y: top.y, width: top.width, height: top.height))
         nativeListenerId = nw.addListener { [weak self] event in
-          MainActor.assumeIsolated {
-            self?.handleNativeWindowEvent(event)
+          nonisolated(unsafe) let boxSelf = self
+          nonisolated(unsafe) let boxEvent = event
+          _performOnMainActor {
+            boxSelf?.handleNativeWindowEvent(boxEvent)
           }
         }
       }
