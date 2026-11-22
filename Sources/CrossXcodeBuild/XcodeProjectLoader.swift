@@ -909,7 +909,7 @@ public final class XcodeProjectLoader {
             enumerator.skipDescendants()
             continue
           }
-          if ext == "xcassets" {
+          if ext == "xcassets" || ext == "icon" {
             appendClassified(std, isResource: true)
             enumerator.skipDescendants()
             continue

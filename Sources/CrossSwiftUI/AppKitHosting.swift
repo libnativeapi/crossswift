@@ -1142,6 +1142,7 @@ internal func installAssetResolversOnce() {
     }
     var searchPaths = CrossAppKit.NSImage.resourceSearchPaths
     var didLoadStringsCatalog = false
+    var didConfigureAppIcon = false
     if XCStringsCatalog.shared.systemLanguagesProvider == nil {
       XCStringsCatalog.shared.systemLanguagesProvider = { NSApplication._systemPreferredLanguages }
     }
@@ -1179,6 +1180,26 @@ internal func installAssetResolversOnce() {
           }
           if loadedHere {
             didLoadStringsCatalog = true
+          }
+        }
+        if !didConfigureAppIcon {
+          let pngURL = base.appendingPathComponent("Resources/AppIcon.png")
+          let icoURL = base.appendingPathComponent("Resources/AppIcon.ico")
+          if fm.fileExists(atPath: pngURL.path), let nsImg = CrossAppKit.NSImage(contentsOf: pngURL) {
+            didConfigureAppIcon = true
+            MainActor.assumeIsolated {
+              CrossAppKit.NSApplication.shared.applicationIconImage = nsImg
+            }
+            #if os(Windows)
+              if fm.fileExists(atPath: icoURL.path) {
+                _ = NativeAPI.Application.shared.setIcon(icoURL.path)
+              }
+            #else
+              _ = NativeAPI.Application.shared.setIcon(pngURL.path)
+            #endif
+          } else if fm.fileExists(atPath: icoURL.path) {
+            didConfigureAppIcon = true
+            _ = NativeAPI.Application.shared.setIcon(icoURL.path)
           }
         }
       }
