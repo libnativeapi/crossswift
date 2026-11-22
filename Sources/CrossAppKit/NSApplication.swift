@@ -286,7 +286,11 @@ open class NSApplication: NSResponder, @unchecked Sendable {
     didEnsureSingleInstance = true
     #if os(Windows)
       let args = CommandLine.arguments
-      if args.contains("--new-instance") || args.contains("--smoke") { return }
+      if args.contains("--new-instance") || args.contains("--smoke")
+        || args.contains(where: { $0.hasPrefix("--role=") })
+      {
+        return
+      }
       if ProcessInfo.processInfo.environment["CROSS_ALLOW_MULTIPLE_INSTANCES"] == "1" { return }
       if let prohibited = Bundle.main.object(forInfoDictionaryKey: "LSMultipleInstancesProhibited") as? Bool,
         !prohibited

@@ -138,6 +138,11 @@ open class NSRunningApplication: NSObject, @unchecked Sendable {
   }
 
   @discardableResult
+  public func activate(from application: NSRunningApplication, options: ActivationOptions = []) -> Bool {
+    activate(options: options)
+  }
+
+  @discardableResult
   public func hide() -> Bool {
     isHidden = true
     #if os(Windows)
