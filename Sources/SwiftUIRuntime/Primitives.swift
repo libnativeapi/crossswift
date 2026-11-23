@@ -194,16 +194,32 @@ extension Button: _PrimitiveView {
       if role == .cancel { el.props.keyboardShortcut = .cancelAction }
       return el
     }
-    var props = NodeProps()
-    // Unstyled buttons use the native title renderer. A custom ButtonStyle
-    // renders the full label tree; the default style extracts its text.
+    func hasOnlyText(_ el: Element) -> Bool {
+      if el.kind == .image || el.kind == .path || el.kind == .textField || el.kind == .hostedView {
+        return false
+      }
+      return el.children.allSatisfy(hasOnlyText)
+    }
     func text(_ element: Element) -> String {
       if element.kind == .text { return element.props.text }
       return element.children.map(text).filter { !$0.isEmpty }.joined(separator: " ")
     }
+    let renderedLabel = _render(label, path: path.appending(index: 0))
+    let resolvedTitle = title.isEmpty ? text(renderedLabel) : title
+    // Native push buttons only render plain text titles. Icon or composite
+    // labels (e.g. Image(systemName: "chevron.up")) render through DefaultButtonStyle.
+    if !hasOnlyText(renderedLabel) || resolvedTitle.isEmpty {
+      var styled = _render(
+        StyledButton(button: self, style: DefaultButtonStyle()),
+        path: path.appending(index: 1)
+      )
+      if role == .cancel { styled.props.keyboardShortcut = .cancelAction }
+      return styled
+    }
+    var props = NodeProps()
     if role == .cancel { props.keyboardShortcut = .cancelAction }
     if role == .destructive { props.foreground = Color(hex: 0xb91c1c) }
-    props.text = title.isEmpty ? text(_render(label, path: path.appending(index: 0))) : title
+    props.text = resolvedTitle
     return Element(kind: .button, props: props, action: action)
   }
 }

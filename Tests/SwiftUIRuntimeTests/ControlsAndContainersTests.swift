@@ -559,4 +559,65 @@ final class ControlsAndContainersTests: XCTestCase {
     XCTAssertTrue(bottomTexts.contains("App 148"))
     XCTAssertTrue(bottomTexts.contains("App 149"))
   }
+
+  @MainActor
+  func testUnstyledIconButtonsWithAccessibilityLabelRenderStyledSymbolsInsteadOfTextButtons() throws {
+    var moves: [Int] = []
+    struct FallbackButtonsProbe: View {
+      let onMove: (Int) -> Void
+      var body: some View {
+        VStack(spacing: 8) {
+          HStack(spacing: 8) {
+            Button { onMove(-1) } label: { Image(systemName: "chevron.up") }
+              .disabled(true)
+              .accessibilityLabel("Move Search Files up")
+            Button { onMove(1) } label: { Image(systemName: "chevron.down") }
+              .disabled(false)
+              .accessibilityLabel("Move Search Files down")
+          }
+          HStack(spacing: 8) {
+            Button { onMove(-2) } label: { Image(systemName: "chevron.up") }
+              .disabled(false)
+              .accessibilityLabel("Move Search Web up")
+            Button { onMove(2) } label: { Image(systemName: "chevron.down") }
+              .disabled(true)
+              .accessibilityLabel("Move Search Web down")
+          }
+        }
+      }
+    }
+
+    let renderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(FallbackButtonsProbe(onMove: { moves.append($0) })),
+      size: Size(width: 400, height: 120)
+    )
+    renderer.mount()
+
+    func collectKind(_ kind: ElementKind, in el: Element?, into out: inout [Element]) {
+      guard let el else { return }
+      if el.kind == kind { out.append(el) }
+      for child in el.children { collectKind(kind, in: child, into: &out) }
+    }
+
+    var rawButtons: [Element] = []
+    var styledButtons: [Element] = []
+    var images: [Element] = []
+    collectKind(.button, in: renderer.tree, into: &rawButtons)
+    collectKind(.styledButton, in: renderer.tree, into: &styledButtons)
+    collectKind(.image, in: renderer.tree, into: &images)
+
+    XCTAssertEqual(rawButtons.count, 0, "Icon-only unstyled Buttons must not degrade into text push buttons")
+    XCTAssertEqual(styledButtons.count, 4)
+    XCTAssertEqual(images.map(\.props.imagePath), [
+      "sf://chevron.up", "sf://chevron.down", "sf://chevron.up", "sf://chevron.down",
+    ])
+    XCTAssertFalse(styledButtons[0].props.enabled)
+    XCTAssertTrue(styledButtons[1].props.enabled)
+    XCTAssertTrue(styledButtons[2].props.enabled)
+    XCTAssertFalse(styledButtons[3].props.enabled)
+
+    renderer.performTap(styledButtons[1].id)
+    XCTAssertEqual(moves, [1])
+  }
 }
