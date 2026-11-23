@@ -815,10 +815,25 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
       switch style.kind {
       case .segmented:
         let selectedIdx = options.firstIndex(where: { $0.tag == currentKey }) ?? 0
+        let ctrlSize = EnvironmentValues.current.controlSize
         #if os(Android) || CROSS_SWIFTUI_HARMONY
         let segMinHeight: CGFloat = 40
+        let segHPad: CGFloat = 10
+        let segVPad: CGFloat = 4
         #else
-        let segMinHeight: CGFloat = 24
+        let segMinHeight: CGFloat =
+          switch ctrlSize {
+          case .large, .extraLarge: 28
+          case .small, .mini: 20
+          case .regular: 24
+          }
+        let segHPad: CGFloat = (ctrlSize == .small || ctrlSize == .mini) ? 8 : 12
+        let segVPad: CGFloat =
+          switch ctrlSize {
+          case .large, .extraLarge: 5
+          case .small, .mini: 2
+          case .regular: 3
+          }
         #endif
         SemanticControlWrapper(
           semantic: SemanticControl(
@@ -835,10 +850,12 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
                   selection.wrappedValue = typed
                 }
               } label: {
+                #if os(Android) || CROSS_SWIFTUI_HARMONY
                 Text(verbatim: opt.title)
                   .font(.callout.weight(isSelected ? .medium : .regular))
-                  .padding(.horizontal, 10)
-                  .padding(.vertical, 4)
+                  .lineLimit(1)
+                  .padding(.horizontal, segHPad)
+                  .padding(.vertical, segVPad)
                   .frame(maxWidth: .infinity, minHeight: segMinHeight - 4)
                   .background(
                     isSelected
@@ -846,6 +863,29 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
                       : Color.clear,
                     in: RoundedRectangle(cornerRadius: 5)
                   )
+                #else
+                ZStack {
+                  // Reserve medium-weight width so switching segments never shifts outer bounds.
+                  Text(verbatim: opt.title)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                    .opacity(0)
+                    .accessibilityHidden(true)
+                  Text(verbatim: opt.title)
+                    .font(.callout.weight(isSelected ? .medium : .regular))
+                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+                }
+                .padding(.horizontal, segHPad)
+                .padding(.vertical, segVPad)
+                .frame(minHeight: segMinHeight - 4)
+                .background(
+                  isSelected
+                    ? Color { s in s == .dark ? (1, 1, 1, 0.18) : (1, 1, 1, 0.96) }
+                    : Color.clear,
+                  in: RoundedRectangle(cornerRadius: 5.5, style: .continuous)
+                )
+                #endif
               }
               .buttonStyle(.plain)
             }
@@ -854,8 +894,15 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
           .frame(minHeight: segMinHeight)
           .background(
             Color { s in s == .dark ? (1, 1, 1, 0.07) : (0, 0, 0, 0.06) },
-            in: RoundedRectangle(cornerRadius: 7)
-          ),
+            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+          )
+          .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+              .strokeBorder(
+                Color { s in s == .dark ? (1, 1, 1, 0.09) : (0, 0, 0, 0.08) },
+                lineWidth: 1
+              )
+          },
           intAction: { idx in
             guard idx >= 0, idx < options.count else { return }
             if let typed = options[idx].tag.base as? SelectionValue {

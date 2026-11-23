@@ -560,6 +560,18 @@ func normalize(_ element: Element, previous: Element? = nil) -> Element {
       if single.props.colorSchemeOverride == nil, let scheme = result.props.colorSchemeOverride {
         single.props.colorSchemeOverride = scheme
       }
+      if result.props.fixedWidth { single.props.fixedWidth = true }
+      if result.props.fixedHeight { single.props.fixedHeight = true }
+      if single.props.layoutPriority == 0, result.props.layoutPriority != 0 {
+        single.props.layoutPriority = result.props.layoutPriority
+      }
+      if single.props.zIndex == 0, result.props.zIndex != 0 {
+        single.props.zIndex = result.props.zIndex
+      }
+      if !result.props.hitTesting { single.props.hitTesting = false }
+      if single.props.help.isEmpty, !result.props.help.isEmpty {
+        single.props.help = result.props.help
+      }
       if single.explicitID == nil { single.explicitID = result.explicitID }
       if single.tagValue == nil { single.tagValue = result.tagValue }
       for (k, v) in result.preferences {

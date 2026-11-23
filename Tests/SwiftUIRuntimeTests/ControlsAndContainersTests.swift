@@ -974,4 +974,45 @@ final class ControlsAndContainersTests: XCTestCase {
     XCTAssertEqual(probe.taskStarts[5], 1, "Still-visible row must not restart .task across scroll bucket crossings")
     XCTAssertFalse(probe.cancelledRows.contains(5))
   }
+
+  @MainActor
+  func testSegmentedPickerSizesToIntrinsicContentWidthInsteadOfFillingContainer() throws {
+    struct ProvidersDetailProbe: View {
+      @State var tab = "overview"
+      var body: some View {
+        VStack(spacing: 0) {
+          Picker("Page", selection: $tab) {
+            Text(verbatim: "Overview").tag("overview")
+            Text(verbatim: "Models").tag("models")
+            Text(verbatim: "Advanced").tag("advanced")
+          }
+          .labelsHidden()
+          .pickerStyle(.segmented)
+          .fixedSize()
+          Spacer()
+        }
+        .frame(width: 580, height: 320)
+      }
+    }
+
+    let renderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(ProvidersDetailProbe()),
+      size: Size(width: 580, height: 320)
+    )
+    renderer.mount()
+
+    let tree = try XCTUnwrap(renderer.tree)
+    let segmented = try XCTUnwrap(
+      allNodes(tree).first { $0.props.semanticControl?.kind == "segmented" }
+    )
+    XCTAssertLessThan(
+      segmented.frame.width, 340,
+      "Segmented Picker should size to its segment labels rather than stretching across the 580pt detail pane"
+    )
+    XCTAssertEqual(
+      segmented.frame.minX + segmented.frame.width * 0.5, 290, accuracy: 1.0,
+      "Segmented Picker should center horizontally inside VStack"
+    )
+  }
 }
