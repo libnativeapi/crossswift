@@ -63,6 +63,10 @@ final class LazyHeightCache {
     if let exact = heightsByStack[stack]?[item] { return exact }
     return averagesByStack[stack] ?? 44.0
   }
+
+  func averageHeight(stack: AnyHashable) -> Double {
+    averagesByStack[stack] ?? 44.0
+  }
 }
 
 struct ScrollViewportContext: Equatable {
@@ -162,13 +166,18 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
       let vpH = max(600, stackMetrics?.viewportHeight ?? viewport.viewportHeight)
       let localOffsetX = viewport.offsetX - (stackMetrics?.offsetX ?? 0)
       let localOffsetY = viewport.offsetY - (stackMetrics?.offsetY ?? 0)
+      let avgExtent = LazyHeightCache.shared.averageHeight(stack: stackKey)
+      let approxSpan = Double(data.count) * (avgExtent + spacing)
       var children: [Element] = []
       children.reserveCapacity(data.count)
 
       switch lazyCtx.axis {
       case .verticalStack:
-        let minVisibleY = localOffsetY - 600
-        let maxVisibleY = localOffsetY + vpH + 800
+        let clampedOffsetY = seeded
+          ? max(0, min(localOffsetY, max(0, approxSpan - vpH)))
+          : max(0, localOffsetY)
+        let minVisibleY = clampedOffsetY - 600
+        let maxVisibleY = clampedOffsetY + vpH + 800
         var runningY = 0.0
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
@@ -187,13 +196,17 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
             var placeholder = NodeProps()
             placeholder.frameHeight = estH
             placeholder.fillWidth = true
+            placeholder.isLazyPlaceholder = true
             children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
           }
         }
 
       case .horizontalStack:
-        let minVisibleX = localOffsetX - 600
-        let maxVisibleX = localOffsetX + vpW + 800
+        let clampedOffsetX = seeded
+          ? max(0, min(localOffsetX, max(0, approxSpan - vpW)))
+          : max(0, localOffsetX)
+        let minVisibleX = clampedOffsetX - 600
+        let maxVisibleX = clampedOffsetX + vpW + 800
         var runningX = 0.0
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
@@ -212,6 +225,7 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
             var placeholder = NodeProps()
             placeholder.frameWidth = estW
             placeholder.fillHeight = true
+            placeholder.isLazyPlaceholder = true
             children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
           }
         }

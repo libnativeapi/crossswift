@@ -620,4 +620,93 @@ final class ControlsAndContainersTests: XCTestCase {
     renderer.performTap(styledButtons[1].id)
     XCTAssertEqual(moves, [1])
   }
+
+  @MainActor
+  func testAppPickerPopoverScrollViewHasExactHeightAndRealizesBottomItems() throws {
+    final class PickerModel: ObservableObject {
+      @Published var picking = true
+    }
+
+    struct AppPickerPopoverProbe: View {
+      let apps = Array(0..<150)
+      var body: some View {
+        VStack(spacing: 0) {
+          Text("Search Header")
+            .frame(height: 40)
+          Divider()
+          ScrollView {
+            LazyVStack(spacing: 1) {
+              ForEach(apps, id: \.self) { index in
+                Button(action: {}) {
+                  HStack(spacing: 8) {
+                    Text("Icon").frame(width: 20, height: 20)
+                    Text("Candidate \(index)").lineLimit(1)
+                    Spacer(minLength: 0)
+                  }
+                  .padding(.horizontal, 8)
+                  .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+              }
+            }
+            .padding(4)
+          }
+        }
+        .frame(width: 220, height: 240)
+      }
+    }
+
+    struct HostPage: View {
+      @ObservedObject var model: PickerModel
+      var body: some View {
+        Form {
+          Section {
+            Button("Add Application…") { model.picking = true }
+              .popover(isPresented: $model.picking, arrowEdge: .bottom) {
+                AppPickerPopoverProbe()
+              }
+          }
+        }
+      }
+    }
+
+    let model = PickerModel()
+    let renderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(HostPage(model: model)),
+      size: Size(width: 720, height: 600)
+    )
+    renderer.mount()
+
+    func collectScrolls(_ el: Element?, into out: inout [Element]) {
+      guard let el else { return }
+      if el.kind == .scroll { out.append(el) }
+      for child in el.children { collectScrolls(child, into: &out) }
+    }
+    func collectTexts(_ el: Element?, into out: inout Set<String>) {
+      guard let el else { return }
+      if el.kind == .text, !el.props.text.isEmpty { out.insert(el.props.text) }
+      for child in el.children { collectTexts(child, into: &out) }
+    }
+
+    var scrolls: [Element] = []
+    collectScrolls(renderer.tree, into: &scrolls)
+    // Last scroll node belongs to the presented AppPickerPopover (width = 220).
+    let popoverScroll = try XCTUnwrap(scrolls.last { abs($0.frame.width - 220) < 1 })
+    let contentHeight = try XCTUnwrap(popoverScroll.children.first?.frame.height)
+    // 150 rows * 28pt (20pt icon + 2*4pt vPad) + 149 * 1pt spacing + 2*4pt outer padding = 4357pt
+    XCTAssertEqual(contentHeight, 4357.0, accuracy: 2.0, "Popover LazyVStack must use exact 28pt row height on frame 1 without 44pt placeholder inflation")
+
+    // Scroll to the very bottom of the popover list; Candidate 149 must be realized with zero trailing blank gap.
+    renderer.scroll(id: popoverScroll.id, to: Point(x: 0, y: 5000))
+    renderer.renderIfNeeded()
+
+    var bottomScrolls: [Element] = []
+    collectScrolls(renderer.tree, into: &bottomScrolls)
+    let updatedPopoverScroll = try XCTUnwrap(bottomScrolls.last { abs($0.frame.width - 220) < 1 })
+    var bottomTexts = Set<String>()
+    collectTexts(updatedPopoverScroll, into: &bottomTexts)
+    XCTAssertTrue(bottomTexts.contains("Candidate 148"))
+    XCTAssertTrue(bottomTexts.contains("Candidate 149"))
+  }
 }

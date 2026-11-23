@@ -258,6 +258,7 @@ public struct NodeProps: Equatable {
   public var spacerMinLength: Double = 0
   /// Optional semantic control metadata used by native platform hosts (e.g. Android Compose).
   public var semanticControl: SemanticControl? = nil
+  public var isLazyPlaceholder: Bool = false
 
   /// Compares only properties that affect visual rendering, ignoring metadata
   /// such as `animationPass`, accessibility labels, tooltips, and focus flags

@@ -534,13 +534,34 @@ public struct LayoutEngine {
         width: horizontal ? nil : offer.width, height: horizontal ? offer.height : nil)
       let children = e.children
       let spacings = Double(max(0, children.count - 1)) * p.spacing
-      var measuredChildren = children.map { child -> Size in
+      var measuredChildren = Array(repeating: Size.zero, count: children.count)
+      let stackKey = e.lazyCacheKey
+      for i in children.indices where !children[i].props.isLazyPlaceholder {
+        let child = children[i]
+        let sz: Size
         if child.kind == .spacer {
-          return horizontal
+          sz = horizontal
             ? Size(width: child.props.spacerMinLength, height: 0)
             : Size(width: 0, height: child.props.spacerMinLength)
+        } else {
+          sz = measure(child, childOffer)
         }
-        return measure(child, childOffer)
+        measuredChildren[i] = sz
+        if let stackKey, let itemID = child.explicitID, !child.children.isEmpty {
+          LazyHeightCache.shared.record(
+            stack: stackKey, item: itemID, height: horizontal ? sz.width : sz.height)
+        }
+      }
+      for i in children.indices where children[i].props.isLazyPlaceholder {
+        let child = children[i]
+        if let stackKey, let itemID = child.explicitID {
+          let est = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
+          measuredChildren[i] = horizontal
+            ? Size(width: est, height: 0)
+            : Size(width: 0, height: est)
+        } else {
+          measuredChildren[i] = measure(child, childOffer)
+        }
       }
       var main =
         measuredChildren.reduce(0) { $0 + (horizontal ? $1.width : $1.height) } + spacings
@@ -1046,9 +1067,9 @@ public struct LayoutEngine {
       horizontal: e.props.horizontalAlignment, vertical: e.props.verticalAlignment)
     let spacings = Double(max(0, indices.count - 1)) * e.props.spacing
     var fixed = spacings
-    var sizes: [(natural: Size, flex: Double, minSpacer: Double, priority: Double)] = []
-    sizes.reserveCapacity(indices.count)
-    for i in indices {
+    var sizes: [(natural: Size, flex: Double, minSpacer: Double, priority: Double)] =
+      Array(repeating: (.zero, 0, 0, 0), count: indices.count)
+    for (pos, i) in indices.enumerated() where !e.children[i].props.isLazyPlaceholder {
       let child = e.children[i]
       let minSpacer = child.kind == .spacer ? child.props.spacerMinLength : 0
       let flex =
@@ -1061,12 +1082,32 @@ public struct LayoutEngine {
       } else {
         natural = measure(child, proposal)
       }
-      sizes.append((natural, flex, minSpacer, child.props.layoutPriority))
+      sizes[pos] = (natural, flex, minSpacer, child.props.layoutPriority)
+      if let stackKey = e.lazyCacheKey, let itemID = child.explicitID, !child.children.isEmpty,
+        flex == 0
+      {
+        LazyHeightCache.shared.record(
+          stack: stackKey, item: itemID, height: vertical ? natural.height : natural.width)
+      }
       if flex > 0 {
         fixed += minSpacer
       } else {
         fixed += vertical ? natural.height : natural.width
       }
+    }
+    for (pos, i) in indices.enumerated() where e.children[i].props.isLazyPlaceholder {
+      if let stackKey = e.lazyCacheKey, let itemID = e.children[i].explicitID {
+        let est = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
+        if vertical {
+          e.children[i].props.frameHeight = est
+        } else {
+          e.children[i].props.frameWidth = est
+        }
+      }
+      let child = e.children[i]
+      let natural = measure(child, proposal)
+      sizes[pos] = (natural, 0, 0, child.props.layoutPriority)
+      fixed += vertical ? natural.height : natural.width
     }
     var cursor = vertical ? rect.minY : rect.minX
     let hasDistinctPriorities = Set(sizes.map(\.priority)).count > 1
