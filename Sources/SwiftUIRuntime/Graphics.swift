@@ -677,9 +677,13 @@ public struct Image: View, _PrimitiveView {
         }
       #endif
     }
-    if let naturalSize, !flexible {
-      p.idealWidth = naturalSize.width
-      p.idealHeight = naturalSize.height
+    if let naturalSize {
+      p.intrinsicImageWidth = naturalSize.width
+      p.intrinsicImageHeight = naturalSize.height
+      if !flexible {
+        p.idealWidth = naturalSize.width
+        p.idealHeight = naturalSize.height
+      }
     }
     p.imageTemplate = template
     p.fillWidth = flexible

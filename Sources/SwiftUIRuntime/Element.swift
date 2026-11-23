@@ -179,9 +179,10 @@ public struct NodeProps: Equatable {
   public var offsetX: Double = 0, offsetY: Double = 0
   public var scaleX: Double = 1, scaleY: Double = 1, rotation: Double = 0
   public var zIndex: Double = 0
-  public var underline = false, aspectFit = false
+  public var underline = false, aspectFit = false, hasAspectConstraint = false
   public var selectableText = false
   public var aspectRatio: Double? = nil
+  package var intrinsicImageWidth: Double? = nil, intrinsicImageHeight: Double? = nil
   public var transition: AnyTransition? = nil
   public var hitTesting = true
   public var fixedWidth = false, fixedHeight = false

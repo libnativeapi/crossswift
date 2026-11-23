@@ -206,4 +206,140 @@ final class LayoutTests: XCTestCase {
     XCTAssertGreaterThan(calloutText.frame.minY, globalRecorderMaxY, "Callout text should render below the recorder control")
     XCTAssertGreaterThan(calloutMidX, globalRecorderMinX - 40, "Callout should align horizontally under the recorder")
   }
+
+  func testAspectRatioFitPreviewCardsInEqualWidthHStackColumns() {
+    struct GridDotsShape: Shape {
+      let columns: Int
+      func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let subdivisions = columns * 4
+        guard subdivisions > 0 else { return p }
+        let stepX = rect.width / CGFloat(subdivisions)
+        let stepY = rect.height / CGFloat(subdivisions)
+        for row in 1..<subdivisions where row.isMultiple(of: 4) {
+          for col in 1..<subdivisions where col.isMultiple(of: 4) {
+            p.addEllipse(
+              in: CGRect(
+                x: rect.minX + CGFloat(col) * stepX - 0.5,
+                y: rect.minY + CGFloat(row) * stepY - 0.5,
+                width: 1, height: 1))
+          }
+        }
+        return p
+      }
+    }
+
+    let cardShape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+    let picker = VStack(alignment: .leading, spacing: 16) {
+      Text("Column Count")
+      HStack(spacing: 16) {
+        ForEach([5, 6, 7, 8, 9], id: \.self) { cols in
+          Button {} label: {
+            VStack(spacing: 6) {
+              GridDotsShape(columns: cols)
+                .fill(cols == 7 ? Color.white : Color.gray)
+                .background(cardShape.fill(cols == 7 ? Color.gray.opacity(0.2) : Color.clear))
+                .overlay(cardShape.strokeBorder(Color.gray, lineWidth: 1))
+                .clipShape(cardShape)
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: 72)
+              Text("\(cols)")
+            }
+            .frame(maxWidth: .infinity)
+          }
+          .buttonStyle(.plain)
+        }
+      }
+    }
+
+    let wideRenderer = Renderer(
+      backend: FakeBackend(), root: AnyView(picker), size: Size(width: 600, height: 300))
+    wideRenderer.mount()
+    guard let wideTree = wideRenderer.tree else { return XCTFail("Missing mounted tree") }
+
+    func collectDotShapes(_ node: Element, into out: inout [Element]) {
+      if node.kind == .shape, node.pathBuilder != nil, node.props.borderWidth == 0,
+         node.props.background != .clear, node.props.background != Color.gray.opacity(0.2)
+      {
+        out.append(node)
+      }
+      for c in node.children { collectDotShapes(c, into: &out) }
+    }
+    func findText(_ label: String, in node: Element) -> Element? {
+      if node.kind == .text, node.props.text == label { return node }
+      for c in node.children {
+        if let hit = findText(label, in: c) { return hit }
+      }
+      return nil
+    }
+
+    var dotShapes: [Element] = []
+    collectDotShapes(wideTree, into: &dotShapes)
+    XCTAssertEqual(dotShapes.count, 5, "Expected 5 column-count preview dot shapes")
+    for (idx, dotNode) in dotShapes.enumerated() {
+      XCTAssertEqual(dotNode.frame.width, 72, accuracy: 0.5, "Preview \(idx) width should cap at maxWidth 72")
+      XCTAssertEqual(dotNode.frame.height, 72, accuracy: 0.5, "Preview \(idx) height should match 1:1 aspect ratio")
+      let built = dotNode.pathBuilder?(
+        CGRect(
+          x: dotNode.frame.minX, y: dotNode.frame.minY,
+          width: dotNode.frame.width, height: dotNode.frame.height))
+      XCTAssertNotNil(built)
+      XCTAssertFalse(built?.commands.isEmpty ?? true, "GridDotsShape path should emit dot ellipses")
+      let colNumber = 5 + idx
+      guard let numberText = findText("\(colNumber)", in: wideTree) else {
+        return XCTFail("Missing label \(colNumber)")
+      }
+      XCTAssertGreaterThanOrEqual(
+        numberText.frame.minY, dotNode.frame.maxY + 5.5,
+        "Number label \(colNumber) should sit below the 72x72 preview card")
+      let dotCenter = dotNode.frame.minX + dotNode.frame.width / 2
+      let labelCenter = numberText.frame.minX + numberText.frame.width / 2
+      XCTAssertEqual(dotCenter, labelCenter, accuracy: 1.0, "Preview card should center above its label")
+    }
+
+    // Also verify shrinking below maxWidth when viewport is narrow (e.g. 5 columns in 314pt -> 50pt each).
+    let narrowRenderer = Renderer(
+      backend: FakeBackend(), root: AnyView(picker), size: Size(width: 314, height: 300))
+    narrowRenderer.mount()
+    guard let narrowTree = narrowRenderer.tree else { return XCTFail("Missing narrow tree") }
+    var narrowDots: [Element] = []
+    collectDotShapes(narrowTree, into: &narrowDots)
+    XCTAssertEqual(narrowDots.count, 5)
+    for dotNode in narrowDots {
+      XCTAssertEqual(dotNode.frame.width, 50, accuracy: 0.5)
+      XCTAssertEqual(dotNode.frame.height, 50, accuracy: 0.5)
+    }
+  }
+
+  func testResizableImageScaledToFitAndFillPreservesIntrinsicAspectRatio() {
+    let fitTree = makeTree(
+      Image(filePath: "wide.png", size: Size(width: 80, height: 40), isTemplate: false)
+        .resizable()
+        .scaledToFit()
+        .frame(width: 40, height: 40),
+      size: Size(width: 100, height: 100)
+    )
+    func findImage(_ node: Element) -> Element? {
+      if node.kind == .image { return node }
+      for c in node.children {
+        if let hit = findImage(c) { return hit }
+      }
+      return nil
+    }
+    guard let fittedImg = findImage(fitTree) else { return XCTFail("Expected fitted image") }
+    XCTAssertEqual(fittedImg.frame.width, 40, accuracy: 0.5)
+    XCTAssertEqual(fittedImg.frame.height, 20, accuracy: 0.5)
+
+    let fillTree = makeTree(
+      Image(filePath: "wide.png", size: Size(width: 80, height: 40), isTemplate: false)
+        .resizable()
+        .scaledToFill()
+        .frame(width: 40, height: 40)
+        .clipped(),
+      size: Size(width: 100, height: 100)
+    )
+    guard let filledImg = findImage(fillTree) else { return XCTFail("Expected filled image") }
+    XCTAssertEqual(filledImg.frame.width, 80, accuracy: 0.5)
+    XCTAssertEqual(filledImg.frame.height, 40, accuracy: 0.5)
+  }
 }

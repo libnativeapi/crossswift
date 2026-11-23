@@ -201,10 +201,20 @@ extension View {
   }
   public func scaledToFit() -> some View { aspectRatio(contentMode: .fit) }
   public func aspectRatio(_ ratio: CGFloat? = nil, contentMode: ContentMode) -> some View {
-    TransformView(content: self) {
-      $0.props.aspectRatio = ratio.map { Double($0) }
-      $0.props.aspectFit = contentMode == .fit
+    TransformView(content: self) { element in
+      if element.kind == .image {
+        element.props.aspectFit = contentMode == .fit
+      }
+      var props = NodeProps()
+      props.hasAspectConstraint = true
+      props.aspectRatio = ratio.map { Double($0) }
+      props.aspectFit = contentMode == .fit
+      element = Element(kind: .frame, props: props, children: [element])
     }
+  }
+  public func aspectRatio(_ ratio: CGSize, contentMode: ContentMode) -> some View {
+    let resolved: CGFloat? = ratio.height > 0 && ratio.width > 0 ? ratio.width / ratio.height : nil
+    return aspectRatio(resolved, contentMode: contentMode)
   }
   public func alignmentGuide(
     _ guide: HorizontalAlignment, computeValue: @escaping (ViewDimensions) -> CGFloat

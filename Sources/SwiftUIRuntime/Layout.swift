@@ -283,6 +283,10 @@ public struct LayoutEngine {
       && a.horizontalAlignment == b.horizontalAlignment
       && a.verticalAlignment == b.verticalAlignment && a.coordinateSpace == b.coordinateSpace
       && a.layerBehind == b.layerBehind
+      && a.hasAspectConstraint == b.hasAspectConstraint && a.aspectRatio == b.aspectRatio
+      && a.aspectFit == b.aspectFit
+      && a.intrinsicImageWidth == b.intrinsicImageWidth
+      && a.intrinsicImageHeight == b.intrinsicImageHeight
   }
   private func layoutRoot(root: inout Element, in size: Size) {
     let natural = measure(root, ProposedViewSize(width: size.width, height: size.height))
@@ -465,11 +469,18 @@ public struct LayoutEngine {
       #endif
       if p.multiline { size.height *= 3 }
     case .image:
-      if let iw = p.idealWidth, let ih = p.idealHeight {
+      if let iw = p.idealWidth ?? p.intrinsicImageWidth,
+         let ih = p.idealHeight ?? p.intrinsicImageHeight
+      {
         size = Size(width: iw, height: ih)
       } else if p.imagePath.hasPrefix("sf://") {
         let s = Double(p.font?.size ?? 16)
         size = Size(width: s, height: s)
+      } else if (p.imagePath.hasSuffix(".svg") || p.imagePath.hasSuffix(".SVG")
+                 || p.imagePath.hasSuffix(".pdf") || p.imagePath.hasSuffix(".PDF")),
+                let vec = VectorImage.load(p.imagePath), vec.bounds.width > 0, vec.bounds.height > 0
+      {
+        size = Size(width: Double(vec.bounds.width), height: Double(vec.bounds.height))
       } else {
         size = Size(width: 20, height: 20)
       }
@@ -486,7 +497,14 @@ public struct LayoutEngine {
       size = e.children.first.map { measure($0, child) } ?? .zero
       size.width += p.padding.horizontal
       size.height += p.padding.vertical
-    case .presentation, .frame, .layer, .styledButton:
+    case .frame:
+      if p.hasAspectConstraint, let child = e.children.first {
+        let constrained = aspectProposal(p, child: child, offer: offer)
+        size = measure(child, constrained)
+      } else {
+        size = e.children.first.map { measure($0, offer) } ?? .zero
+      }
+    case .presentation, .layer, .styledButton:
       size = e.children.first.map { measure($0, offer) } ?? .zero
     case .zStack:
       let sizes = e.children.map { measure($0, offer) }
@@ -565,25 +583,65 @@ public struct LayoutEngine {
       }
       var main =
         measuredChildren.reduce(0) { $0 + (horizontal ? $1.width : $1.height) } + spacings
-      if horizontal, let offeredWidth = offer.width, offeredWidth.isFinite,
-        main > Double(offeredWidth)
-      {
+      if horizontal, let offeredWidth = offer.width, offeredWidth.isFinite {
         let nonFlex = children.indices.filter { i in
           let c = children[i]
           return c.kind != .spacer && c.props.flex <= 0 && !fills(c, horizontal: true)
         }
-        let spacerReserve = children.reduce(0.0) { $0 + ($1.kind == .spacer ? $1.props.spacerMinLength : 0) }
-        let widths = allocateMainSizes(
-          ideals: nonFlex.map { measuredChildren[$0].width },
-          priorities: nonFlex.map { children[$0].props.layoutPriority },
-          budget: max(0, Double(offeredWidth) - spacings - spacerReserve))
-        for (idx, allocated) in zip(nonFlex, widths)
-        where allocated + 0.5 < measuredChildren[idx].width {
-          measuredChildren[idx] = measure(
-            children[idx],
-            ProposedViewSize(width: CGFloat(allocated), height: offer.height))
+        let flexIndices = children.indices.filter { i in
+          let c = children[i]
+          return c.props.flex > 0 || fills(c, horizontal: true)
         }
-        main = min(Double(offeredWidth), measuredChildren.reduce(0) { $0 + $1.width } + spacings)
+        let spacerReserve = children.reduce(0.0) { $0 + ($1.kind == .spacer ? $1.props.spacerMinLength : 0) }
+        let nonFlexBudget = max(0, Double(offeredWidth) - spacings - spacerReserve)
+        let nonFlexNatural = nonFlex.reduce(0.0) { $0 + measuredChildren[$1].width }
+        if nonFlexNatural > nonFlexBudget + 0.5 {
+          let widths = allocateMainSizes(
+            ideals: nonFlex.map { measuredChildren[$0].width },
+            priorities: nonFlex.map { children[$0].props.layoutPriority },
+            budget: nonFlexBudget)
+          for (idx, allocated) in zip(nonFlex, widths)
+          where allocated + 0.5 < measuredChildren[idx].width {
+            measuredChildren[idx] = measure(
+              children[idx],
+              ProposedViewSize(width: CGFloat(allocated), height: offer.height))
+          }
+        }
+        if flexIndices.contains(where: { children[$0].kind != .spacer }) {
+          let nonFlexUsed = nonFlex.reduce(0.0) { $0 + measuredChildren[$1].width }
+          var available = max(0, Double(offeredWidth) - spacings - spacerReserve - nonFlexUsed)
+          let distinctFlexPriorities = Array(Set(flexIndices.map { children[$0].props.layoutPriority })).sorted(by: >)
+          for tier in distinctFlexPriorities {
+            guard available > 1e-6 else { break }
+            let tierIndices = flexIndices.filter { children[$0].props.layoutPriority == tier }
+            let tierFlex = tierIndices.reduce(0.0) { $0 + max(1, children[$1].props.flex) }
+            var used = 0.0
+            for idx in tierIndices {
+              let c = children[idx]
+              let flexWeight = max(1, c.props.flex)
+              let rawShare = available * flexWeight / max(1, tierFlex)
+              let minSpacer = c.kind == .spacer ? c.props.spacerMinLength : 0
+              let capped: Double
+              if let maxCap = c.props.maxWidth, maxCap.isFinite {
+                capped = min(rawShare, max(0, maxCap - minSpacer))
+              } else {
+                capped = rawShare
+              }
+              used += capped
+              if c.kind != .spacer {
+                let shareWidth = minSpacer + capped
+                measuredChildren[idx] = measure(
+                  c, ProposedViewSize(width: CGFloat(shareWidth), height: offer.height))
+              } else {
+                measuredChildren[idx] = Size(width: minSpacer + capped, height: 0)
+              }
+            }
+            available = max(0, available - used)
+          }
+        }
+        if main > Double(offeredWidth) || flexIndices.contains(where: { children[$0].kind != .spacer }) {
+          main = min(Double(offeredWidth), measuredChildren.reduce(0) { $0 + $1.width } + spacings)
+        }
       }
       let cross = measuredChildren.map { horizontal ? $0.height : $0.width }.max() ?? 0
       size = horizontal ? Size(width: main, height: cross) : Size(width: cross, height: main)
@@ -645,8 +703,64 @@ public struct LayoutEngine {
     }
     return flexibility == .both || flexibility == (horizontal ? .horizontal : .vertical)
   }
+  private func aspectProposal(
+    _ p: NodeProps, child: Element, offer: ProposedViewSize
+  ) -> ProposedViewSize {
+    let resolvedRatio: Double?
+    if let explicit = p.aspectRatio, explicit.isFinite, explicit > 0 {
+      resolvedRatio = explicit
+    } else {
+      let ideal = measure(child, .unspecified)
+      resolvedRatio = (ideal.width > 0 && ideal.height > 0) ? (ideal.width / ideal.height) : nil
+    }
+    guard let r = resolvedRatio, r > 0 else { return offer }
+    let pw = offer.width.flatMap { $0.isFinite ? max(0, Double($0)) : nil }
+    let ph = offer.height.flatMap { $0.isFinite ? max(0, Double($0)) : nil }
+    let w: Double
+    let h: Double
+    switch (pw, ph) {
+    case let (pw?, ph?):
+      if p.aspectFit {
+        w = min(pw, ph * r)
+        h = w / r
+      } else {
+        w = max(pw, ph * r)
+        h = w / r
+      }
+    case let (pw?, nil):
+      w = pw
+      h = pw / r
+    case let (nil, ph?):
+      h = ph
+      w = ph * r
+    case (nil, nil):
+      let ideal = measure(child, .unspecified)
+      if ideal.width > 0 && ideal.height > 0 {
+        if p.aspectRatio == nil {
+          w = ideal.width
+          h = ideal.height
+        } else if p.aspectFit {
+          w = min(ideal.width, ideal.height * r)
+          h = w / r
+        } else {
+          w = max(ideal.width, ideal.height * r)
+          h = w / r
+        }
+      } else if ideal.width > 0 {
+        w = ideal.width
+        h = ideal.width / r
+      } else if ideal.height > 0 {
+        h = ideal.height
+        w = ideal.height * r
+      } else {
+        return offer
+      }
+    }
+    return ProposedViewSize(width: CGFloat(max(0, w)), height: CGFloat(max(0, h)))
+  }
   private func fillsUncached(_ e: Element, horizontal: Bool) -> Bool {
     let p = e.props
+    if p.hasAspectConstraint { return false }
     if horizontal ? p.frameWidth != nil || p.fixedWidth : p.frameHeight != nil || p.fixedHeight {
       return false
     }
@@ -783,10 +897,21 @@ public struct LayoutEngine {
     case .frame:
       if !e.children.isEmpty {
         let child = e.children[0]
+        let targetSize: Size
+        if e.props.hasAspectConstraint {
+          let constrained = aspectProposal(
+            e.props, child: child,
+            offer: ProposedViewSize(width: CGFloat(rect.width), height: CGFloat(rect.height)))
+          targetSize = Size(
+            width: constrained.width.map { Double($0) } ?? rect.width,
+            height: constrained.height.map { Double($0) } ?? rect.height)
+        } else {
+          targetSize = rect.size
+        }
         place(
           &e.children[0],
           in: aligned(
-            fit(child, in: rect.size), in: rect, alignment: e.props.alignment, child: child))
+            fit(child, in: targetSize), in: rect, alignment: e.props.alignment, child: child))
       }
     case .padding:
       if !e.children.isEmpty {
@@ -1170,9 +1295,14 @@ public struct LayoutEngine {
       let main =
         sizing.flex > 0
         ? sizing.minSpacer + flexShares[pos] : (vertical ? natural.height : natural.width)
-      let cross =
-        fills(child, horizontal: vertical) || child.props.flex > 0
-        ? crossExtent : min(crossExtent, vertical ? natural.width : natural.height)
+      let cross: Double
+      if fills(child, horizontal: vertical) || child.props.flex > 0 {
+        let minCross = (vertical ? child.props.minWidth : child.props.minHeight) ?? 0
+        let maxCross = (vertical ? child.props.maxWidth : child.props.maxHeight) ?? .infinity
+        cross = max(minCross, min(crossExtent, maxCross))
+      } else {
+        cross = min(crossExtent, vertical ? natural.width : natural.height)
+      }
       let size = vertical ? Size(width: cross, height: main) : Size(width: main, height: cross)
       let slot =
         vertical
