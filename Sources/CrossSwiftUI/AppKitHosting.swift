@@ -86,8 +86,25 @@ extension SwiftUIRuntime.Image {
     if let sym = nsImage.symbolName {
       self.init(systemName: sym)
     } else {
-      let path = nsImage.ensureTemporaryFilePath() ?? ""
       let sz = SwiftUIRuntime.Size(width: Double(nsImage.size.width), height: Double(nsImage.size.height))
+      if let existingFile = nsImage.filePath {
+        self.init(filePath: existingFile, size: sz, isTemplate: nsImage.isTemplate)
+        return
+      }
+      #if os(Windows)
+        if let mem = nsImage._ensureMemoryImageKey() {
+          if mem.isNew, let data = nsImage.imageData {
+            data.withUnsafeBytes { raw in
+              if let ptr = raw.bindMemory(to: UInt8.self).baseAddress {
+                sui_register_memory_image(mem.key, ptr, Int32(data.count))
+              }
+            }
+          }
+          self.init(filePath: mem.key, size: sz, isTemplate: nsImage.isTemplate)
+          return
+        }
+      #endif
+      let path = nsImage.ensureTemporaryFilePath() ?? ""
       self.init(filePath: path, size: sz, isTemplate: nsImage.isTemplate)
     }
   }

@@ -84,6 +84,7 @@ void sui_surface_layer_begin(void *surface, double x, double y, double width,
 void sui_surface_layer_end(void *surface);
 void sui_surface_image(void *surface, const char *file, double x, double y,
                        double width, double height);
+void sui_register_memory_image(const char *key, const uint8_t *bytes, int count);
 void sui_surface_clip(void *surface, double x, double y, double width,
                       double height, double radius);
 void sui_surface_restore(void *surface);

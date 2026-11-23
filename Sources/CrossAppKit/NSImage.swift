@@ -399,6 +399,7 @@ open class NSImage: NSObject, @unchecked Sendable {
   public private(set) var symbolConfiguration: SymbolConfiguration?
   public private(set) var filePath: String?
   public private(set) var imageData: Data?
+  public var _memoryImageKey: String?
   public var representations: [NSImageRep] = []
 
   public init(size: NSSize) {
@@ -559,6 +560,29 @@ open class NSImage: NSObject, @unchecked Sendable {
   public func draw(in dstSpacePortionRect: NSRect, from srcSpacePortionRect: NSRect, operation op: UInt, fraction requestedAlpha: CGFloat) {}
   public func lockFocus() {}
   public func unlockFocus() {}
+
+  public func _ensureMemoryImageKey() -> (key: String, isNew: Bool)? {
+    if let cached = _memoryImageKey {
+      return (cached, false)
+    }
+    guard let data = imageData, !data.isEmpty else { return nil }
+    var hash = UInt64(1469598103934665603)
+    let step = max(1, data.count / 256)
+    data.withUnsafeBytes { raw in
+      let bytes = raw.bindMemory(to: UInt8.self)
+      var idx = 0
+      while idx < bytes.count {
+        hash = (hash ^ UInt64(bytes[idx])) &* 1099511628211
+        idx += step
+      }
+      if bytes.count > 1 {
+        hash = (hash ^ UInt64(bytes[bytes.count - 1])) &* 1099511628211
+      }
+    }
+    let key = "mem://img_\(data.count)_\(String(hash, radix: 16))"
+    _memoryImageKey = key
+    return (key, true)
+  }
 
   public func ensureTemporaryFilePath() -> String? {
     if let filePath, FileManager.default.fileExists(atPath: filePath) {

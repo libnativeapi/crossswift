@@ -1075,12 +1075,12 @@ import Foundation
     if let commands { backend.perform(commands) }
     backend.didScroll(updated, viewport: viewport)
     if updated.hasPreferences {
-      LifecycleRegistry.shared.begin(root: rootPath)
+      LifecycleRegistry.shared.clearPending(root: rootPath)
       let savedActiveRoot = LifecycleRegistry.shared.activeRoot
       LifecycleRegistry.shared.activeRoot = ObjectIdentifier(rootPath)
       _ = resolvePreferences(updated)
       LifecycleRegistry.shared.activeRoot = savedActiveRoot
-      LifecycleRegistry.shared.commit(root: rootPath)
+      LifecycleRegistry.shared.flushEnqueued(root: rootPath)
     }
     lastTimings["backend"] = (Date.timeIntervalSinceReferenceDate - published) * 1000
     isRendering = false

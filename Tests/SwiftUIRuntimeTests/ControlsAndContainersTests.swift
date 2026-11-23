@@ -901,4 +901,77 @@ final class ControlsAndContainersTests: XCTestCase {
     XCTAssertEqual(backend.renders - initialRenders, 5)
     XCTAssertEqual(stats.phaseTransitions, [.interacting])
   }
+
+  @MainActor
+  func testUpdateScrollWithPreferencesPreservesRowLifecycleAcrossBuckets() async throws {
+    struct RowAnchorKey: PreferenceKey {
+      nonisolated(unsafe) static var defaultValue: [Int: Anchor<CGRect>] = [:]
+      static func reduce(value: inout [Int: Anchor<CGRect>], nextValue: () -> [Int: Anchor<CGRect>]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, rhs in rhs })
+      }
+    }
+    final class LifecycleProbe: @unchecked Sendable {
+      var appearCounts: [Int: Int] = [:]
+      var taskStarts: [Int: Int] = [:]
+      var cancelledRows: Set<Int> = []
+    }
+    final class NoopBackend: RenderBackend {
+      var tapHandler: ((NodeID) -> Void)?
+      func perform(_ commands: [RenderCommand]) {}
+    }
+
+    let probe = LifecycleProbe()
+    let root = ScrollView {
+      VStack(spacing: 0) {
+        ForEach(0..<120) { idx in
+          Text(verbatim: "App \(idx)")
+            .frame(height: 36)
+            .anchorPreference(key: RowAnchorKey.self, value: .bounds) { [idx: $0] }
+            .onAppear {
+              probe.appearCounts[idx, default: 0] += 1
+            }
+            .task(id: idx) {
+              probe.taskStarts[idx, default: 0] += 1
+              do {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+              } catch {
+                probe.cancelledRows.insert(idx)
+              }
+            }
+        }
+      }
+    }
+    .overlayPreferenceValue(RowAnchorKey.self) { anchors in
+      Color.clear.frame(width: CGFloat(anchors.count), height: 0)
+    }
+
+    let renderer = Renderer(
+      backend: NoopBackend(),
+      root: AnyView(root),
+      size: Size(width: 500, height: 320)
+    )
+    renderer.mount()
+    await Task.yield()
+    await Task.yield()
+
+    XCTAssertEqual(probe.appearCounts[5], 1)
+    XCTAssertEqual(probe.taskStarts[5], 1)
+    XCTAssertTrue(probe.cancelledRows.isEmpty)
+
+    // First small wheel step triggers Renderer.updateScroll() with hasPreferences == true;
+    // subsequent wheel steps cross the 128pt lazy bucket and rebuild the tree while row 5 stays mounted.
+    renderer.input(event: 5, point: CGPoint(x: 200, y: 160), value: -120)
+    await Task.yield()
+    XCTAssertFalse(probe.cancelledRows.contains(5), "updateScroll() must not cancel live row .task tasks")
+
+    for _ in 0..<4 {
+      renderer.input(event: 5, point: CGPoint(x: 200, y: 160), value: -120)
+    }
+    await Task.yield()
+    await Task.yield()
+
+    XCTAssertEqual(probe.appearCounts[5], 1, "Still-visible row must not re-fire .onAppear across scroll bucket crossings")
+    XCTAssertEqual(probe.taskStarts[5], 1, "Still-visible row must not restart .task across scroll bucket crossings")
+    XCTAssertFalse(probe.cancelledRows.contains(5))
+  }
 }

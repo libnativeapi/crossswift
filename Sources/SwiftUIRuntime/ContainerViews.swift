@@ -71,7 +71,7 @@ final class LazyHeightCache {
 
 struct ScrollViewportContext: Equatable {
   static let bucketSpan: Double = 128.0
-  static let virtualizationThreshold = 32
+  static let virtualizationThreshold = 24
   static func quantize(_ value: Double) -> Double {
     guard value.isFinite else { return 0 }
     return (value / bucketSpan).rounded(.down) * bucketSpan

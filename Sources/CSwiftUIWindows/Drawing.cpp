@@ -15,6 +15,7 @@ using std::min;
 #include <cstring>
 #include <gdiplus.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,6 +24,14 @@ using std::min;
 
 namespace {
 using namespace Gdiplus;
+std::mutex g_mem_images_mutex;
+std::unordered_map<std::wstring, std::shared_ptr<Bitmap>> g_mem_images;
+
+std::shared_ptr<Bitmap> LookupMemoryImage(const std::wstring &key) {
+  std::lock_guard<std::mutex> lock(g_mem_images_mutex);
+  auto it = g_mem_images.find(key);
+  return it != g_mem_images.end() ? it->second : nullptr;
+}
 constexpr UINT_PTR subclass_id = 0x53554950;
 constexpr UINT deferred_input = WM_APP + 581;
 struct AlphaMask {
@@ -268,6 +277,8 @@ struct Surface {
   std::vector<Command> commands;
   std::vector<Command> pending;
   std::unique_ptr<Framebuffer> buffer;
+  std::unique_ptr<Framebuffer> edit_pass_b;
+  std::unique_ptr<Framebuffer> edit_pass_w;
   bool buffer_dirty = true;
   RECT damage{};
   std::vector<RECT> damage_rects;
@@ -1803,6 +1814,11 @@ void RenderFrame(Surface *s) {
       } else if (c.kind == 8) {
         if (!IsRectVisible(c.rect))
           continue;
+        if (c.text.rfind(L"mem://", 0) == 0) {
+          if (auto mem_bmp = LookupMemoryImage(c.text))
+            target_g.DrawImage(mem_bmp.get(), c.rect);
+          continue;
+        }
         auto it = s->images.find(c.text);
         if (it == s->images.end()) {
           if (s->images.size() >= 512)
@@ -1875,6 +1891,51 @@ void RenderFrame(Surface *s) {
   s->painted_commands.clear();
   s->painted_scrolls.clear();
 }
+bool IsScrollGroupWindow(const Surface *s, HWND hwnd) {
+  for (const auto &entry : s->control_groups) {
+    if (entry.second.viewport == hwnd || entry.second.window == hwnd)
+      return true;
+  }
+  return false;
+}
+bool VisibleBoundsInHost(HWND host, HWND child, RECT &out) {
+  if (!IsWindowVisible(child))
+    return false;
+  GetWindowRect(child, &out);
+  for (HWND p = GetParent(child); p && p != host; p = GetParent(p)) {
+    RECT pr{};
+    GetWindowRect(p, &pr);
+    if (!IntersectRect(&out, &out, &pr))
+      return false;
+  }
+  MapWindowPoints(nullptr, host, reinterpret_cast<POINT *>(&out), 2);
+  return !IsRectEmpty(&out);
+}
+bool IsControlInFrontOf(HWND root, HWND front, HWND back) {
+  if (!front || !back || front == back)
+    return false;
+  HWND fa[8]{}, ba[8]{};
+  int nf = 0, nb = 0;
+  for (HWND w = front; w && w != root && nf < 8; w = GetParent(w))
+    fa[nf++] = w;
+  for (HWND w = back; w && w != root && nb < 8; w = GetParent(w))
+    ba[nb++] = w;
+  while (nf > 0 && nb > 0 && fa[nf - 1] == ba[nb - 1]) {
+    --nf;
+    --nb;
+  }
+  if (nf == 0 || nb == 0)
+    return false;
+  const HWND cf = fa[nf - 1];
+  const HWND cb = ba[nb - 1];
+  if (GetParent(cf) != GetParent(cb))
+    return false;
+  for (HWND cur = GetWindow(cf, GW_HWNDNEXT); cur; cur = GetWindow(cur, GW_HWNDNEXT)) {
+    if (cur == cb)
+      return true;
+  }
+  return false;
+}
 void Draw(Surface *s, HWND target, HDC dc) {
   RenderFrame(s);
   FrameTrace::Span blit_trace(s->trace, 7, target == s->host, target);
@@ -1891,7 +1952,7 @@ void Draw(Surface *s, HWND target, HDC dc) {
   if (GetClipBox(dc, &clip) == NULLREGION)
     return;
   const int saved = SaveDC(dc);
-  if (target == s->host) {
+  if (target == s->host || IsScrollGroupWindow(s, target)) {
     // Styled controls are input/accessibility HWNDs over this shared canvas.
     // Preserve native EDIT and unstyled BUTTON pixels; layered edits compose
     // themselves over the canvas and must retain its background underneath.
@@ -1899,9 +1960,10 @@ void Draw(Surface *s, HWND target, HDC dc) {
       if (!IsWindowVisible(hwnd) ||
           (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED))
         return;
-      RECT r;
-      GetWindowRect(hwnd, &r);
-      MapWindowPoints(nullptr, s->host, reinterpret_cast<POINT *>(&r), 2);
+      RECT r{};
+      if (!VisibleBoundsInHost(s->host, hwnd, r))
+        return;
+      OffsetRect(&r, -offset.x, -offset.y);
       ExcludeClipRect(dc, r.left, r.top, r.right, r.bottom);
     };
     for (const auto &entry : s->edits)
@@ -1937,38 +1999,57 @@ LRESULT Paint(Surface *s, HWND hwnd, UINT msg, WPARAM wp) {
   HDC dc = BeginPaint(hwnd, &ps);
   Draw(s, hwnd, dc);
   if (hwnd == s->host) {
-    RECT clip{}, client{};
-    GetClientRect(hwnd, &client);
-    // An OS-wide expose/theme repaint can invalidate every input HWND after
-    // publication. A full canvas paint already covered these styled buttons;
-    // acknowledge that damage instead of copying the same pixels per control.
-    // Partial/complex paints and overlaps with native widgets remain separate.
-    if (GetClipBox(dc, &clip) == SIMPLEREGION && EqualRect(&clip, &client)) {
-      std::vector<RECT> native;
-      auto bounds = [&](HWND child) {
+    RECT clip{};
+    // A canvas paint over `clip` already drew every scroll-grouping HWND and
+    // styled button contained inside `clip` unless that button sits in front of
+    // an excluded native widget. Acknowledge covered damage so scrolling a list
+    // does not trigger separate WM_PAINT/BitBlt cycles per control HWND.
+    if (GetClipBox(dc, &clip) == SIMPLEREGION && !IsRectEmpty(&clip)) {
+      struct NativeBounds {
+        RECT rect;
+        HWND hwnd;
+      };
+      std::vector<NativeBounds> native;
+      auto push_native = [&](HWND child) {
         RECT r{};
-        GetWindowRect(child, &r);
-        MapWindowPoints(nullptr, s->host, reinterpret_cast<POINT *>(&r), 2);
-        return r;
+        if (VisibleBoundsInHost(s->host, child, r))
+          native.push_back({r, child});
       };
       for (const auto &entry : s->edits)
-        if (IsWindowVisible(entry.first)) native.push_back(bounds(entry.first));
+        push_native(entry.first);
       for (HWND cv : s->custom_views)
-        if (IsWindowVisible(cv)) native.push_back(bounds(cv));
+        push_native(cv);
       for (const auto &entry : s->buttons)
-        if (!entry.second.custom_draw && IsWindowVisible(entry.first))
-          native.push_back(bounds(entry.first));
+        if (!entry.second.custom_draw)
+          push_native(entry.first);
+      for (const auto &group_entry : s->control_groups) {
+        for (HWND gw : {group_entry.second.viewport, group_entry.second.window}) {
+          RECT gr{}, covered{};
+          if (!VisibleBoundsInHost(s->host, gw, gr)) {
+            ValidateRect(gw, nullptr);
+          } else if (IntersectRect(&covered, &gr, &clip) && EqualRect(&covered, &gr)) {
+            ValidateRect(gw, nullptr);
+          }
+        }
+      }
       for (const auto &entry : s->buttons) {
         if (!entry.second.custom_draw) continue;
-        const auto r = bounds(entry.first);
-        RECT covered{};
+        RECT r{}, covered{};
+        if (!VisibleBoundsInHost(s->host, entry.first, r)) {
+          ValidateRect(entry.first, nullptr);
+          continue;
+        }
         if (!IntersectRect(&covered, &r, &clip) || !EqualRect(&covered, &r)) continue;
-        bool overlap = false;
+        bool overlap_in_front = false;
         for (const auto &area : native) {
           RECT intersection{};
-          overlap |= IntersectRect(&intersection, &r, &area) != FALSE;
+          if (IntersectRect(&intersection, &r, &area.rect) &&
+              IsControlInFrontOf(s->host, entry.first, area.hwnd)) {
+            overlap_in_front = true;
+            break;
+          }
         }
-        if (!overlap) ValidateRect(entry.first, nullptr);
+        if (!overlap_in_front) ValidateRect(entry.first, nullptr);
       }
     }
   }
@@ -2087,14 +2168,58 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
   POINT offset = {0, 0};
   MapWindowPoints(hwnd, s->host, &offset, 1);
 
-  Framebuffer pass_b{UINT(w), UINT(h)};
-  Framebuffer pass_w{UINT(w), UINT(h)};
+  const int buf_w = int(s->buffer->width);
+  const int buf_h = int(s->buffer->height);
+  const size_t buf_stride = size_t(s->buffer->stride_pixels);
+  const bool empty_idle =
+      (GetWindowTextLengthW(hwnd) == 0) && !hook.ime_composing;
+  const uint32_t cue_alpha = (hook.placeholder_argb >> 24) & 0xFF;
+
+  auto ensure_scratch = [](std::unique_ptr<Framebuffer> &slot, int w_px,
+                           int h_px) -> Framebuffer & {
+    const UINT uw = UINT(w_px);
+    const UINT uh = UINT(h_px);
+    if (!slot || slot->capacity_width < uw || slot->capacity_height < uh) {
+      const UINT next_w = max(uw, slot ? slot->capacity_width : 256u);
+      const UINT next_h = max(uh, slot ? slot->capacity_height : 64u);
+      slot = std::make_unique<Framebuffer>(next_w, next_h, true);
+    } else {
+      slot->width = uw;
+      slot->height = uh;
+    }
+    return *slot;
+  };
+
+  if (empty_idle && GetFocus() != hwnd &&
+      (hook.placeholder.empty() || cue_alpha == 0)) {
+    if (offset.x >= 0 && offset.y >= 0 && offset.x + w <= buf_w &&
+        offset.y + h <= buf_h) {
+      BitBlt(target_dc, 0, 0, w, h, s->buffer->dc, offset.x, offset.y, SRCCOPY);
+      return;
+    }
+    Framebuffer &scratch = ensure_scratch(s->edit_pass_b, w, h);
+    const size_t dst_stride = size_t(scratch.stride_pixels);
+    for (int y = 0; y < h; ++y) {
+      const int sy = max(0, min(buf_h - 1, int(offset.y) + y));
+      const uint32_t *bg_row = s->buffer->pixels + size_t(sy) * buf_stride;
+      uint32_t *dst_row = scratch.pixels + size_t(y) * dst_stride;
+      for (int x = 0; x < w; ++x) {
+        const int sx = max(0, min(buf_w - 1, int(offset.x) + x));
+        dst_row[x] = bg_row[sx];
+      }
+    }
+    BitBlt(target_dc, 0, 0, w, h, scratch.dc, 0, 0, SRCCOPY);
+    return;
+  }
+
+  Framebuffer &pass_b = ensure_scratch(s->edit_pass_b, w, h);
+  Framebuffer &pass_w = ensure_scratch(s->edit_pass_w, w, h);
+  const size_t pass_b_stride = size_t(pass_b.stride_pixels);
+  const size_t pass_w_stride = size_t(pass_w.stride_pixels);
   RECT full{0, 0, w, h};
   FillRect(pass_b.dc, &full, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
   FillRect(pass_w.dc, &full, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
 
-  const bool empty_idle =
-      (GetWindowTextLengthW(hwnd) == 0) && !hook.ime_composing;
   uint32_t alpha_scale = 255;
 
   struct EmojiEditSpan {
@@ -2107,7 +2232,7 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
   std::vector<EmojiEditSpan> emoji_spans;
 
   if (empty_idle) {
-    alpha_scale = (hook.placeholder_argb >> 24) & 0xFF;
+    alpha_scale = cue_alpha;
     if (!hook.placeholder.empty() && alpha_scale > 0) {
       const COLORREF cue_rgb = RGB((hook.placeholder_argb >> 16) & 0xFF,
                                    (hook.placeholder_argb >> 8) & 0xFF,
@@ -2249,8 +2374,8 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
                 const int cx0 = max(0, x0);
                 const int cx1 = min(w, x1);
                 for (int cy = 0; cy < h; ++cy) {
-                  uint32_t *rb = pass_b.pixels + size_t(cy) * size_t(w);
-                  uint32_t *rw = pass_w.pixels + size_t(cy) * size_t(w);
+                  uint32_t *rb = pass_b.pixels + size_t(cy) * pass_b_stride;
+                  uint32_t *rw = pass_w.pixels + size_t(cy) * pass_w_stride;
                   for (int cx = cx0; cx < cx1; ++cx) {
                     rb[cx] = 0xFF000000u;
                     rw[cx] = 0xFFFFFFFFu;
@@ -2266,14 +2391,11 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
     }
   }
 
-  const int buf_w = int(s->buffer->width);
-  const int buf_h = int(s->buffer->height);
-  const size_t buf_stride = size_t(s->buffer->stride_pixels);
   for (int y = 0; y < h; ++y) {
     const int sy = max(0, min(buf_h - 1, int(offset.y) + y));
     const uint32_t *bg_row = s->buffer->pixels + size_t(sy) * buf_stride;
-    uint32_t *b_row = pass_b.pixels + size_t(y) * size_t(w);
-    const uint32_t *w_row = pass_w.pixels + size_t(y) * size_t(w);
+    uint32_t *b_row = pass_b.pixels + size_t(y) * pass_b_stride;
+    const uint32_t *w_row = pass_w.pixels + size_t(y) * pass_w_stride;
     for (int x = 0; x < w; ++x) {
       const int sx = max(0, min(buf_w - 1, int(offset.x) + x));
       const uint32_t d = bg_row[sx];
@@ -3531,6 +3653,47 @@ void sui_edit_line_metrics(void *handle, void *edit, double *center,
       return;
     }
   }
+  struct EditMetricsKey {
+    UINT dpi;
+    LONG lf_height;
+    LONG lf_weight;
+    std::wstring face;
+    bool operator==(const EditMetricsKey &o) const {
+      return dpi == o.dpi && lf_height == o.lf_height &&
+             lf_weight == o.lf_weight && face == o.face;
+    }
+  };
+  struct EditMetricsKeyHash {
+    size_t operator()(const EditMetricsKey &k) const noexcept {
+      size_t h = std::hash<std::wstring>{}(k.face);
+      h ^= size_t(k.dpi) + 0x9e3779b9u + (h << 6) + (h >> 2);
+      h ^= size_t(k.lf_height) + 0x9e3779b9u + (h << 6) + (h >> 2);
+      h ^= size_t(k.lf_weight) + 0x9e3779b9u + (h << 6) + (h >> 2);
+      return h;
+    }
+  };
+  static std::unordered_map<EditMetricsKey, std::pair<double, double>,
+                            EditMetricsKeyHash>
+      s_metrics_cache;
+  EditMetricsKey cache_key{dpi, lf.lfHeight, lf.lfWeight,
+                           std::wstring(lf.lfFaceName)};
+  auto cached_it = s_metrics_cache.find(cache_key);
+  if (cached_it != s_metrics_cache.end()) {
+    const double resolved_center = cached_it->second.first;
+    const double resolved_height = cached_it->second.second;
+    if (found != s->edits.end()) {
+      auto &hook = found->second;
+      hook.cached_dpi = dpi;
+      hook.lf_height = lf.lfHeight;
+      hook.lf_weight = lf.lfWeight;
+      wcsncpy_s(hook.face, LF_FACESIZE, lf.lfFaceName, _TRUNCATE);
+      hook.line_center = resolved_center;
+      hook.line_height = resolved_height;
+    }
+    *center = resolved_center;
+    *height = resolved_height;
+    return;
+  }
   HDC dc = CreateCompatibleDC(nullptr);
   HGDIOBJ old_font = SelectObject(dc, hfont);
   TEXTMETRICW tm{};
@@ -3577,6 +3740,10 @@ void sui_edit_line_metrics(void *handle, void *edit, double *center,
   }
   SelectObject(dc, old_font);
   DeleteDC(dc);
+  if (s_metrics_cache.size() >= 128)
+    s_metrics_cache.clear();
+  s_metrics_cache.emplace(std::move(cache_key),
+                          std::make_pair(resolved_center, resolved_height));
   if (found != s->edits.end()) {
     auto &hook = found->second;
     hook.cached_dpi = dpi;
@@ -3828,6 +3995,52 @@ void sui_surface_image(void *h, const char *file, double x, double y,
   c.text = Wide(file);
   static_cast<Surface *>(h)->pending.push_back(std::move(c));
 }
+void sui_register_memory_image(const char *key, const uint8_t *bytes, int count) {
+  if (!key || !*key || !bytes || count <= 0)
+    return;
+  InitializeGraphics();
+  std::wstring wkey = Wide(key);
+  {
+    std::lock_guard<std::mutex> lock(g_mem_images_mutex);
+    if (g_mem_images.find(wkey) != g_mem_images.end())
+      return;
+  }
+  HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, size_t(count));
+  if (!hg)
+    return;
+  void *dst = GlobalLock(hg);
+  if (!dst) {
+    GlobalFree(hg);
+    return;
+  }
+  std::memcpy(dst, bytes, size_t(count));
+  GlobalUnlock(hg);
+  IStream *stream = nullptr;
+  if (FAILED(CreateStreamOnHGlobal(hg, TRUE, &stream)) || !stream) {
+    GlobalFree(hg);
+    return;
+  }
+  std::shared_ptr<Bitmap> decoded;
+  {
+    std::unique_ptr<Image> src(Image::FromStream(stream));
+    if (src && src->GetLastStatus() == Ok && src->GetWidth() > 0 &&
+        src->GetHeight() > 0) {
+      const UINT iw = src->GetWidth(), ih = src->GetHeight();
+      decoded = std::make_shared<Bitmap>(INT(iw), INT(ih), PixelFormat32bppPARGB);
+      Graphics img_g(decoded.get());
+      img_g.SetCompositingMode(CompositingModeSourceCopy);
+      img_g.DrawImage(src.get(), Rect(0, 0, INT(iw), INT(ih)),
+                      0, 0, INT(iw), INT(ih), UnitPixel);
+    }
+  }
+  stream->Release();
+  if (decoded) {
+    std::lock_guard<std::mutex> lock(g_mem_images_mutex);
+    if (g_mem_images.size() >= 1024 && !g_mem_images.count(wkey))
+      g_mem_images.erase(g_mem_images.begin());
+    g_mem_images[std::move(wkey)] = std::move(decoded);
+  }
+}
 void sui_surface_clip(void *h, double x, double y, double w, double height,
                       double radius) {
   static_cast<Surface *>(h)->pending.push_back(Box(2, x, y, w, height, radius));
@@ -3915,16 +4128,18 @@ void sui_surface_end(void *h) {
   }
   if (!IsRectEmpty(&s->damage)) {
     s->buffer_dirty = true;
-    std::vector<RECT> native_damage;
+    struct DamagedNative {
+      RECT rect;
+      HWND hwnd;
+    };
+    std::vector<DamagedNative> native_damage;
     auto native_area = [&](HWND hwnd) {
-      if (!IsWindowVisible(hwnd) ||
+      RECT r{};
+      if (!VisibleBoundsInHost(s->host, hwnd, r) ||
           (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED))
         return;
-      RECT r;
-      GetWindowRect(hwnd, &r);
-      MapWindowPoints(nullptr, s->host, reinterpret_cast<POINT *>(&r), 2);
       if (IntersectRect(&r, &r, &s->damage))
-        native_damage.push_back(r);
+        native_damage.push_back({r, hwnd});
     };
     for (const auto &entry : s->edits)
       native_area(entry.first);
@@ -3947,14 +4162,15 @@ void sui_surface_end(void *h) {
     }
     for (const auto &entry : s->buttons) {
       if (entry.second.custom_draw) {
-        // A styled popup over an opaque native editor still needs its own
-        // paint: the canvas deliberately excludes that editor's rectangle.
+        // A styled popup in front of an excluded native editor still needs its
+        // own paint; background hover buttons behind that editor do not.
         if (!native_damage.empty()) {
-          RECT r, overlap;
-          GetWindowRect(entry.first, &r);
-          MapWindowPoints(nullptr, s->host, reinterpret_cast<POINT *>(&r), 2);
+          RECT r{}, overlap{};
+          if (!VisibleBoundsInHost(s->host, entry.first, r))
+            continue;
           for (const auto &native : native_damage) {
-            if (IntersectRect(&overlap, &r, &native)) {
+            if (IntersectRect(&overlap, &r, &native.rect) &&
+                IsControlInFrontOf(s->host, entry.first, native.hwnd)) {
               InvalidateRect(entry.first, nullptr, FALSE);
               break;
             }

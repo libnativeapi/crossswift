@@ -30,6 +30,14 @@ final class LifecycleRegistry {
     liveByRoot[rootID] = []
     pendingByRoot[rootID] = []
   }
+  func clearPending(root: ViewPath) {
+    pendingByRoot[ObjectIdentifier(root)] = []
+  }
+  func flushEnqueued(root: ViewPath) {
+    let rootID = ObjectIdentifier(root)
+    let work = pendingByRoot.removeValue(forKey: rootID) ?? []
+    work.forEach { $0() }
+  }
   func register(
     _ key: StateKey, value: AnyHashable, appear: (() -> Void)?, change: (() -> Void)?,
     disappear: (() -> Void)?, task: (() async -> Void)?
