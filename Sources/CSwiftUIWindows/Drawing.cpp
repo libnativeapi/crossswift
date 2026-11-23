@@ -95,6 +95,7 @@ struct EditHook {
   bool transparent_bg = true;
   bool en_change_fired = false;
   bool pending_text_paint = false;
+  bool needs_paint = true;
   bool caret_hidden = false;
   bool ime_composing = false;
   bool multiline = false;
@@ -2066,6 +2067,12 @@ LRESULT Paint(Surface *s, HWND hwnd, UINT msg, WPARAM wp) {
   }
   EndPaint(hwnd, &ps);
   if (hwnd == s->host) {
+    for (const auto &entry : s->edits) {
+      if (entry.second.needs_paint && IsWindow(entry.first) &&
+          IsWindowVisible(entry.first)) {
+        InvalidateRect(entry.first, nullptr, FALSE);
+      }
+    }
     FrameTrace::Span marker_trace(s->trace, 8, 0, hwnd);
     s->trace.Marker(hwnd);
   }
@@ -2129,6 +2136,7 @@ namespace {
 constexpr UINT_PTR kEditPrintSubclassId = 0x5AD00002u;
 HWND g_print_edit = nullptr;
 COLORREF g_print_bg = CLR_INVALID;
+COLORREF g_print_fg = CLR_INVALID;
 
 LRESULT CALLBACK EditPrintColorSubclassProc(HWND wnd, UINT msg, WPARAM wp,
                                             LPARAM lp, UINT_PTR, DWORD_PTR) {
@@ -2136,6 +2144,8 @@ LRESULT CALLBACK EditPrintColorSubclassProc(HWND wnd, UINT msg, WPARAM wp,
   if ((msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORSTATIC) &&
       reinterpret_cast<HWND>(lp) == g_print_edit && g_print_bg != CLR_INVALID) {
     HDC hdc = reinterpret_cast<HDC>(wp);
+    if (g_print_fg != CLR_INVALID)
+      SetTextColor(hdc, g_print_fg);
     SetBkColor(hdc, g_print_bg);
     SetBkMode(hdc, OPAQUE);
     return reinterpret_cast<LRESULT>(
@@ -2280,6 +2290,8 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
     }
 
     g_print_edit = hwnd;
+    g_print_fg = RGB((hook.text_argb >> 16) & 0xFF,
+                     (hook.text_argb >> 8) & 0xFF, hook.text_argb & 0xFF);
     const BOOL hooked = SetWindowSubclass(
         parent, EditPrintColorSubclassProc, kEditPrintSubclassId, 0);
 
@@ -2296,6 +2308,7 @@ void CompositeTransparentEditToDC(Surface *s, HWND hwnd, HDC target_dc) {
     }
     g_print_edit = nullptr;
     g_print_bg = CLR_INVALID;
+    g_print_fg = CLR_INVALID;
 
     if (saved_style & WS_DISABLED) {
       SetWindowLongPtrW(hwnd, GWL_STYLE, saved_style);
@@ -2470,9 +2483,15 @@ void PaintTransparentEdit(Surface *s, HWND hwnd) {
   CompositeTransparentEditToDC(s, hwnd, screen_dc);
   EndPaint(hwnd, &ps);
   auto hook_it = s->edits.find(hwnd);
-  if (hook_it != s->edits.end() && hook_it->second.caret_hidden) {
-    hook_it->second.caret_hidden = false;
-    ShowCaret(hwnd);
+  if (hook_it != s->edits.end()) {
+    if (IsWindowVisible(hwnd) && s->buffer && s->buffer->width > 0 &&
+        s->buffer->height > 0) {
+      hook_it->second.needs_paint = false;
+    }
+    if (hook_it->second.caret_hidden) {
+      hook_it->second.caret_hidden = false;
+      ShowCaret(hwnd);
+    }
   }
 }
 } // namespace
@@ -3467,8 +3486,11 @@ void sui_edit_set_transparent(void *handle, void *edit, int transparent,
   } else {
     hook.bg_color = CLR_INVALID;
   }
-  if (visual_changed && IsWindow(hwnd) && !s->defer_commit) {
-    InvalidateRect(hwnd, nullptr, FALSE);
+  if (visual_changed) {
+    hook.needs_paint = true;
+    if (IsWindow(hwnd) && !s->defer_commit) {
+      InvalidateRect(hwnd, nullptr, FALSE);
+    }
   }
 }
 void sui_surface_set_background(void *handle, uint32_t argb) {
@@ -3550,9 +3572,9 @@ void sui_surface_flush_edits(void *handle) {
   auto *s = static_cast<Surface *>(handle);
   if (!s || !s->host || !IsWindow(s->host) || s->defer_commit) return;
   for (auto &entry : s->edits) {
-    if (entry.second.pending_text_paint) {
-      entry.second.pending_text_paint = false;
+    if (entry.second.pending_text_paint || entry.second.needs_paint) {
       if (IsWindow(entry.first) && IsWindowVisible(entry.first)) {
+        entry.second.pending_text_paint = false;
         RedrawWindow(
             entry.first, nullptr, nullptr,
             RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
@@ -3573,6 +3595,7 @@ void sui_surface_set_content_offset(void *handle, double ox, double oy) {
   s->offset_changed_since_paint = true;
   s->buffer_dirty = true;
   s->scroll_copy = {};
+  for (auto &entry : s->edits) entry.second.needs_paint = true;
   RECT client = SurfaceClientRect(s);
   UnionRect(&s->damage, &s->damage, &client);
   s->damage_rects.clear();
@@ -3588,6 +3611,7 @@ void sui_surface_set_pending_offset(void *handle, double ox, double oy) {
     s->offset_changed_since_paint = true;
     s->buffer_dirty = true;
     s->scroll_copy = {};
+    for (auto &entry : s->edits) entry.second.needs_paint = true;
     RECT client = SurfaceClientRect(s);
     UnionRect(&s->damage, &s->damage, &client);
     s->damage_rects.clear();
@@ -3790,8 +3814,13 @@ void sui_surface_control_clip(void *handle, void *control, double x, double y,
   double scale = GetDpiForWindow(hwnd) / 96.;
   const bool visible = w > 0 && h > 0;
   const bool style_visible = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VISIBLE) != 0;
-  if (style_visible != visible)
+  if (style_visible != visible) {
     ShowWindow(hwnd, visible ? SW_SHOWNA : SW_HIDE);
+    if (visible && s) {
+      auto ed = s->edits.find(hwnd);
+      if (ed != s->edits.end()) ed->second.needs_paint = true;
+    }
+  }
   RECT rect{};
   GetClientRect(hwnd, &rect);
   RECT clipped{int(std::floor(x * scale)),
@@ -4167,8 +4196,23 @@ void sui_surface_end(void *h) {
       if (!s->damage_rects.empty()) AddDamageRect(s->damage_rects, exposed);
     }
     if (s->native_state_changed) {
+      std::vector<HWND> wiped_native_children;
+      for (auto &entry : s->edits) {
+        if (GetUpdateRect(entry.first, nullptr, FALSE))
+          entry.second.needs_paint = true;
+      }
+      for (HWND cv : s->custom_views) {
+        if (GetUpdateRect(cv, nullptr, FALSE))
+          wiped_native_children.push_back(cv);
+      }
+      for (const auto &entry : s->buttons) {
+        if (!entry.second.custom_draw && GetUpdateRect(entry.first, nullptr, FALSE))
+          wiped_native_children.push_back(entry.first);
+      }
       RedrawWindow(s->host, nullptr, nullptr,
                    RDW_VALIDATE | RDW_NOERASE | RDW_NOFRAME | RDW_ALLCHILDREN);
+      for (HWND child : wiped_native_children)
+        InvalidateRect(child, nullptr, FALSE);
       s->native_state_changed = false;
     }
     for (const auto &entry : s->buttons) {
@@ -4203,18 +4247,26 @@ void sui_surface_end(void *h) {
         RDW_INVALIDATE | RDW_NOCHILDREN | (any_pending_edit ? RDW_UPDATENOW : 0));
     for (auto &entry : s->edits) {
       const bool was_pending = entry.second.pending_text_paint;
-      if (!was_pending && !IsWindowVisible(entry.first))
-        continue;
+      if (!IsWindowVisible(entry.first)) {
+        entry.second.needs_paint = true;
+        if (!was_pending)
+          continue;
+      }
       RECT r;
       GetWindowRect(entry.first, &r);
       MapWindowPoints(nullptr, s->host, reinterpret_cast<POINT *>(&r), 2);
-      if (was_pending || IntersectRect(&r, &r, &frame_damage)) {
+      const bool must_paint =
+          was_pending || entry.second.needs_paint ||
+          IntersectRect(&r, &r, &frame_damage) != 0;
+      if (must_paint) {
         entry.second.pending_text_paint = false;
         if (entry.second.transparent_bg) {
           RedrawWindow(
               entry.first, nullptr, nullptr,
-              RDW_INVALIDATE | RDW_NOERASE | (was_pending ? RDW_UPDATENOW : 0));
+              RDW_INVALIDATE | RDW_NOERASE |
+                  ((was_pending || entry.second.needs_paint) ? RDW_UPDATENOW : 0));
         } else {
+          entry.second.needs_paint = false;
           RedrawWindow(entry.first, nullptr, nullptr,
                        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
         }
@@ -4323,6 +4375,9 @@ void sui_control_frame(void *handle, void *control, double x, double y,
     // NativeAPI owns the control hierarchy, coalesced layout and deferred moves.
     native_view_set_frame(view, {local_x, local_y, width, height});
   }
+  auto ed_it = s->edits.find(hwnd);
+  if (ed_it != s->edits.end())
+    ed_it->second.needs_paint = true;
   RECT client = SurfaceClientRect(s), damage;
   UnionRect(&damage, &before, &after);
   OffsetRect(&damage, context.x, context.y);

@@ -548,6 +548,9 @@ open class NSView: NSResponder {
       subviews[0].applySurfaceContentOffset(x: x, y: y)
     }
   }
+  open func flushNativeWindowPaint() {
+    for sub in subviews { sub.flushNativeWindowPaint() }
+  }
   open func applyWindowFrameChange(
     contentSize: NSSize,
     envelopeSize: NSSize? = nil,

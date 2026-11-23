@@ -29,6 +29,10 @@ uint32_t control_print_pixel(void *control, int px, int py);
 void control_send_key(void *control, int vk);
 void control_send_char(void *control, int ch);
 int host_region_distinct_pixels(void *host, double x, double y, double w, double h);
+void pump_pending_win32_messages(void);
+uint32_t control_screen_pixel_in_window(void *root_window, void *control, int rel_x, int rel_y);
+int control_offset_in_host_x(void *host, void *control);
+int control_offset_in_host_y(void *host, void *control);
 #ifdef __cplusplus
 }
 #endif

@@ -497,7 +497,7 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
   }
 
   #if os(Windows)
-    private var backend: WindowsDrawingBackend?
+    internal private(set) var backend: WindowsDrawingBackend?
     private var keyWindowObserver: NSObjectProtocol?
     private var isApplyingWindowResize = false
     private var isCommittingPendingWindowBounds = false
@@ -581,11 +581,28 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
 
   open override func applySurfaceContentOffset(x: Double, y: Double) {
     #if os(Windows)
+      let changed =
+        abs(Double(surfaceContentOffset.x) - x) > 1e-4
+        || abs(Double(surfaceContentOffset.y) - y) > 1e-4
       surfaceContentOffset = NSPoint(x: x, y: y)
       if x != 0 || y != 0 {
         usesEnvelopeSizing = true
       }
       backend?.setContentOffset(x: x, y: y)
+      if changed {
+        renderer?.setNeedsRender()
+      }
+    #endif
+  }
+
+  open override func flushNativeWindowPaint() {
+    #if os(Windows)
+      if !isApplyingWindowResize && pendingWindowBoundsCommit == nil {
+        ActiveHostingContext.currentHostingView = self
+        defer { ActiveHostingContext.currentHostingView = nil }
+        renderer?.renderIfNeeded()
+        backend?.flushSyncPaint()
+      }
     #endif
   }
 

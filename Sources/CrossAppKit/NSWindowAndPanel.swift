@@ -908,6 +908,7 @@ open class NSWindow: NSResponder {
   }
 
   open func makeKeyAndOrderFront(_ sender: Any?) {
+    let wasVisible = isVisible
     #if os(Windows)
       ensureTransparentEnvelopeBeforeShow()
     #endif
@@ -926,6 +927,11 @@ open class NSWindow: NSResponder {
       }
       contentView?.layoutSubtreeIfNeeded()
       nativeWindow?.show()
+      #if os(Windows)
+        if !wasVisible {
+          contentView?.flushNativeWindowPaint()
+        }
+      #endif
       if canBecomeKey { nativeWindow?.focus() }
     #endif
     becomeKey()
@@ -941,6 +947,7 @@ open class NSWindow: NSResponder {
   }
 
   open func orderFront(_ sender: Any?) {
+    let wasVisible = isVisible
     #if os(Windows)
       ensureTransparentEnvelopeBeforeShow()
     #endif
@@ -957,10 +964,16 @@ open class NSWindow: NSResponder {
       } else {
         nativeWindow?.show()
       }
+      #if os(Windows)
+        if !wasVisible {
+          contentView?.flushNativeWindowPaint()
+        }
+      #endif
     #endif
   }
 
   open func orderFrontRegardless() {
+    let wasVisible = isVisible
     #if os(Windows)
       ensureTransparentEnvelopeBeforeShow()
     #endif
@@ -971,11 +984,17 @@ open class NSWindow: NSResponder {
           cak_window_apply_frameless(hwnd, 1)
         }
       #endif
+      contentView?.layoutSubtreeIfNeeded()
       if canBecomeKey && isKeyWindow {
         nativeWindow?.show()
       } else {
         nativeWindow?.showInactive()
       }
+      #if os(Windows)
+        if !wasVisible {
+          contentView?.flushNativeWindowPaint()
+        }
+      #endif
     #endif
   }
 

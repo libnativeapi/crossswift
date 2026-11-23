@@ -5,6 +5,8 @@
 
 #include <cmath>
 #include <commctrl.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 
 namespace {
 struct Probe {
@@ -687,4 +689,76 @@ extern "C" void control_send_char(void *control, int ch) {
   HWND hwnd = static_cast<HWND>(control);
   if (!hwnd || !IsWindow(hwnd)) return;
   SendMessageW(hwnd, WM_CHAR, static_cast<WPARAM>(ch), 0);
+}
+
+extern "C" void pump_pending_win32_messages(void) {
+  MSG msg{};
+  int guard = 0;
+  while (guard++ < 512 && PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+    if (msg.message == WM_QUIT) {
+      PostQuitMessage(static_cast<int>(msg.wParam));
+      break;
+    }
+    TranslateMessage(&msg);
+    DispatchMessageW(&msg);
+  }
+}
+
+extern "C" uint32_t control_screen_pixel_in_window(void *root_window, void *control, int rel_x, int rel_y) {
+  HWND root = static_cast<HWND>(root_window);
+  HWND hwnd = static_cast<HWND>(control);
+  if (!root || !IsWindow(root) || !hwnd || !IsWindow(hwnd)) return 0;
+  DwmFlush();
+  RECT wr{}, cr{};
+  if (!GetWindowRect(root, &wr) || !GetWindowRect(hwnd, &cr)) return 0;
+  const int ww = wr.right - wr.left;
+  const int wh = wr.bottom - wr.top;
+  if (ww <= 0 || wh <= 0) return 0;
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = ww;
+  bmi.bmiHeader.biHeight = -wh;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  uint32_t *pixels = nullptr;
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(screen);
+  HBITMAP dib = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, reinterpret_cast<void **>(&pixels), nullptr, 0);
+  ReleaseDC(nullptr, screen);
+  if (!dib || !pixels) {
+    if (dib) DeleteObject(dib);
+    DeleteDC(mem);
+    return 0;
+  }
+  HGDIOBJ old = SelectObject(mem, dib);
+  PrintWindow(root, mem, 0x00000002u /* PW_RENDERFULLCONTENT */);
+  GdiFlush();
+  const int px = (cr.left - wr.left) + rel_x;
+  const int py = (cr.top - wr.top) + rel_y;
+  const int sx = px < 0 ? 0 : (px >= ww ? ww - 1 : px);
+  const int sy = py < 0 ? 0 : (py >= wh ? wh - 1 : py);
+  const uint32_t out = pixels[sy * ww + sx];
+  SelectObject(mem, old);
+  DeleteObject(dib);
+  DeleteDC(mem);
+  return out;
+}
+
+extern "C" int control_offset_in_host_x(void *host, void *control) {
+  HWND h = static_cast<HWND>(host);
+  HWND c = static_cast<HWND>(control);
+  if (!h || !c || !IsWindow(h) || !IsWindow(c)) return -99999;
+  POINT pt{0, 0};
+  MapWindowPoints(c, h, &pt, 1);
+  return int(pt.x);
+}
+
+extern "C" int control_offset_in_host_y(void *host, void *control) {
+  HWND h = static_cast<HWND>(host);
+  HWND c = static_cast<HWND>(control);
+  if (!h || !c || !IsWindow(h) || !IsWindow(c)) return -99999;
+  POINT pt{0, 0};
+  MapWindowPoints(c, h, &pt, 1);
+  return int(pt.y);
 }

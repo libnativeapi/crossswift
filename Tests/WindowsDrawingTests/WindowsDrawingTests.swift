@@ -661,6 +661,187 @@ final class WindowsDrawingTests: XCTestCase {
         "Symbol at index \(idx) (\(presetSymbols[idx])) rendered blank inside popover")
     }
   }
+
+  @MainActor
+  func testBorderlessTransparentPanelFormEditsRenderNonBlackOnInitialShow() throws {
+    WindowsDrawingBackend.prepareApplication()
+    _ = NativeAPI.Application.shared.isRunning()
+    CrossAppKit.NSApplication.shared.appearance = CrossAppKit.NSAppearance(named: .darkAqua)
+
+    let state = MCPProbeState()
+    let hosting = NSHostingView(rootView: MCPEditorProbe(state: state))
+    hosting.setFrameSize(NSSize(width: 1, height: 1))
+    hosting.layoutSubtreeIfNeeded()
+    let fitting = hosting.fittingSize
+    hosting.setFrameSize(NSSize(width: max(520, fitting.width), height: max(460, fitting.height)))
+
+    let panel = CrossAppKit.NSPanel(
+      contentRect: NSRect(origin: .zero, size: hosting.frame.size),
+      styleMask: [.borderless, .fullSizeContentView],
+      backing: .buffered,
+      defer: false
+    )
+    panel.isFloatingPanel = true
+    panel.becomesKeyOnlyIfNeeded = false
+    panel.isOpaque = false
+    panel.backgroundColor = CrossAppKit.NSColor.clear
+    panel.hasShadow = true
+    panel.isReleasedWhenClosed = false
+    panel.contentView = hosting
+    defer { panel.close() }
+
+    panel.setFrameOrigin(NSPoint(x: 180, y: 160))
+    panel.makeKeyAndOrderFront(nil)
+    pump_pending_win32_messages()
+
+    // Mimic SettingsEditorPresenter.focusAfterLayout(panel:)
+    panel.makeKey()
+    panel.selectNextKeyView(nil)
+    pump_pending_win32_messages()
+
+    let backend = try XCTUnwrap(hosting.backend)
+    let renderer = try XCTUnwrap(hosting.renderer)
+    let tree = try XCTUnwrap(renderer.tree)
+    var fieldNodes: [Element] = []
+    func collectFields(_ node: Element) {
+      if node.kind == .textField { fieldNodes.append(node); return }
+      for child in node.children { collectFields(child) }
+    }
+    collectFields(tree)
+    XCTAssertEqual(fieldNodes.count, 4, "Expected Name, URL, Header, Value fields")
+
+    let rootHwnd = try XCTUnwrap(panel.nativeWindow?.nativeObject)
+    let hostHwnd = try XCTUnwrap(panel.nativeWindow?.contentView?.nativeObject)
+    let dpiScale = Double(CrossAppKit.NSScreen.main?.backingScaleFactor ?? 1.0)
+
+    for (index, fieldNode) in fieldNodes.enumerated() {
+      let tf = try XCTUnwrap(backend.nativeTextField(fieldNode.id))
+      let hwnd = try XCTUnwrap(tf.nativeObject)
+      let hostOffX = Int(control_offset_in_host_x(hostHwnd, hwnd))
+      let hostOffY = Int(control_offset_in_host_y(hostHwnd, hwnd))
+      let expectedMinX = Int((44.0 * dpiScale).rounded())
+      let expectedMinY = Int((44.0 * dpiScale).rounded())
+      XCTAssertGreaterThan(
+        hostOffX, expectedMinX,
+        "Field[\(index)] X offset (\(hostOffX)) missed transparent envelope offset")
+      XCTAssertGreaterThan(
+        hostOffY, expectedMinY,
+        "Field[\(index)] Y offset (\(hostOffY)) missed transparent envelope offset")
+
+      // Sample right-side background pixel of each field in composed DWM window output
+      let sampleX = Int32(max(4, Int((fieldNode.frame.width * 0.85 * dpiScale).rounded())))
+      let sampleY = Int32(max(2, Int((fieldNode.frame.height * 0.5 * dpiScale).rounded())))
+      let argb = control_screen_pixel_in_window(rootHwnd, hwnd, sampleX, sampleY)
+      let r = (argb >> 16) & 0xFF
+      let g = (argb >> 8) & 0xFF
+      let b = argb & 0xFF
+      XCTAssertGreaterThan(
+        r, 25,
+        "Field[\(index)] rendered black on initial show before click: argb=0x\(String(argb, radix: 16))")
+      XCTAssertEqual(Int(r), Int(g), accuracy: 8)
+      XCTAssertGreaterThan(b, 25)
+    }
+
+    // Header ("Authorization") must also render light text ink on dark field background
+    let headerHwnd = try XCTUnwrap(backend.nativeTextField(fieldNodes[2].id)?.nativeObject)
+    var maxLuma = 0
+    for px in stride(from: 2, to: 90, by: 2) {
+      let p = control_screen_pixel_in_window(
+        rootHwnd, headerHwnd, Int32(px), Int32((10.0 * dpiScale).rounded()))
+      let lum = Int(((p >> 16) & 0xFF) + ((p >> 8) & 0xFF) + (p & 0xFF)) / 3
+      if lum > maxLuma { maxLuma = lum }
+    }
+    XCTAssertGreaterThan(maxLuma, 120, "Header initial text 'Authorization' must render light glyphs, got maxLuma=\(maxLuma)")
+  }
+}
+
+@MainActor
+@Observable
+private final class MCPProbeState {
+  var name = ""
+  var url = ""
+  var headerName = "Authorization"
+  var headerValue = ""
+  var usesOAuth = false
+  var kind = 0
+}
+
+private struct SegmentedHostedProbe: NSViewRepresentable {
+  @Binding var selection: Int
+  func makeNSView(context: Context) -> CrossAppKit.NSSegmentedControl {
+    let control = CrossAppKit.NSSegmentedControl(
+      labels: ["HTTP", "Local Command"], trackingMode: .selectOne, target: nil, action: nil)
+    control.setWidth(76, forSegment: 0)
+    control.setWidth(128, forSegment: 1)
+    return control
+  }
+  func updateNSView(_ nsView: CrossAppKit.NSSegmentedControl, context: Context) {
+    nsView.selectedSegment = selection
+  }
+  func sizeThatFits(
+    _ proposal: ProposedViewSize, nsView: CrossAppKit.NSSegmentedControl, context: Context
+  ) -> CGSize? {
+    CGSize(width: 204, height: nsView.intrinsicContentSize.height)
+  }
+}
+
+private struct MCPEditorProbe: SwiftUIRuntime.View {
+  @Bindable var state: MCPProbeState
+  var body: some SwiftUIRuntime.View {
+    let cardShape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+    let fieldShape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+    let fieldBg = SwiftUIRuntime.Color(red: 0.19, green: 0.19, blue: 0.21)
+    let cardBg = SwiftUIRuntime.Color(red: 0.13, green: 0.13, blue: 0.15)
+    SwiftUIRuntime.VStack(spacing: 0) {
+      SwiftUIRuntime.Text("Add MCP Server")
+        .font(.headline)
+        .foregroundStyle(SwiftUIRuntime.Color.white)
+        .padding(20)
+      SwiftUIRuntime.Form {
+        SwiftUIRuntime.Section {
+          SwiftUIRuntime.TextField("Name", text: $state.name, prompt: SwiftUIRuntime.Text("GitHub"))
+            .textFieldStyle(.plain)
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .background(fieldShape.fill(fieldBg))
+          SegmentedHostedProbe(selection: $state.kind)
+          SwiftUIRuntime.TextField(
+            "URL", text: $state.url, prompt: SwiftUIRuntime.Text("https://example.com/mcp")
+          )
+          .textFieldStyle(.plain)
+          .padding(.horizontal, 8)
+          .frame(height: 26)
+          .background(fieldShape.fill(fieldBg))
+          SwiftUIRuntime.Picker("Authentication", selection: $state.usesOAuth) {
+            SwiftUIRuntime.Text("Header").tag(false)
+            SwiftUIRuntime.Text("OAuth").tag(true)
+          }
+          SwiftUIRuntime.TextField(
+            "Header", text: $state.headerName, prompt: SwiftUIRuntime.Text("Authorization")
+          )
+          .textFieldStyle(.plain)
+          .padding(.horizontal, 8)
+          .frame(height: 26)
+          .background(fieldShape.fill(fieldBg))
+          SwiftUIRuntime.HStack(spacing: 6) {
+            SwiftUIRuntime.SecureField(
+              "Value", text: $state.headerValue, prompt: SwiftUIRuntime.Text("Bearer …")
+            )
+            .textFieldStyle(.plain)
+            SwiftUIRuntime.Button("Show") {}
+              .buttonStyle(.plain)
+              .disabled(state.headerValue.isEmpty)
+          }
+          .padding(.horizontal, 8)
+          .frame(height: 26)
+          .background(fieldShape.fill(fieldBg))
+        }
+      }
+    }
+    .frame(width: 520, height: 460)
+    .background(cardShape.fill(cardBg))
+    .preferredColorScheme(.dark)
+  }
 }
 
 @Observable
