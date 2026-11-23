@@ -1296,6 +1296,21 @@ void *cak_focused_hwnd(void) {
   return GetFocus();
 }
 
+int cak_is_edit_hwnd(void *hwnd_ptr) {
+  HWND hwnd = static_cast<HWND>(hwnd_ptr);
+  if (!hwnd || !IsWindow(hwnd)) return 0;
+  wchar_t cls[32]{};
+  if (GetClassNameW(hwnd, cls, 32) <= 0) return 0;
+  return (_wcsicmp(cls, L"Edit") == 0 || wcsstr(cls, L"RichEdit") != nullptr) ? 1 : 0;
+}
+
+void cak_focus_hwnd(void *hwnd_ptr) {
+  HWND hwnd = static_cast<HWND>(hwnd_ptr);
+  if (hwnd && IsWindow(hwnd)) {
+    SetFocus(hwnd);
+  }
+}
+
 void cak_edit_get_selection(void *hwnd_ptr, int *out_start, int *out_length) {
   HWND hwnd = static_cast<HWND>(hwnd_ptr);
   DWORD s = 0, e = 0;

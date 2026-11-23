@@ -54,6 +54,7 @@ public struct _HostedViewPrimitive: View, _PrimitiveView {
     let key = AnyHashable(path)
     bindPath?(key)
     var el = Element(kind: .hostedView)
+    el.explicitID = key
     el.hostedViewAdapter = adapter
     el.hostedViewMeasure = { proposal in measure(key, proposal) }
     if let hitTest {

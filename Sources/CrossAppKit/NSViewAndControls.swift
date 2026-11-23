@@ -362,12 +362,13 @@ open class NSView: NSResponder {
   public static let noIntrinsicMetric: CGFloat = -1
   public static let frameDidChangeNotification = Notification.Name("NSViewFrameDidChangeNotification")
   public static let boundsDidChangeNotification = Notification.Name("NSViewBoundsDidChangeNotification")
+  public var managesNativeFrameExternally: Bool = false
 
   public var frame: NSRect {
     didSet {
       bounds.size = frame.size
       #if !os(macOS)
-        if let nv = ownedNativeView {
+        if !managesNativeFrameExternally, let nv = ownedNativeView {
           nv.setFrame(NativeAPI.Rectangle(
             x: Double(frame.origin.x),
             y: Double(frame.origin.y),
@@ -597,9 +598,24 @@ open class NSView: NSResponder {
     accessibilityRoleValue = role
   }
 
+  public func accessibilityRole() -> NSAccessibility.Role {
+    accessibilityRoleValue
+  }
+
+  open func moveKeyViewFocus(from sender: Any?, backward: Bool) -> Bool {
+    if subviews.count == 1 {
+      return subviews[0].moveKeyViewFocus(from: sender, backward: backward)
+    }
+    return false
+  }
+
   open func hitTest(_ point: NSPoint) -> NSView? {
     guard !isHidden, alphaValue > 0.01, frame.contains(point) else { return nil }
-    let local = NSPoint(x: point.x - frame.origin.x, y: point.y - frame.origin.y)
+    let parentFlipped = superview?.isFlipped ?? false
+    let localY = (isFlipped != parentFlipped)
+      ? (frame.height - (point.y - frame.origin.y))
+      : (point.y - frame.origin.y)
+    let local = NSPoint(x: point.x - frame.origin.x, y: localY)
     for child in subviews.reversed() {
       if let hit = child.hitTest(local) { return hit }
     }
@@ -970,25 +986,48 @@ open class NSTextInputContext: NSObject {
 
 @MainActor
 public protocol NSTextViewDelegate: NSObjectProtocol {
+  func textDidBeginEditing(_ notification: Notification)
+  func textDidEndEditing(_ notification: Notification)
   func textDidChange(_ notification: Notification)
   func textViewDidChangeSelection(_ notification: Notification)
+  func textView(
+    _ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange,
+    replacementString: String?
+  ) -> Bool
   func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool
 }
 
 extension NSTextViewDelegate {
+  public func textDidBeginEditing(_ notification: Notification) {}
+  public func textDidEndEditing(_ notification: Notification) {}
   public func textDidChange(_ notification: Notification) {}
   public func textViewDidChangeSelection(_ notification: Notification) {}
+  public func textView(
+    _ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange,
+    replacementString: String?
+  ) -> Bool { true }
   public func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool { false }
 }
 
 /// Proxies fieldEditor queries (`selectedRange`, `selectAll`, `moveToEndOfDocument`,
 /// `hasMarkedText`, `string`) to the currently focused Win32 `EDIT` control when attached,
-/// and also serves standalone multiline text views.
+/// and also serves standalone single-line and multiline text views.
 open class NSTextView: NSText {
   public static let didChangeSelectionNotification = Notification.Name("NSTextViewDidChangeSelectionNotification")
 
   public weak var delegate: (any NSTextViewDelegate)?
   public var isFieldEditorProxy: Bool = false
+  open override var acceptsFirstResponder: Bool { isEditable || isSelectable }
+  open override var isFieldEditor: Bool {
+    get {
+      super.isFieldEditor || isFieldEditorProxy
+        || (isSingleLineEditor && accessibilityRole() == .textField)
+    }
+    set { super.isFieldEditor = newValue }
+  }
+  public var isSingleLineEditor: Bool {
+    textContainer?.maximumNumberOfLines == 1
+  }
   public var isEditable: Bool = true {
     didSet { syncStandaloneNativeEditor() }
   }
@@ -1036,6 +1075,21 @@ open class NSTextView: NSText {
     private var standaloneEditor: NativeAPI.TextField?
     private var standaloneEditorListener: NativeAPI.ListenerId?
     private var isSyncingStandaloneText = false
+    private var isEditingStandalone = false
+
+    public var resolvedDrawsOpaqueBackground: Bool {
+      guard drawsBackground else { return false }
+      let app = window?.effectiveAppearance ?? NSAppearance.systemAppearance
+      return backgroundColor.resolved(for: app).a >= 0.999
+    }
+
+    public var resolvedTextColorARGB: UInt32 {
+      let app = window?.effectiveAppearance ?? NSAppearance.systemAppearance
+      let fallback: NSColor = isEditable ? .labelColor : .disabledControlTextColor
+      let tc = (textColor ?? fallback).resolved(for: app)
+      func byte(_ v: CGFloat) -> UInt32 { UInt32(max(0, min(255, Int((v * 255).rounded())))) }
+      return (byte(tc.a) << 24) | (byte(tc.r) << 16) | (byte(tc.g) << 8) | byte(tc.b)
+    }
 
     @discardableResult
     public func ensureStandaloneNativeEditor() -> NativeAPI.View? {
@@ -1045,74 +1099,104 @@ open class NSTextView: NSText {
         return existing
       }
       guard let tf = NativeAPI.TextField.create(textStorage?.string ?? "") else { return nil }
-      tf.setMultiline(true)
+      let wantMultiline = !isSingleLineEditor
+      if tf.isMultiline != wantMultiline {
+        tf.setMultiline(wantMultiline)
+      }
       tf.setBordered(false)
       standaloneEditor = tf
       ownedNativeView = tf
       syncStandaloneNativeEditor()
       standaloneEditorListener = tf.addListener { [weak self] event in
         guard let self else { return }
-        if case let .textFieldChanged(_, rawText) = event {
+        switch event {
+        case let .textFieldChanged(_, rawText):
           let newText = rawText ?? ""
-          MainActor.assumeIsolated {
-            guard !self.isSyncingStandaloneText else { return }
+          _performOnMainActor { [weak self] in
+            guard let self, !self.isSyncingStandaloneText else { return }
             let normalized = newText.replacingOccurrences(of: "\r\n", with: "\n")
-            if self.textStorage?.string != normalized {
-              self.isSyncingStandaloneText = true
-              if let storage = self.textStorage {
-                storage.replaceCharacters(
-                  in: NSRange(location: 0, length: storage.length),
-                  with: normalized
-                )
-              }
-              self.didChangeText()
-              self.isSyncingStandaloneText = false
+            let current = self.textStorage?.string ?? ""
+            guard current != normalized else { return }
+            let fullRange = NSRange(location: 0, length: (current as NSString).length)
+            if let delegate = self.delegate,
+              !delegate.textView(self, shouldChangeTextIn: fullRange, replacementString: normalized)
+            {
+              self.syncStandaloneTextFromStorage()
+              return
             }
+            self.isSyncingStandaloneText = true
+            if let storage = self.textStorage {
+              storage.replaceCharacters(
+                in: NSRange(location: 0, length: storage.length),
+                with: normalized
+              )
+            }
+            self.didChangeText()
+            self.isSyncingStandaloneText = false
           }
+        case .focused:
+          _performOnMainActor { [weak self] in
+            self?.handleStandaloneFocusGain()
+          }
+        case .blurred:
+          _performOnMainActor { [weak self] in
+            self?.handleStandaloneFocusLoss()
+          }
+        default:
+          break
         }
       }
       return tf
     }
 
-    internal func syncStandaloneNativeEditor() {
+    public func syncStandaloneNativeEditor() {
       guard !isFieldEditorProxy, let tf = standaloneEditor else { return }
+      let wantMultiline = !isSingleLineEditor
+      if tf.isMultiline != wantMultiline {
+        tf.setMultiline(wantMultiline)
+      }
       tf.setEditable(isEditable)
+      tf.setEnabled(isEditable || isSelectable)
       if let font {
         tf.setFontSize(Double(font.pointSize))
-        if font.fontName.lowercased().contains("mono") || font.fontName.lowercased().contains("consolas") {
+        tf.setFontWeight(CInt(font.fontDescriptor.weight.cssWeight.rounded()))
+        let lower = font.fontName.lowercased()
+        if font.isFixedPitch || lower.contains("mono") || lower.contains("consolas") {
           tf.setFontFamily("Consolas")
+        } else if !font.fontName.isEmpty,
+          font.fontName != NSFont.defaultFamilyName,
+          !lower.hasPrefix(".apple")
+        {
+          tf.setFontFamily(font.fontName)
         }
       }
       let app = window?.effectiveAppearance ?? NSAppearance.systemAppearance
-      if let tc = textColor?.resolved(for: app) {
-        tf.setTextColor(NativeAPI.Color(
-          r: UInt8(clamping: Int((tc.r * 255).rounded())),
-          g: UInt8(clamping: Int((tc.g * 255).rounded())),
-          b: UInt8(clamping: Int((tc.b * 255).rounded())),
-          a: UInt8(clamping: Int((tc.a * 255).rounded()))
-        ))
-      }
-      let isDark = app.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+      let fallbackTc: NSColor = isEditable ? .labelColor : .disabledControlTextColor
+      let tc = (textColor ?? fallbackTc).resolved(for: app)
+      tf.setTextColor(NativeAPI.Color(
+        r: UInt8(clamping: Int((tc.r * 255).rounded())),
+        g: UInt8(clamping: Int((tc.g * 255).rounded())),
+        b: UInt8(clamping: Int((tc.b * 255).rounded())),
+        a: UInt8(clamping: Int((tc.a * 255).rounded()))
+      ))
       if drawsBackground {
         let bg = backgroundColor.resolved(for: app)
-        tf.setBackgroundColor(NativeAPI.Color(
-          r: UInt8(clamping: Int((bg.r * 255).rounded())),
-          g: UInt8(clamping: Int((bg.g * 255).rounded())),
-          b: UInt8(clamping: Int((bg.b * 255).rounded())),
-          a: UInt8(clamping: Int((bg.a * 255).rounded()))
-        ))
-      } else {
-        tf.setBackgroundColor(
-          isDark
-            ? NativeAPI.Color(r: 36, g: 36, b: 39, a: 255)
-            : NativeAPI.Color(r: 244, g: 244, b: 246, a: 255)
-        )
+        if bg.a >= 0.999 {
+          tf.setBackgroundColor(NativeAPI.Color(
+            r: UInt8(clamping: Int((bg.r * 255).rounded())),
+            g: UInt8(clamping: Int((bg.g * 255).rounded())),
+            b: UInt8(clamping: Int((bg.b * 255).rounded())),
+            a: UInt8(clamping: Int((bg.a * 255).rounded()))
+          ))
+        }
       }
     }
 
     internal func syncStandaloneTextFromStorage() {
       guard !isFieldEditorProxy, !isSyncingStandaloneText, let tf = standaloneEditor else { return }
-      let desired = (textStorage?.string ?? "").replacingOccurrences(of: "\n", with: "\r\n")
+      let desired = isSingleLineEditor
+        ? (textStorage?.string ?? "")
+        : (textStorage?.string ?? "").replacingOccurrences(of: "\n", with: "\r\n")
       if tf.text != desired {
         isSyncingStandaloneText = true
         tf.setText(desired)
@@ -1123,6 +1207,64 @@ open class NSTextView: NSText {
     internal func focusStandaloneNativeEditor() {
       _ = ensureStandaloneNativeEditor()
       standaloneEditor?.focus()
+      if standaloneEditor?.isFocused != true {
+        handleStandaloneFocusGain()
+      }
+    }
+
+    internal func handleStandaloneFocusGain() {
+      window?.adoptFirstResponderFromNative(self)
+      guard !isEditingStandalone else { return }
+      isEditingStandalone = true
+      let note = Notification(name: Self.didBeginEditingNotification, object: self)
+      delegate?.textDidBeginEditing(note)
+      NotificationCenter.default.post(note)
+    }
+
+    internal func handleStandaloneFocusLoss() {
+      window?.releaseFirstResponderFromNative(self)
+      guard isEditingStandalone else { return }
+      isEditingStandalone = false
+      let note = Notification(name: Self.didEndEditingNotification, object: self)
+      delegate?.textDidEndEditing(note)
+      NotificationCenter.default.post(note)
+    }
+
+    public func handleStandaloneKeyCommand(win32VK: Int, modifierFlags: NSEvent.ModifierFlags) -> Bool {
+      guard !hasMarkedText() else { return false }
+      let selector: Selector?
+      switch win32VK {
+      case 0x0D:
+        selector = .insertNewline
+      case 0x1B:
+        selector = .cancelOperation
+      case 0x09:
+        if modifierFlags.contains(.option) {
+          selector = .insertTabIgnoringFieldEditor
+        } else if modifierFlags.contains(.shift) {
+          selector = .insertBacktab
+        } else {
+          selector = .insertTab
+        }
+      default:
+        selector = nil
+      }
+      guard let selector else { return false }
+      let ev = NSEvent(
+        type: .keyDown,
+        locationInWindow: .zero,
+        modifierFlags: modifierFlags,
+        windowNumber: window?.windowNumber ?? 0,
+        window: window,
+        keyCode: NSEvent.carbonKeyCode(fromWin32VK: win32VK)
+      )
+      let prev = NSApplication.shared.currentEvent
+      NSApplication.shared.currentEvent = ev
+      defer { NSApplication.shared.currentEvent = prev }
+      if let delegate, delegate.textView(self, doCommandBy: selector) {
+        return true
+      }
+      return false
     }
   #else
     internal func syncStandaloneNativeEditor() {}
@@ -1329,6 +1471,20 @@ open class NSTextView: NSText {
     textStorage?.replaceCharacters(in: target, with: s)
     setSelectedRange(NSRange(location: target.location + (s as NSString).length, length: 0))
     didChangeText()
+  }
+
+  open override func insertNewline(_ sender: Any?) {
+    if !isSingleLineEditor {
+      insertText("\n", replacementRange: selectedRange())
+    }
+  }
+
+  open override func insertNewlineIgnoringFieldEditor(_ sender: Any?) {
+    insertText("\n", replacementRange: selectedRange())
+  }
+
+  open override func insertTabIgnoringFieldEditor(_ sender: Any?) {
+    insertText("\t", replacementRange: selectedRange())
   }
 
   open func paste(_ sender: Any?) {

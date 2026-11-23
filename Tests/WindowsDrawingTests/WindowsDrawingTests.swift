@@ -431,6 +431,75 @@ final class WindowsDrawingTests: XCTestCase {
     let coveredHandle = try XCTUnwrap(coveredNative.nativeObject)
     XCTAssertEqual(control_visible(coveredHandle), 0)
   }
+
+  @MainActor
+  func testSingleLineTransparentNSTextViewPreservesUnderlyingPlaceholderAndHandlesDelegateCommands() throws {
+    let win = CrossAppKit.NSWindow(
+      contentRect: NSRect(x: 80, y: 80, width: 320, height: 140),
+      styleMask: [.titled, .closable],
+      backing: .buffered,
+      defer: false
+    )
+    defer { win.close() }
+
+    let state = AliasProbeState()
+    let hosting = NSHostingView(rootView: AliasProbeView(state: state))
+    hosting.frame = NSRect(x: 0, y: 0, width: 320, height: 140)
+    win.contentView = hosting
+    win.makeKeyAndOrderFront(nil)
+    hosting.layoutSubtreeIfNeeded()
+
+    let renderer = try XCTUnwrap(hosting.renderer)
+    func findHosted(_ node: Element) -> Element? {
+      if node.kind == .hostedView { return node }
+      return node.children.lazy.compactMap(findHosted).first
+    }
+    let hostedNode = try XCTUnwrap(findHosted(try XCTUnwrap(renderer.tree)))
+    let editorView = try XCTUnwrap(state.lastEditor)
+    let nativeEditor = try XCTUnwrap(editorView.ownedNativeView)
+    let editHandle = try XCTUnwrap(nativeEditor.nativeObject)
+
+    // 1. Single-line NSTextView must NOT have ES_MULTILINE or WS_VSCROLL scrollbar.
+    XCTAssertTrue(editorView.isSingleLineEditor)
+    XCTAssertEqual(control_is_multiline_edit(editHandle), 0)
+    XCTAssertEqual(control_has_vscroll(editHandle), 0)
+    XCTAssertGreaterThan(hostedNode.frame.width, 80)
+
+    // 2. Transparent compositing on the EDIT HWND must preserve the SwiftUI "Add Alias" placeholder underneath.
+    let emptyDistinctPixels = control_print_distinct_pixels(editHandle)
+    XCTAssertGreaterThan(
+      emptyDistinctPixels, 20,
+      "Transparent single-line NSTextView must composite underlying 'Add Alias' text instead of an opaque rectangle"
+    )
+
+    // 3. Focusing, typing, pressing Enter (commit + resign), and pressing Escape (revert + resign).
+    XCTAssertTrue(win.makeFirstResponder(editorView))
+    XCTAssertTrue(state.focused)
+    XCTAssertEqual(state.beginCount, 1)
+
+    control_send_char(editHandle, Int32(("g" as UnicodeScalar).value))
+    control_send_char(editHandle, Int32(("o" as UnicodeScalar).value))
+    hosting.layoutSubtreeIfNeeded()
+    XCTAssertEqual(state.draft, "go")
+
+    // Pressing Enter invokes doCommandBy(.insertNewline) -> makeFirstResponder(nil) -> textDidEndEditing -> commit.
+    control_send_key(editHandle, 0x0D)
+    hosting.layoutSubtreeIfNeeded()
+    XCTAssertFalse(state.focused)
+    XCTAssertEqual(state.endCount, 1)
+    XCTAssertEqual(state.committedAlias, "go")
+
+    // Re-focus, edit draft, then press Escape -> doCommandBy(.cancelOperation) reverts to committedAlias.
+    XCTAssertTrue(win.makeFirstResponder(editorView))
+    XCTAssertTrue(state.focused)
+    control_send_char(editHandle, Int32(("x" as UnicodeScalar).value))
+    hosting.layoutSubtreeIfNeeded()
+    control_send_key(editHandle, 0x1B)
+    hosting.layoutSubtreeIfNeeded()
+    XCTAssertFalse(state.focused)
+    XCTAssertEqual(state.draft, "go")
+    XCTAssertEqual(state.committedAlias, "go")
+  }
 }
 
 @Observable
@@ -520,5 +589,116 @@ private struct UIKitPanelProbeContent: SwiftUIRuntime.View {
         .frame(width: 220, height: 56)
     }
     .padding(12)
+  }
+}
+
+@MainActor
+@Observable
+private final class AliasProbeState {
+  var draft = ""
+  var committedAlias = ""
+  var focused = false
+  var beginCount = 0
+  var endCount = 0
+  weak var lastEditor: CrossAppKit.NSTextView?
+
+  func commit() {
+    committedAlias = draft
+  }
+
+  func revert() {
+    draft = committedAlias
+    focused = false
+  }
+}
+
+private struct AliasProbeTextField: NSViewRepresentable {
+  let state: AliasProbeState
+
+  func makeCoordinator() -> Coordinator { Coordinator(state: state) }
+
+  func makeNSView(context: Context) -> CrossAppKit.NSTextView {
+    let editor = CrossAppKit.NSTextView()
+    editor.delegate = context.coordinator
+    editor.drawsBackground = false
+    editor.backgroundColor = .clear
+    editor.font = .systemFont(ofSize: CrossAppKit.NSFont.smallSystemFontSize)
+    editor.textContainerInset = NSSize(width: 0, height: 5.5)
+    editor.textContainer?.lineFragmentPadding = 0
+    editor.textContainer?.maximumNumberOfLines = 1
+    editor.textContainer?.lineBreakMode = .byTruncatingTail
+    editor.setAccessibilityRole(.textField)
+    state.lastEditor = editor
+    return editor
+  }
+
+  func updateNSView(_ editor: CrossAppKit.NSTextView, context: Context) {
+    state.lastEditor = editor
+    if editor.string != state.draft {
+      editor.string = state.draft
+    }
+    if !state.focused, editor.window?.firstResponder === editor {
+      _ = editor.window?.makeFirstResponder(nil)
+    }
+  }
+
+  @MainActor
+  final class Coordinator: NSObject, CrossAppKit.NSTextViewDelegate {
+    let state: AliasProbeState
+    init(state: AliasProbeState) { self.state = state }
+
+    func textDidBeginEditing(_ notification: Notification) {
+      state.beginCount += 1
+      state.focused = true
+    }
+
+    func textDidEndEditing(_ notification: Notification) {
+      state.endCount += 1
+      state.focused = false
+      state.commit()
+    }
+
+    func textDidChange(_ notification: Notification) {
+      guard let editor = notification.object as? CrossAppKit.NSTextView else { return }
+      state.draft = editor.string
+    }
+
+    func textView(_ textView: CrossAppKit.NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+      switch commandSelector {
+      case .insertNewline:
+        _ = textView.window?.makeFirstResponder(nil)
+        return true
+      case .cancelOperation:
+        state.revert()
+        _ = textView.window?.makeFirstResponder(nil)
+        return true
+      default:
+        return false
+      }
+    }
+  }
+}
+
+private struct AliasProbeView: SwiftUIRuntime.View {
+  let state: AliasProbeState
+  var body: some SwiftUIRuntime.View {
+    let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+    SwiftUIRuntime.HStack(spacing: 4) {
+      SwiftUIRuntime.ZStack(alignment: .leading) {
+        if state.draft.isEmpty {
+          SwiftUIRuntime.Text("Add Alias")
+            .font(.system(size: 11))
+            .foregroundStyle(SwiftUIRuntime.Color.white.opacity(0.65))
+            .allowsHitTesting(false)
+        }
+        AliasProbeTextField(state: state)
+      }
+    }
+    .padding(.horizontal, 9)
+    .frame(width: 120, height: 24)
+    .background(shape.fill(SwiftUIRuntime.Color(red: 0.16, green: 0.16, blue: 0.18)))
+    .overlay(shape.strokeBorder(SwiftUIRuntime.Color.white.opacity(0.15), lineWidth: 1))
+    .clipShape(shape)
+    .padding(20)
   }
 }

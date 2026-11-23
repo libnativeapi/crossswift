@@ -587,3 +587,68 @@ extern "C" int host_region_distinct_pixels(void *raw_host, double x, double y, d
   DeleteDC(mem);
   return distinct;
 }
+
+extern "C" int control_has_vscroll(void *control) {
+  HWND hwnd = static_cast<HWND>(control);
+  if (!hwnd || !IsWindow(hwnd)) return 0;
+  return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VSCROLL) != 0 ? 1 : 0;
+}
+
+extern "C" int control_is_multiline_edit(void *control) {
+  HWND hwnd = static_cast<HWND>(control);
+  if (!hwnd || !IsWindow(hwnd)) return 0;
+  return (GetWindowLongPtrW(hwnd, GWL_STYLE) & ES_MULTILINE) != 0 ? 1 : 0;
+}
+
+extern "C" int control_print_distinct_pixels(void *control) {
+  HWND hwnd = static_cast<HWND>(control);
+  if (!hwnd || !IsWindow(hwnd)) return 0;
+  RECT cr{};
+  GetClientRect(hwnd, &cr);
+  const int cw = cr.right - cr.left;
+  const int ch = cr.bottom - cr.top;
+  if (cw <= 0 || ch <= 0) return 0;
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = cw;
+  bmi.bmiHeader.biHeight = -ch;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  uint32_t *pixels = nullptr;
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(screen);
+  HBITMAP dib = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, reinterpret_cast<void **>(&pixels), nullptr, 0);
+  ReleaseDC(nullptr, screen);
+  if (!dib || !pixels) {
+    if (dib) DeleteObject(dib);
+    DeleteDC(mem);
+    return 0;
+  }
+  HGDIOBJ old = SelectObject(mem, dib);
+  SendMessageW(hwnd, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT);
+  const uint32_t base = pixels[0] & 0x00FFFFFFu;
+  int distinct = 0;
+  for (int i = 0; i < cw * ch; ++i) {
+    if ((pixels[i] & 0x00FFFFFFu) != base) {
+      ++distinct;
+    }
+  }
+  SelectObject(mem, old);
+  DeleteObject(dib);
+  DeleteDC(mem);
+  return distinct;
+}
+
+extern "C" void control_send_key(void *control, int vk) {
+  HWND hwnd = static_cast<HWND>(control);
+  if (!hwnd || !IsWindow(hwnd)) return;
+  SendMessageW(hwnd, WM_KEYDOWN, static_cast<WPARAM>(vk), 0);
+  SendMessageW(hwnd, WM_KEYUP, static_cast<WPARAM>(vk), 1L << 31);
+}
+
+extern "C" void control_send_char(void *control, int ch) {
+  HWND hwnd = static_cast<HWND>(control);
+  if (!hwnd || !IsWindow(hwnd)) return;
+  SendMessageW(hwnd, WM_CHAR, static_cast<WPARAM>(ch), 0);
+}

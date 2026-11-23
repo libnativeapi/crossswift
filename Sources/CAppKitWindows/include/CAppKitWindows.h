@@ -71,6 +71,8 @@ void cak_window_apply_frameless(void *hwnd, int is_frameless);
 uint32_t cak_modifier_flags(void);
 void cak_set_cursor(int cursor_kind);
 void *cak_focused_hwnd(void);
+int cak_is_edit_hwnd(void *hwnd);
+void cak_focus_hwnd(void *hwnd);
 void cak_edit_get_selection(void *hwnd, int *out_start, int *out_length);
 void cak_edit_set_selection(void *hwnd, int start, int length);
 int cak_edit_has_ime_composition(void *hwnd);

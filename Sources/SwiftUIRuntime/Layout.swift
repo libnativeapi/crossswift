@@ -646,6 +646,18 @@ public struct LayoutEngine {
           ProposedViewSize(width: nil, height: probe), children: e.children, engine: self)
         return expanded.height > ideal.height + 0.5
       }
+    case .hostedView:
+      guard let measureFn = e.hostedViewMeasure else { return true }
+      let ideal = measureFn(.unspecified)
+      if horizontal {
+        let probe = max(1, ideal.width) + 64
+        let expanded = measureFn(ProposedViewSize(width: probe, height: nil))
+        return expanded.width > ideal.width + 0.5
+      } else {
+        let probe = max(1, ideal.height) + 64
+        let expanded = measureFn(ProposedViewSize(width: nil, height: probe))
+        return expanded.height > ideal.height + 0.5
+      }
     case .container(let axis):
       if (axis == .horizontal) == horizontal {
         return e.children.contains { $0.kind == .spacer || fills($0, horizontal: horizontal) }

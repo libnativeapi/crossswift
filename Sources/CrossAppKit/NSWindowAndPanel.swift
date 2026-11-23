@@ -306,6 +306,7 @@ open class NSWindow: NSResponder {
   private let sharedFieldEditor: NSTextView = {
     let tv = NSTextView(frame: .zero)
     tv.isFieldEditorProxy = true
+    tv.isFieldEditor = true
     return tv
   }()
   private weak var explicitFirstResponder: NSResponder?
@@ -313,9 +314,27 @@ open class NSWindow: NSResponder {
   public var firstResponder: NSResponder? {
     #if os(Windows)
       if let explicit = explicitFirstResponder { return explicit }
-      if cak_focused_hwnd() != nil { return sharedFieldEditor }
+      if let focused = cak_focused_hwnd(), cak_is_edit_hwnd(focused) != 0 {
+        return sharedFieldEditor
+      }
+      return self
+    #else
+      return explicitFirstResponder ?? sharedFieldEditor
     #endif
-    return explicitFirstResponder ?? sharedFieldEditor
+  }
+
+  internal func adoptFirstResponderFromNative(_ responder: NSResponder) {
+    guard explicitFirstResponder !== responder else { return }
+    let previous = explicitFirstResponder
+    explicitFirstResponder = responder
+    _ = previous?.resignFirstResponder()
+    _ = responder.becomeFirstResponder()
+  }
+
+  internal func releaseFirstResponderFromNative(_ responder: NSResponder) {
+    guard explicitFirstResponder === responder else { return }
+    explicitFirstResponder = nil
+    _ = responder.resignFirstResponder()
   }
 
   private var storedFrame: NSRect
@@ -1032,13 +1051,36 @@ open class NSWindow: NSResponder {
 
   @discardableResult
   open func makeFirstResponder(_ responder: NSResponder?) -> Bool {
-    if let r = responder, !r.acceptsFirstResponder && !(r is NSTextView) && !(r is NSWindow) {
-      // Allow explicit nil or window reset
+    let target = (responder === self) ? nil : responder
+    let previous = explicitFirstResponder
+    if previous === target, target != nil {
+      #if !os(macOS)
+        if let tv = target as? NSTextView, !tv.isFieldEditorProxy {
+          tv.focusStandaloneNativeEditor()
+        }
+      #endif
+      return true
     }
-    explicitFirstResponder = (responder === self) ? nil : responder
+    if let prev = previous, !prev.resignFirstResponder() {
+      return false
+    }
+    explicitFirstResponder = target
+    if let next = target, !next.becomeFirstResponder() {
+      explicitFirstResponder = previous
+      return false
+    }
     #if !os(macOS)
-      if let tv = responder as? NSTextView, !tv.isFieldEditorProxy {
+      if let tv = target as? NSTextView, !tv.isFieldEditorProxy {
         tv.focusStandaloneNativeEditor()
+      } else if target == nil {
+        #if os(Windows)
+          if let hostHwnd = nativeWindow?.contentView?.nativeObject ?? nativeWindow?.nativeObject {
+            cak_focus_hwnd(hostHwnd)
+          }
+        #endif
+        if let prevTV = previous as? NSTextView, !prevTV.isFieldEditorProxy {
+          prevTV.handleStandaloneFocusLoss()
+        }
       }
     #endif
     return true
@@ -1218,8 +1260,12 @@ open class NSWindow: NSResponder {
     }
   }
   public func standardWindowButton(_ b: ButtonType) -> NSButton? { nil }
-  public func selectNextKeyView(_ sender: Any?) {}
-  public func selectPreviousKeyView(_ sender: Any?) {}
+  public func selectNextKeyView(_ sender: Any?) {
+    _ = contentView?.moveKeyViewFocus(from: sender, backward: false)
+  }
+  public func selectPreviousKeyView(_ sender: Any?) {
+    _ = contentView?.moveKeyViewFocus(from: sender, backward: true)
+  }
   public func recalculateKeyViewLoop() {}
   public func animator() -> Self { self }
 }

@@ -91,6 +91,7 @@ struct EditHook {
   bool multiline = false;
   bool unthemed = false;
   bool passthrough = false;
+  bool suppress_return_char = false;
   uint32_t text_argb = 0xFF000000u;
   uint32_t placeholder_argb = 0x6B000000u;
   std::wstring placeholder;
@@ -2370,12 +2371,32 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
     }
   }
   if (msg == WM_KEYDOWN && wp == VK_TAB) {
+    if (Input(s, hwnd, id, msg, wp, lp))
+      return 0;
     sui_surface_focus_next(s, hwnd, (Modifiers() & 1) != 0);
     return 0;
   }
   if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_MOUSEWHEEL) &&
-      Input(s, hwnd, id, msg, wp, lp))
+      Input(s, hwnd, id, msg, wp, lp)) {
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_RETURN) {
+      auto cur = s->edits.find(hwnd);
+      if (cur != s->edits.end())
+        cur->second.suppress_return_char = true;
+    }
     return 0;
+  }
+  if (msg == WM_CHAR) {
+    if (wp == 0x1B)
+      return 0;
+    if (wp == 0x0D || wp == 0x0A) {
+      const bool suppressed = found->second.suppress_return_char;
+      found->second.suppress_return_char = false;
+      if (!found->second.multiline || suppressed)
+        return 0;
+    }
+    if (wp == 0x09 && !found->second.multiline)
+      return 0;
+  }
   auto snapshot_text = [](HWND edit_hwnd) -> std::wstring {
     int len = GetWindowTextLengthW(edit_hwnd);
     if (len <= 0) return {};
@@ -2416,6 +2437,9 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
       ValidateRect(hwnd, nullptr);
       if (GetFocus() == hwnd && !after->second.caret_hidden) {
         if (HideCaret(hwnd)) after->second.caret_hidden = true;
+      }
+      if (!s->defer_commit && s->host && IsWindow(s->host)) {
+        PostMessageW(s->host, deferred_input, 0, 0);
       }
     }
   }
@@ -2467,6 +2491,7 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
   if (msg == deferred_input) {
     if (s->input)
       s->input(s->context, 0, 11, 0, 0, 0, 0);
+    sui_surface_flush_edits(s);
     return 0;
   }
   if (msg == WM_PAINT || msg == WM_PRINTCLIENT || msg == WM_ERASEBKGND)

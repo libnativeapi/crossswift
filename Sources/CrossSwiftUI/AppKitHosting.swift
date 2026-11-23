@@ -13,6 +13,14 @@ import SwiftUIRuntime
 
 // MARK: - Hosted NSView / UIView Bridge Protocols
 
+struct _HostedEditorDescriptor {
+  let nativeView: NativeAPI.View
+  let isSingleLine: Bool
+  let isTransparentBackground: Bool
+  let textColorARGB: UInt32
+  let handleKeyDown: (Int, EventModifiers) -> Bool
+}
+
 protocol _HostedViewMount: AnyObject {
   func dismantle()
 }
@@ -20,6 +28,11 @@ protocol _HostedViewMount: AnyObject {
 protocol _HostedViewBackendBridge: AnyObject {
   func createMount(frame: CGRect) -> (mount: any _HostedViewMount, nativeView: NativeAPI.View?)
   func updateMount(_ mount: any _HostedViewMount, frame: CGRect)
+  func editorDescriptor(for mount: any _HostedViewMount) -> _HostedEditorDescriptor?
+}
+
+extension _HostedViewBackendBridge {
+  func editorDescriptor(for mount: any _HostedViewMount) -> _HostedEditorDescriptor? { nil }
 }
 
 // MARK: - Color / Font / Image AppKit Interop
@@ -176,6 +189,7 @@ private final class HostedMountInstance<R: NSViewRepresentable>: _HostedViewMoun
   func dismantle() {
     MainActor.assumeIsolated {
       ActiveHostingContext.removeMount(for: hostContainer, key: key)
+      typedView.managesNativeFrameExternally = false
       R.dismantleNSView(typedView, coordinator: coordinator)
       typedView.removeFromSuperview()
     }
@@ -247,6 +261,7 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
   func createMount(frame: CGRect) -> (mount: any _HostedViewMount, nativeView: NativeAPI.View?) {
     MainActor.assumeIsolated {
       let instance = ensureInstance(key: viewKey)
+      instance.typedView.managesNativeFrameExternally = true
       instance.typedView.frame = frame
       #if !os(macOS)
         if let tv = instance.typedView as? NSTextView, !tv.isFieldEditorProxy {
@@ -255,6 +270,11 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
       #endif
       let ctx = NSViewRepresentableContext<R>(coordinator: instance.coordinator, environment: environment)
       representable.updateNSView(instance.typedView, context: ctx)
+      #if !os(macOS)
+        if let tv = instance.typedView as? NSTextView, !tv.isFieldEditorProxy {
+          tv.syncStandaloneNativeEditor()
+        }
+      #endif
       return (instance, instance.typedView.ownedNativeView)
     }
   }
@@ -262,6 +282,7 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
   func updateMount(_ mount: any _HostedViewMount, frame: CGRect) {
     MainActor.assumeIsolated {
       guard let typed = mount as? HostedMountInstance<R> else { return }
+      typed.typedView.managesNativeFrameExternally = true
       if typed.typedView.frame != frame {
         typed.typedView.frame = frame
       }
@@ -270,7 +291,45 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
       }
       let ctx = NSViewRepresentableContext<R>(coordinator: typed.coordinator, environment: environment)
       representable.updateNSView(typed.typedView, context: ctx)
+      #if !os(macOS)
+        if let tv = typed.typedView as? NSTextView, !tv.isFieldEditorProxy {
+          tv.syncStandaloneNativeEditor()
+        }
+      #endif
     }
+  }
+
+  func editorDescriptor(for mount: any _HostedViewMount) -> _HostedEditorDescriptor? {
+    #if !os(macOS)
+      return MainActor.assumeIsolated {
+        guard let typed = mount as? HostedMountInstance<R>,
+          let tv = typed.typedView as? NSTextView,
+          !tv.isFieldEditorProxy,
+          let nv = tv.ownedNativeView
+        else {
+          return nil
+        }
+        return _HostedEditorDescriptor(
+          nativeView: nv,
+          isSingleLine: tv.isSingleLineEditor,
+          isTransparentBackground: !tv.resolvedDrawsOpaqueBackground,
+          textColorARGB: tv.resolvedTextColorARGB,
+          handleKeyDown: { [weak tv] vk, mods in
+            MainActor.assumeIsolated {
+              guard let tv else { return false }
+              var flags: NSEvent.ModifierFlags = []
+              if mods.contains(.shift) { flags.insert(.shift) }
+              if mods.contains(.control) { flags.insert(.command) }
+              if mods.contains(.option) { flags.insert(.option) }
+              if mods.contains(.command) { flags.insert(.command) }
+              return tv.handleStandaloneKeyCommand(win32VK: vk, modifierFlags: flags)
+            }
+          }
+        )
+      }
+    #else
+      return nil
+    #endif
   }
 
   @MainActor
@@ -493,6 +552,8 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
     if renderer?.isRendering == true { return }
     isFlushingLayout = true
     defer { isFlushingLayout = false }
+    ActiveHostingContext.currentHostingView = self
+    defer { ActiveHostingContext.currentHostingView = nil }
     renderer?.renderIfNeeded()
     #if os(Windows)
       if !isApplyingWindowResize && pendingWindowBoundsCommit == nil {
@@ -508,6 +569,16 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
         usesEnvelopeSizing = true
       }
       backend?.setContentOffset(x: x, y: y)
+    #endif
+  }
+
+  open override func moveKeyViewFocus(from sender: Any?, backward: Bool) -> Bool {
+    #if os(Windows)
+      let raw = (sender as? NSView)?.ownedNativeView?.nativeObject
+      backend?.focusNextControl(from: raw, backward: backward)
+      return true
+    #else
+      return false
     #endif
   }
 
@@ -732,6 +803,9 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
         guard let self, let createdRenderer else { return false }
         ActiveHostingContext.currentHostingView = self
         if event == 6 {
+          if let id, self.backend?.handleHostedKeyDown(id: id, vk: value, modifiers: modifiers) == true {
+            return true
+          }
           let resolvedText = !text.isEmpty ? text : Self.keyCharacter(forWin32VK: value)
           if modifiers.contains(.control) && !modifiers.contains(.command) {
             var cmdMods = modifiers
@@ -907,12 +981,21 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
         clickCount: clicks,
         scrollingDeltaY: event == 5 ? CGFloat(value) : 0
       )
+      let routedMouse: NSEvent
+      if event == 2 || event == 3 || event == 4 || event == 9 {
+        guard let m = NSEvent.dispatchLocalMonitors(mouseEv) else {
+          return true
+        }
+        routedMouse = m
+      } else {
+        routedMouse = mouseEv
+      }
       let prevEvent = NSApplication.shared.currentEvent
-      NSApplication.shared.currentEvent = mouseEv
+      NSApplication.shared.currentEvent = routedMouse
       defer { NSApplication.shared.currentEvent = prevEvent }
       nsWin._eventReachedBaseSendEvent = false
       nsWin._suppressLocalMonitorInSendEvent = true
-      nsWin.sendEvent(mouseEv)
+      nsWin.sendEvent(routedMouse)
       nsWin._suppressLocalMonitorInSendEvent = false
       if !nsWin._eventReachedBaseSendEvent {
         return true

@@ -162,11 +162,18 @@
       environmentTransform?(&env)
       return env
     }
+    private struct RetainedHostedView {
+      let mount: any _HostedViewMount
+      var nativeView: NativeAPI.View?
+      var nativeHandle: UnsafeMutableRawPointer?
+      var isEdit: Bool
+      var handleKeyDown: ((Int, EventModifiers) -> Bool)?
+    }
     private let content: NativeAPI.View
     private var surface: UnsafeMutableRawPointer?
     private var surfaceBackgroundColor: SwiftUIRuntime.Color = .white
     private var buttons: [NodeID: RetainedButton] = [:]
-    private var hostedViews: [NodeID: (mount: any _HostedViewMount, nativeHandle: UnsafeMutableRawPointer?)] = [:]
+    private var hostedViews: [NodeID: RetainedHostedView] = [:]
 
     public convenience init?(window: NativeAPI.Window, schedulesUpdates: Bool = false) {
       guard let content = window.contentView else { return nil }
@@ -213,6 +220,7 @@
               // An obsolete gain must not pull focus back to its old HWND.
               let focused =
                 backend.edits[node]?.view.isFocused
+                ?? backend.hostedViews[node]?.nativeView?.isFocused
                 ?? backend.buttons[node]?.view.isFocused ?? false
               guard focused == (event == 5) else { return }
             }
@@ -277,6 +285,15 @@
           if backend.onPreInput?(
             Int(event), CGPoint(x: x, y: y), Int(value), EventModifiers(rawValue: Int(modifiers))
           ) == true {
+            return 1
+          }
+          if event == 6 && id != 0,
+            backend.handleHostedKeyDown(
+              id: NodeID(rawValue: Int(id)),
+              vk: Int(value),
+              modifiers: EventModifiers(rawValue: Int(modifiers))
+            )
+          {
             return 1
           }
           return backend.inputHandler?(
@@ -618,9 +635,22 @@
     }
     public func nativeButton(_ id: NodeID) -> NativeAPI.Button? { buttons[id]?.view }
     public func nativeTextField(_ id: NodeID) -> NativeAPI.TextField? { edits[id]?.view }
+    public func hostedNativeView(_ id: NodeID) -> NativeAPI.View? { hostedViews[id]?.nativeView }
+    internal func handleHostedKeyDown(id: NodeID, vk: Int, modifiers: EventModifiers) -> Bool {
+      hostedViews[id]?.handleKeyDown?(vk, modifiers) ?? false
+    }
+    public func focusNextControl(from current: UnsafeMutableRawPointer?, backward: Bool = false) {
+      if let surface {
+        sui_surface_focus_next(surface, current, backward ? 1 : 0)
+      }
+    }
     public func advanceFocus(from id: NodeID?, backward: Bool = false) {
       if let surface {
-        let current = id.flatMap { buttons[$0]?.view.nativeObject ?? edits[$0]?.view.nativeObject }
+        let current = id.flatMap {
+          buttons[$0]?.view.nativeObject
+            ?? edits[$0]?.view.nativeObject
+            ?? hostedViews[$0]?.nativeHandle
+        }
         sui_surface_focus_next(surface, current, backward ? 1 : 0)
       }
     }
@@ -1001,30 +1031,90 @@
       }
       if node.kind == .hostedView, let surface, let adapter = node.hostedViewAdapter as? any _HostedViewBackendBridge {
         let r = node.frame
+        var entry: RetainedHostedView
         if let existing = hostedViews[node.id] {
           adapter.updateMount(existing.mount, frame: CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height))
-          if let handle = existing.nativeHandle {
+          entry = existing
+        } else {
+          let created = adapter.createMount(frame: CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height))
+          entry = RetainedHostedView(
+            mount: created.mount,
+            nativeView: created.nativeView,
+            nativeHandle: nil,
+            isEdit: false,
+            handleKeyDown: nil
+          )
+        }
+        let editorDesc = adapter.editorDescriptor(for: entry.mount)
+        let resolvedNV = editorDesc?.nativeView ?? entry.nativeView
+        let nextHandle = resolvedNV?.nativeObject
+        let wantEdit = editorDesc != nil
+        if entry.nativeHandle != nextHandle || entry.isEdit != wantEdit {
+          if let oldHandle = entry.nativeHandle {
+            if entry.isEdit {
+              sui_surface_remove_edit(surface, oldHandle)
+            } else {
+              sui_surface_remove_custom_view(surface, oldHandle)
+            }
+          }
+          if let nv = resolvedNV, let newHandle = nextHandle {
+            if wantEdit {
+              sui_surface_edit(surface, newHandle, Int64(node.id.rawValue), nv.nativeHandle)
+            } else {
+              sui_surface_custom_view(surface, newHandle, nv.nativeHandle)
+            }
+          }
+          entry.nativeView = resolvedNV
+          entry.nativeHandle = nextHandle
+          entry.isEdit = wantEdit
+        }
+        entry.handleKeyDown = editorDesc?.handleKeyDown
+        if let handle = entry.nativeHandle {
+          if let editorDesc {
+            var editRect = r
+            if editorDesc.isSingleLine {
+              var lineCenter = 0.0
+              var lineHeight = 0.0
+              sui_edit_line_metrics(surface, handle, &lineCenter, &lineHeight)
+              if lineHeight > 0 {
+                let editY = r.minY + r.height * 0.5 - lineCenter
+                editRect = Rect(
+                  x: r.minX, y: editY, width: r.width,
+                  height: max(lineHeight, r.maxY - editY))
+              }
+            }
+            if shownInViewport || nativeClip != nil {
+              sui_control_frame(
+                surface, handle, editRect.minX, editRect.minY, editRect.width, editRect.height)
+            }
+            "".withCString { emptyCStr in
+              sui_edit_set_transparent(
+                surface, handle, editorDesc.isTransparentBackground ? 1 : 0,
+                editRect.minX + editRect.width * 0.5,
+                editRect.minY + editRect.height * 0.5,
+                emptyCStr, editorDesc.textColorARGB, 0,
+                editorDesc.isSingleLine ? 0 : 1)
+            }
+            sui_edit_order(surface, handle)
+            sui_control_set_passthrough(surface, handle, passthroughForPresentation ? 1 : 0)
+            sui_control_opacity(handle, node.props.opacity)
+            let visible = shownInViewport ? editRect.intersection(nativeClip ?? clip) : .zero
+            sui_surface_control_clip(
+              surface, handle, visible.minX - editRect.minX, visible.minY - editRect.minY,
+              visible.width, visible.height)
+          } else {
             if shownInViewport || nativeClip != nil {
               sui_control_frame(surface, handle, r.minX, r.minY, r.width, r.height)
             }
             sui_custom_view_order(surface, handle)
+            sui_control_opacity(handle, node.props.opacity)
             let visible = shownInViewport ? r.intersection(nativeClip ?? clip) : .zero
             sui_surface_control_clip(
-              surface, handle, visible.minX - r.minX, visible.minY - r.minY, visible.width, visible.height)
+              surface, handle, visible.minX - r.minX, visible.minY - r.minY,
+              visible.width, visible.height)
           }
-        } else {
-          let created = adapter.createMount(frame: CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height))
-          let handle = created.nativeView?.nativeObject
-          if let nv = created.nativeView, let handle {
-            sui_surface_custom_view(surface, handle, nv.nativeHandle)
-            sui_control_frame(surface, handle, r.minX, r.minY, r.width, r.height)
-            sui_custom_view_order(surface, handle)
-            let visible = shownInViewport ? r.intersection(nativeClip ?? clip) : .zero
-            sui_surface_control_clip(
-              surface, handle, visible.minX - r.minX, visible.minY - r.minY, visible.width, visible.height)
-          }
-          hostedViews[node.id] = (created.mount, handle)
         }
+        hostedViews[node.id] = entry
       }
       forEachOrderedChild(node) { child in
         updateButtons(
@@ -1040,7 +1130,11 @@
     private func removeHostedView(_ id: NodeID) {
       guard let entry = hostedViews.removeValue(forKey: id) else { return }
       if let surface, let handle = entry.nativeHandle {
-        sui_surface_remove_custom_view(surface, handle)
+        if entry.isEdit {
+          sui_surface_remove_edit(surface, handle)
+        } else {
+          sui_surface_remove_custom_view(surface, handle)
+        }
       }
       entry.mount.dismantle()
     }

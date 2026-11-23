@@ -494,7 +494,7 @@ open class NSText: NSView {
   public static let didBeginEditingNotification = Notification.Name("NSTextDidBeginEditingNotification")
   public static let didEndEditingNotification = Notification.Name("NSTextDidEndEditingNotification")
 
-  public var isFieldEditor: Bool = false
+  open var isFieldEditor: Bool = false
 }
 
 #if !os(macOS)
