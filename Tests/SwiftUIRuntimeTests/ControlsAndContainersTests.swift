@@ -469,4 +469,94 @@ final class ControlsAndContainersTests: XCTestCase {
     let updatedTabBar = findSemantic("tabBar", in: tabRenderer.tree)
     XCTAssertEqual(updatedTabBar?.props.semanticControl?.intValue, 1)
   }
+
+  @MainActor
+  func testLazyVStackInsideFormRealizesBottomRowsWhenScrolled() throws {
+    struct AppRowView: View {
+      let index: Int
+      var body: some View {
+        HStack {
+          Text("App \(index)")
+          Spacer()
+        }
+        .frame(maxWidth: .infinity, minHeight: 44)
+      }
+    }
+
+    struct AppsSectionView: View {
+      let items: [Int]
+      var body: some View {
+        Section {
+          LazyVStack(spacing: 0) {
+            ForEach(items, id: \.self) { index in
+              VStack(spacing: 0) {
+                if index > 0 { Divider() }
+                AppRowView(index: index)
+              }
+            }
+          }
+        } header: {
+          Text("Applications")
+        }
+      }
+    }
+
+    struct AppsFormPage: View {
+      let items = Array(0..<150)
+      var body: some View {
+        Form {
+          Section {
+            Text("Enable Applications")
+              .frame(height: 60)
+          }
+          Section {
+            Text("Search Scopes")
+              .frame(height: 640)
+          }
+          AppsSectionView(items: items)
+        }
+      }
+    }
+
+    let renderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(AppsFormPage()),
+      size: Size(width: 720, height: 600)
+    )
+    renderer.mount()
+
+    func collectTexts(_ el: Element?, into out: inout Set<String>) {
+      guard let el else { return }
+      if el.kind == .text, !el.props.text.isEmpty {
+        out.insert(el.props.text)
+      }
+      for child in el.children {
+        collectTexts(child, into: &out)
+      }
+    }
+
+    func findScrollID(_ el: Element?) -> NodeID? {
+      guard let el else { return nil }
+      if el.kind == .scroll { return el.id }
+      for child in el.children {
+        if let id = findScrollID(child) { return id }
+      }
+      return nil
+    }
+
+    let scrollID = try XCTUnwrap(findScrollID(renderer.tree))
+    var initialTexts = Set<String>()
+    collectTexts(renderer.tree, into: &initialTexts)
+    XCTAssertTrue(initialTexts.contains("App 0"))
+    XCTAssertFalse(initialTexts.contains("App 149"))
+
+    // Scroll all the way to the bottom of the Form; bottom rows must materialize instead of staying blank placeholders.
+    renderer.scroll(id: scrollID, to: Point(x: 0, y: 9000))
+    renderer.renderIfNeeded()
+
+    var bottomTexts = Set<String>()
+    collectTexts(renderer.tree, into: &bottomTexts)
+    XCTAssertTrue(bottomTexts.contains("App 148"))
+    XCTAssertTrue(bottomTexts.contains("App 149"))
+  }
 }

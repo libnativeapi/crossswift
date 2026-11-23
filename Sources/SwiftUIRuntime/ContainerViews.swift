@@ -21,9 +21,16 @@ public struct ZStack<Content: View>: View, _PrimitiveView {
   }
 }
 final class LazyHeightCache {
+  struct StackViewportMetrics {
+    var offsetX: Double
+    var offsetY: Double
+    var viewportWidth: Double
+    var viewportHeight: Double
+  }
   nonisolated(unsafe) static let shared = LazyHeightCache()
   private var heightsByStack: [AnyHashable: [AnyHashable: Double]] = [:]
   private var averagesByStack: [AnyHashable: Double] = [:]
+  private var viewportsByStack: [AnyHashable: StackViewportMetrics] = [:]
 
   func record(stack: AnyHashable, item: AnyHashable, height: Double) {
     guard height > 1 else { return }
@@ -33,6 +40,23 @@ final class LazyHeightCache {
     if !sample.isEmpty {
       averagesByStack[stack] = sample.reduce(0, +) / Double(sample.count)
     }
+  }
+
+  func hasSamples(stack: AnyHashable) -> Bool {
+    !(heightsByStack[stack]?.isEmpty ?? true)
+  }
+
+  func recordStackViewport(
+    stack: AnyHashable, offsetX: Double, offsetY: Double,
+    viewportWidth: Double, viewportHeight: Double
+  ) {
+    viewportsByStack[stack] = StackViewportMetrics(
+      offsetX: offsetX, offsetY: offsetY,
+      viewportWidth: viewportWidth, viewportHeight: viewportHeight)
+  }
+
+  func stackViewport(stack: AnyHashable) -> StackViewportMetrics? {
+    viewportsByStack[stack]
   }
 
   func estimatedHeight(stack: AnyHashable, item: AnyHashable) -> Double {
@@ -129,21 +153,28 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
       env.lazyContainerContext
       ?? env.lazyStackKey.map { LazyContainerContext(key: $0, axis: .verticalStack, spacing: 8) }
     if let lazyCtx, let viewport = env.scrollViewportContext, data.count > 72 {
+      EvaluationGraph.active?.recordScrollViewportRead()
       let stackKey = lazyCtx.key
       let spacing = lazyCtx.spacing
+      let stackMetrics = LazyHeightCache.shared.stackViewport(stack: stackKey)
+      let seeded = LazyHeightCache.shared.hasSamples(stack: stackKey)
+      let vpW = max(800, stackMetrics?.viewportWidth ?? viewport.viewportWidth)
+      let vpH = max(600, stackMetrics?.viewportHeight ?? viewport.viewportHeight)
+      let localOffsetX = viewport.offsetX - (stackMetrics?.offsetX ?? 0)
+      let localOffsetY = viewport.offsetY - (stackMetrics?.offsetY ?? 0)
       var children: [Element] = []
       children.reserveCapacity(data.count)
 
       switch lazyCtx.axis {
       case .verticalStack:
-        let minVisibleY = viewport.offsetY - 480
-        let maxVisibleY = viewport.offsetY + max(600, viewport.viewportHeight) + 600
+        let minVisibleY = localOffsetY - 600
+        let maxVisibleY = localOffsetY + vpH + 800
         var runningY = 0.0
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
           let estH = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
           let inWindow = (runningY + estH >= minVisibleY && runningY <= maxVisibleY)
-            || index < 14
+            || (!seeded && index < 14)
             || itemID == viewport.targetID
           runningY += estH + spacing
           if inWindow {
@@ -161,14 +192,14 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
         }
 
       case .horizontalStack:
-        let minVisibleX = viewport.offsetX - 480
-        let maxVisibleX = viewport.offsetX + max(800, viewport.viewportWidth) + 600
+        let minVisibleX = localOffsetX - 600
+        let maxVisibleX = localOffsetX + vpW + 800
         var runningX = 0.0
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
           let estW = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
           let inWindow = (runningX + estW >= minVisibleX && runningX <= maxVisibleX)
-            || index < 14
+            || (!seeded && index < 14)
             || itemID == viewport.targetID
           runningX += estW + spacing
           if inWindow {
@@ -187,8 +218,8 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
 
       case .verticalGrid(let columns):
         let cols = max(1, columns)
-        let minVisibleY = viewport.offsetY - 480
-        let maxVisibleY = viewport.offsetY + max(600, viewport.viewportHeight) + 600
+        let minVisibleY = localOffsetY - 600
+        let maxVisibleY = localOffsetY + vpH + 800
         let sampleRowH = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: AnyHashable("__grid_row"))
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
@@ -196,7 +227,7 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
           let estH = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
           let rowTop = Double(row) * (sampleRowH + spacing)
           let inWindow = (rowTop + estH >= minVisibleY && rowTop <= maxVisibleY)
-            || row < 6
+            || (!seeded && row < 6)
             || itemID == viewport.targetID
           if inWindow {
             let itemView: Content =
@@ -214,8 +245,8 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
 
       case .horizontalGrid(let rows):
         let rowCount = max(1, rows)
-        let minVisibleX = viewport.offsetX - 480
-        let maxVisibleX = viewport.offsetX + max(800, viewport.viewportWidth) + 600
+        let minVisibleX = localOffsetX - 600
+        let maxVisibleX = localOffsetX + vpW + 800
         let sampleColW = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: AnyHashable("__grid_col"))
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
@@ -223,7 +254,7 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
           let estW = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
           let colLeft = Double(col) * (sampleColW + spacing)
           let inWindow = (colLeft + estW >= minVisibleX && colLeft <= maxVisibleX)
-            || col < 6
+            || (!seeded && col < 6)
             || itemID == viewport.targetID
           if inWindow {
             let itemView: Content =

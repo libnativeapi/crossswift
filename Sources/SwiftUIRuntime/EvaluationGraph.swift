@@ -20,8 +20,12 @@ final class EvaluationGraph {
     weak var parent: Node?
     weak var graph: EvaluationGraph?
     var children: [Node] = []
+    var childrenByPath: [ViewPath: Node]?
+    var hadOutOfOrderChild = false
     var cursor = 0
     var dirty = true, descendantDirty = true, forceChildren = true
+    var readsScrollViewport = false
+    var lastScrollViewport: ScrollViewportContext?
     var inputChanged = true
     var result: Element?
     var lastEquatableView: (any Equatable)?
@@ -123,6 +127,14 @@ final class EvaluationGraph {
   }
   func installState(_ key: StateKey) { current?.state.insert(key) }
   func installLifecycle(_ key: StateKey) { current?.lifecycle.insert(key) }
+  func recordScrollViewportRead() {
+    var item = current
+    while let node = item {
+      if node.readsScrollViewport { break }
+      node.readsScrollViewport = true
+      item = node.parent
+    }
+  }
   /// A primitive's stored content is unchanged by its own internal state (for
   /// example a ScrollView offset). An ancestor supplying new input still wins.
   func withStoredContent(_ body: () -> Element) -> Element {
@@ -164,7 +176,23 @@ final class EvaluationGraph {
       {
         node = parent.children[index]
       } else {
-        node = Node(type: type, path: path, parent: parent, graph: self)
+        parent.hadOutOfOrderChild = true
+        if parent.childrenByPath == nil {
+          var map: [ViewPath: Node] = [:]
+          map.reserveCapacity(parent.children.count + 8)
+          for existing in parent.children {
+            map[existing.path] = existing
+          }
+          parent.childrenByPath = map
+        }
+        if let reused = parent.childrenByPath?[path], reused.type == type,
+          !parent.children[0..<min(index, parent.children.count)].contains(where: { $0 === reused })
+        {
+          node = reused
+        } else {
+          node = Node(type: type, path: path, parent: parent, graph: self)
+          parent.childrenByPath?[path] = node
+        }
         if index < parent.children.count {
           parent.children[index] = node
         } else {
@@ -177,8 +205,11 @@ final class EvaluationGraph {
       node = Node(type: type, path: path, parent: nil, graph: self)
       root = node
     }
+    let currentViewport = EnvironmentValues.current.scrollViewportContext
+    let viewportChanged =
+      node.readsScrollViewport && node.lastScrollViewport != currentViewport
     var forced = parent?.forceChildren ?? false
-    if forced, let eqView = equatableView, !node.dirty, node.result != nil,
+    if forced, !viewportChanged, let eqView = equatableView, !node.dirty, node.result != nil,
       node.lastGlobalInvalidationEpoch == globalInvalidationEpoch,
       let prevEnv = node.lastEnvironment,
       prevEnv.isEquivalent(to: EnvironmentValues.current),
@@ -186,7 +217,7 @@ final class EvaluationGraph {
     {
       forced = false
     }
-    if !forced && !node.descendantDirty, let result = node.result {
+    if !forced && !node.descendantDirty && !viewportChanged, let result = node.result {
       node.retain()
       return result
     }
@@ -198,6 +229,7 @@ final class EvaluationGraph {
     if inputsChanged { node.inputRevision += 1 }
     node.forceChildren = forced || node.dirty
     node.inputChanged = forced || node.result == nil
+    node.hadOutOfOrderChild = false
     node.cursor = 0
     current = node
     var result = body()
@@ -209,7 +241,16 @@ final class EvaluationGraph {
     if node.cursor < node.children.count {
       node.children.removeLast(node.children.count - node.cursor)
     }
+    if node.hadOutOfOrderChild || node.childrenByPath != nil {
+      var map: [ViewPath: Node] = [:]
+      map.reserveCapacity(node.children.count)
+      for liveChild in node.children {
+        map[liveChild.path] = liveChild
+      }
+      node.childrenByPath = map
+    }
     node.result = result
+    node.lastScrollViewport = currentViewport
     if let eqView = equatableView {
       node.lastEquatableView = eqView
       node.lastEnvironment = EnvironmentValues.current
@@ -284,7 +325,10 @@ final class EvaluationGraph {
       owner.geometryChild = scopeRoot
       needsFullRebuild = true
     }
-    if !needsFullRebuild && !scopeRoot.descendantDirty, let cached = scopeRoot.result {
+    let currentViewport = EnvironmentValues.current.scrollViewportContext
+    let viewportChanged =
+      scopeRoot.readsScrollViewport && scopeRoot.lastScrollViewport != currentViewport
+    if !needsFullRebuild && !scopeRoot.descendantDirty && !viewportChanged, let cached = scopeRoot.result {
       scopeRoot.retain()
       return cached
     }
@@ -298,15 +342,25 @@ final class EvaluationGraph {
     }
     scopeRoot.forceChildren = needsFullRebuild
     scopeRoot.inputChanged = needsFullRebuild
+    scopeRoot.hadOutOfOrderChild = false
     scopeRoot.cursor = 0
     let result = body()
     if scopeRoot.cursor < scopeRoot.children.count {
       scopeRoot.children.removeLast(scopeRoot.children.count - scopeRoot.cursor)
     }
+    if scopeRoot.hadOutOfOrderChild || scopeRoot.childrenByPath != nil {
+      var map: [ViewPath: Node] = [:]
+      map.reserveCapacity(scopeRoot.children.count)
+      for liveChild in scopeRoot.children {
+        map[liveChild.path] = liveChild
+      }
+      scopeRoot.childrenByPath = map
+    }
     owner.geometryInputRevision = owner.inputRevision
     owner.geometryRect = rect
     owner.geometryNamedOrigins = namedOrigins
     scopeRoot.result = result
+    scopeRoot.lastScrollViewport = currentViewport
     scopeRoot.dirty = false
     scopeRoot.descendantDirty = false
     return result

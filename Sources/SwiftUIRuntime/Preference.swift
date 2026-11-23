@@ -288,7 +288,12 @@ private struct GridContent<Content: View>: View, _PrimitiveView {
     let savedCtx = EnvironmentValues.current.lazyContainerContext
     let colEstimate: Int
     if layout.columns.count == 1, case .adaptive(let minW, _) = layout.columns[0].size {
-      let vw = EnvironmentValues.current.scrollViewportContext?.viewportWidth ?? 600
+      if EnvironmentValues.current.scrollViewportContext != nil {
+        EvaluationGraph.active?.recordScrollViewportRead()
+      }
+      let vw =
+        LazyHeightCache.shared.stackViewport(stack: stackKey)?.viewportWidth
+        ?? EnvironmentValues.current.scrollViewportContext?.viewportWidth ?? 600
       colEstimate = max(1, Int((vw + Double(layout.spacing)) / (Double(minW) + Double(layout.spacing))))
     } else {
       colEstimate = max(1, layout.columns.count)

@@ -103,6 +103,8 @@ public struct LayoutEngine {
     var liveViews = Set<Int>()
     var liveMeasurements = Set<Int>()
     var geometryMilliseconds = 0.0
+    var activeScrollContentOrigin: CGPoint?
+    var activeScrollViewportSize: Size?
   }
   private var pass: Pass?
   public var lastTimings: [String: Double] { cache.timings }
@@ -892,6 +894,17 @@ public struct LayoutEngine {
       }
     case .customLayout:
       if let layout = e.layout {
+        if let stackKey = e.lazyCacheKey,
+          let origin = pass?.activeScrollContentOrigin,
+          let vp = pass?.activeScrollViewportSize
+        {
+          LazyHeightCache.shared.recordStackViewport(
+            stack: stackKey,
+            offsetX: max(0, rect.minX - Double(origin.x)),
+            offsetY: max(0, rect.minY - Double(origin.y)),
+            viewportWidth: vp.width,
+            viewportHeight: vp.height)
+        }
         let frames = layout.placements(
           CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height),
           children: e.children, engine: self)
@@ -945,7 +958,17 @@ public struct LayoutEngine {
           width: size.width, height: size.height)
       }
       e.props.scrollOffset = offset
-      place(&e.children[0], in: frame(at: offset))
+      let savedScrollOrigin = pass?.activeScrollContentOrigin
+      let savedScrollViewport = pass?.activeScrollViewportSize
+      defer {
+        pass?.activeScrollContentOrigin = savedScrollOrigin
+        pass?.activeScrollViewportSize = savedScrollViewport
+      }
+      let initialContentFrame = frame(at: offset)
+      pass?.activeScrollContentOrigin = CGPoint(
+        x: initialContentFrame.minX, y: initialContentFrame.minY)
+      pass?.activeScrollViewportSize = Size(width: visibleWidth, height: visibleHeight)
+      place(&e.children[0], in: initialContentFrame)
       var finalOffset = offset
       if let target = e.scrollTarget, let match = scrollTargetFrame(target.id, in: e.children[0]) {
         let anchor = target.anchor ?? .topLeading
@@ -966,7 +989,10 @@ public struct LayoutEngine {
             : offset.y)
         finalOffset = next
         e.props.scrollOffset = next
-        place(&e.children[0], in: frame(at: next))
+        let targetContentFrame = frame(at: next)
+        pass?.activeScrollContentOrigin = CGPoint(
+          x: targetContentFrame.minX, y: targetContentFrame.minY)
+        place(&e.children[0], in: targetContentFrame)
         let scroll = e.scrollAction
         let complete = e.completeScrollTarget
         LifecycleRegistry.shared.enqueue {
@@ -1000,6 +1026,17 @@ public struct LayoutEngine {
   }
   private func placeStack(_ e: inout Element, axis: Axis, in rect: Rect) {
     let vertical = axis == .vertical
+    if let stackKey = e.lazyCacheKey,
+      let origin = pass?.activeScrollContentOrigin,
+      let vp = pass?.activeScrollViewportSize
+    {
+      LazyHeightCache.shared.recordStackViewport(
+        stack: stackKey,
+        offsetX: max(0, rect.minX - Double(origin.x)),
+        offsetY: max(0, rect.minY - Double(origin.y)),
+        viewportWidth: vp.width,
+        viewportHeight: vp.height)
+    }
     let indices = Array(e.children.indices)
     let mainExtent = vertical ? rect.height : rect.width
     let crossExtent = vertical ? rect.width : rect.height
