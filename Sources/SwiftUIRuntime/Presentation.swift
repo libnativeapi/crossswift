@@ -421,7 +421,7 @@ private struct ContextMenuView<Content: View, Menu: View>: View, _PrimitiveView 
       }
       .frame(maxWidth: .infinity, alignment: .leading)
       .padding(6)
-      .frame(minWidth: 140, maxWidth: 280, alignment: .leading)
+      .frame(maxWidth: 300, alignment: .leading)
       .fixedSize(horizontal: true, vertical: false)
       .background(
         Color { s in s == .dark ? (0.16, 0.16, 0.18, 0.98) : (0.98, 0.98, 0.99, 0.98) },

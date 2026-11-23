@@ -933,7 +933,7 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(6)
-            .frame(minWidth: 140, maxWidth: 280, alignment: .leading)
+            .frame(maxWidth: 300, alignment: .leading)
             .fixedSize(horizontal: true, vertical: false)
             .background(
               Color { s in s == .dark ? (0.16, 0.16, 0.18, 0.98) : (0.98, 0.98, 0.99, 0.98) },
@@ -1283,7 +1283,7 @@ public struct Menu<Label: View, Content: View>: View {
       }
       .frame(maxWidth: .infinity, alignment: .leading)
       .padding(6)
-      .frame(minWidth: 140, maxWidth: 280, alignment: .leading)
+      .frame(maxWidth: 300, alignment: .leading)
       .fixedSize(horizontal: true, vertical: false)
       .background(
         Color { s in s == .dark ? (0.16, 0.16, 0.18, 0.98) : (0.98, 0.98, 0.99, 0.98) },
@@ -1336,19 +1336,17 @@ struct _MenuRowButtonStyle: ButtonStyle {
         }
         return .clear
       }()
-      HStack(spacing: 8) {
-        configuration.label
-        Spacer(minLength: 12)
-      }
-      .font(.callout)
-      .lineLimit(1)
-      .foregroundStyle(isDestructive ? Color.red : Color.primary)
-      .padding(.horizontal, 8)
-      .padding(.vertical, 5)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .background(fill, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-      .opacity(isEnabled ? 1.0 : 0.45)
-      .onHover { hovered = $0 }
+      configuration.label
+        .font(.callout)
+        .lineLimit(1)
+        .foregroundStyle(isDestructive ? Color.red : Color.primary)
+        .padding(.leading, 8)
+        .padding(.trailing, 12)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fill, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .opacity(isEnabled ? 1.0 : 0.45)
+        .onHover { hovered = $0 }
     }
   }
 }

@@ -734,9 +734,11 @@ final class ControlsAndContainersTests: XCTestCase {
     let trigger = try XCTUnwrap(findNode(in: narrowRenderer.tree!, text: "Dark"))
     narrowRenderer.performTap(trigger.id)
 
-    // Presented menu panel is the last child of the root active presentation ZStack.
+    // Presented menu panel adapts directly to the widest item ("System") without artificial 140/160pt minWidth.
     let narrowPanel = try XCTUnwrap(narrowRenderer.tree?.children.last)
-    XCTAssertGreaterThanOrEqual(narrowPanel.frame.width, 140)
+    XCTAssertLessThan(narrowPanel.frame.width, 120)
+    let widestText = try XCTUnwrap(findNode(in: narrowPanel, text: "System"))
+    XCTAssertEqual(widestText.frame.maxX + 12 + 6, narrowPanel.frame.maxX, accuracy: 1.0)
     let narrowRows = allNodes(narrowPanel).filter { $0.kind == .styledButton }
     XCTAssertEqual(narrowRows.count, 3)
     for row in narrowRows {
