@@ -30,6 +30,7 @@ final class EvaluationGraph {
     var result: Element?
     var lastEquatableView: (any Equatable)?
     var lastEnvironment: EnvironmentValues?
+    var lastModifierContentEnvironment: EnvironmentValues?
     var lastGlobalInvalidationEpoch = -1
     var reads = Set<StateKey>()
     var previousReads = Set<StateKey>()
@@ -139,6 +140,26 @@ final class EvaluationGraph {
   /// example a ScrollView offset). An ancestor supplying new input still wins.
   func withStoredContent(_ body: () -> Element) -> Element {
     guard let current, !current.inputChanged else { return body() }
+    let previous = current.forceChildren
+    current.forceChildren = false
+    defer { current.forceChildren = previous }
+    return body()
+  }
+
+  var currentNodeID: Int { current?.id ?? 0 }
+
+  /// Isolates a `ViewModifier`'s `content` subtree from state mutations private
+  /// to the modifier itself (e.g. `ThinScrollbar` or `EdgeDissolveMask`), while
+  /// still re-evaluating when an ancestor rebuilt the modifier or the modifier
+  /// changed the environment passed into `content`.
+  func withModifierStoredContent(ownerID: Int, _ body: () -> Element) -> Element {
+    guard let current, ownerID != 0, let owner = nodesByID[ownerID]?.value else {
+      return body()
+    }
+    let env = EnvironmentValues.current
+    let envUnchanged = owner.lastModifierContentEnvironment.map { $0.isEquivalent(to: env) } ?? false
+    owner.lastModifierContentEnvironment = env
+    guard !owner.inputChanged && envUnchanged else { return body() }
     let previous = current.forceChildren
     current.forceChildren = false
     defer { current.forceChildren = previous }

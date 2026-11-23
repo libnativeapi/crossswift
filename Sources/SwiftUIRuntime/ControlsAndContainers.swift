@@ -2675,7 +2675,9 @@ private struct HGridContent<Content: View>: View, _PrimitiveView {
     let contentElement = _render(content, path: path)
     let children = flattenChildren(contentElement)
     var props = NodeProps()
-    props.isLazyContainer = contentElement.props.isLazyContainer || children.count > 72
+    props.isLazyContainer =
+      contentElement.props.isLazyContainer
+      || children.count > ScrollViewportContext.virtualizationThreshold
     var node = Element(kind: .customLayout, props: props, children: children)
     node.layout = layout
     node.lazyCacheKey = stackKey

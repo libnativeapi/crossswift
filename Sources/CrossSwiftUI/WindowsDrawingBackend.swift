@@ -1029,11 +1029,16 @@
             visible.width, visible.height)
         }
       }
-      if node.kind == .hostedView, let surface, let adapter = node.hostedViewAdapter as? any _HostedViewBackendBridge {
+      if node.kind == .hostedView, let surface,
+        hostedViews[node.id] != nil || shownInViewport,
+        let adapter = node.hostedViewAdapter as? any _HostedViewBackendBridge
+      {
         let r = node.frame
         var entry: RetainedHostedView
         if let existing = hostedViews[node.id] {
-          adapter.updateMount(existing.mount, frame: CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height))
+          if !geometryOnly {
+            adapter.updateMount(existing.mount, frame: CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height))
+          }
           entry = existing
         } else {
           let created = adapter.createMount(frame: CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height))
@@ -1395,9 +1400,14 @@
           sui_surface_restore(surface)
         }
       }
+      func subtreeHasMotion(_ element: Element) -> Bool {
+        if motions[element.id] != nil { return true }
+        return element.children.contains(where: subtreeHasMotion)
+      }
       let cacheScroll =
         node.kind == .scroll && canCull && p.clipped && p.cornerRadius == 0
-        && node.clipPathBuilder == nil && motions.isEmpty && node.children.first != nil
+        && node.clipPathBuilder == nil && (motions.isEmpty || !subtreeHasMotion(node))
+        && node.children.first != nil
       if cacheScroll, let child = node.children.first {
         // The bridge verifies translated paint commands, clips and backdrop
         // before copying pixels; opaque/custom layout does not need guessing.

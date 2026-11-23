@@ -1582,9 +1582,14 @@ private struct MaskView<Content: View, Mask: View>: View, _PrimitiveView {
     }
   }
 
+  private final class MaskClipCache {
+    var lastSize: CGSize = .zero
+    var cachedPath = Path()
+  }
+
   func _makeElement(path: ViewPath) -> Element {
     let saved = EnvironmentValues.current
-    var base = normalize(_render(content, path: path.appending(index: 0)))
+    var base = _render(content, path: path.appending(index: 0))
     EnvironmentValues.current = saved
     let alignedMask = ZStack(alignment: alignment) { maskContent }
       .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
@@ -1600,20 +1605,41 @@ private struct MaskView<Content: View, Mask: View>: View, _PrimitiveView {
       inheritedLineSpacing: 0
     )
 
-    let buildClip: (CGRect) -> Path = { [maskTemplate] bounds in
-      guard bounds.width > 0.01, bounds.height > 0.01 else { return Path() }
-      var copy = maskTemplate
-      let engine = LayoutEngine()
-      engine.layout(root: &copy, in: Size(width: bounds.width, height: bounds.height))
-      var combined = Path()
-      Self.collectMaskPaths(copy, parentOpacity: 1.0, into: &combined)
-      if bounds.minX != 0 || bounds.minY != 0 {
-        return combined.transformed(x: bounds.minX, y: bounds.minY)
-      }
-      return combined
+    let probeSize = CGSize(width: 100, height: 100)
+    var probeCopy = maskTemplate
+    LayoutEngine().layout(root: &probeCopy, in: Size(width: probeSize.width, height: probeSize.height))
+    var probePath = Path()
+    Self.collectMaskPaths(probeCopy, parentOpacity: 1.0, into: &probePath)
+    if probePath == Path(CGRect(origin: .zero, size: probeSize)) {
+      base.props.clipped = true
+      return base
     }
 
-    if base.clipPathBuilder != nil {
+    let cache = MaskClipCache()
+    cache.lastSize = probeSize
+    cache.cachedPath = probePath
+    let buildClip: (CGRect) -> Path = { [maskTemplate, cache] bounds in
+      guard bounds.width > 0.01, bounds.height > 0.01 else { return Path() }
+      let local: Path
+      if cache.lastSize == bounds.size {
+        local = cache.cachedPath
+      } else {
+        var copy = maskTemplate
+        let engine = LayoutEngine()
+        engine.layout(root: &copy, in: Size(width: bounds.width, height: bounds.height))
+        var combined = Path()
+        Self.collectMaskPaths(copy, parentOpacity: 1.0, into: &combined)
+        cache.lastSize = bounds.size
+        cache.cachedPath = combined
+        local = combined
+      }
+      if bounds.minX != 0 || bounds.minY != 0 {
+        return local.transformed(x: bounds.minX, y: bounds.minY)
+      }
+      return local
+    }
+
+    if base.clipPathBuilder != nil || base.kind == .scroll {
       var wrapperProps = NodeProps()
       wrapperProps.fillWidth = base.props.fillWidth
       wrapperProps.fillHeight = base.props.fillHeight

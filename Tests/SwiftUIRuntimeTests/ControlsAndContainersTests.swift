@@ -816,4 +816,89 @@ final class ControlsAndContainersTests: XCTestCase {
     XCTAssertEqual(tracker.copies, 1)
     XCTAssertNil(findNode(in: menuRenderer.tree!, text: "Rename Selected Item"))
   }
+
+  @MainActor
+  func testScrollWithModifierStateAndLazyBucketsSkipsRowReevaluationAndDoubleRenders() throws {
+    final class ScrollStats {
+      var rowEvaluations = 0
+      var phaseTransitions: [ScrollPhase] = []
+    }
+    final class CountingBackend: RenderBackend {
+      var tapHandler: ((NodeID) -> Void)?
+      var renders = 0
+      var scrolls = 0
+      func perform(_ commands: [RenderCommand]) {}
+      func didRender(_ root: Element) { renders += 1 }
+      func didScroll(_ root: Element, viewport: Rect) { scrolls += 1 }
+    }
+    struct TrackedRow: View {
+      let index: Int
+      let stats: ScrollStats
+      var body: some View {
+        let _ = { stats.rowEvaluations += 1 }()
+        return HStack {
+          Text(verbatim: "App \(index)")
+          Spacer()
+        }
+        .frame(height: 40)
+      }
+    }
+    struct ScrollbarChromeModifier: ViewModifier {
+      let stats: ScrollStats
+      @State private var thumbOffset: CGFloat = 0
+      func body(content: Content) -> some View {
+        content
+          .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { _, y in
+            thumbOffset = y
+          }
+          .onScrollPhaseChange { _, newPhase in
+            stats.phaseTransitions.append(newPhase)
+          }
+          .mask {
+            LinearGradient(
+              colors: [.black.opacity(0), .black, .black.opacity(0)],
+              startPoint: .top, endPoint: .bottom)
+          }
+          .overlay(alignment: .topTrailing) {
+            Capsule().fill(.white).frame(width: 6, height: 32).offset(y: thumbOffset * 0.1)
+          }
+      }
+    }
+
+    let stats = ScrollStats()
+    let backend = CountingBackend()
+    let root = ScrollView {
+      LazyVStack(spacing: 0) {
+        ForEach(0..<300) { idx in
+          TrackedRow(index: idx, stats: stats)
+        }
+      }
+    }
+    .modifier(ScrollbarChromeModifier(stats: stats))
+
+    let renderer = Renderer(
+      backend: backend,
+      root: AnyView(root),
+      size: Size(width: 600, height: 400)
+    )
+    renderer.mount()
+
+    let scrollNode = try XCTUnwrap(findNode(in: renderer.tree!, kind: .scroll))
+    XCTAssertNil(scrollNode.clipPathBuilder, "Full-bounds gradient mask should not attach a vector clipPathBuilder to ScrollView")
+
+    let initialRenders = backend.renders
+    stats.rowEvaluations = 0
+    stats.phaseTransitions.removeAll()
+
+    // Five small wheel steps staying inside the initial [0, 128) lazy bucket:
+    // - 0 row body re-evaluations despite ScrollbarChromeModifier @State mutating on every step
+    // - exactly 1 render per step (no post-commit second render cascade)
+    // - .interacting phase fires once on the first step, not 5 times
+    for _ in 0..<5 {
+      renderer.input(event: 5, point: CGPoint(x: 200, y: 200), value: -50)
+    }
+    XCTAssertEqual(stats.rowEvaluations, 0)
+    XCTAssertEqual(backend.renders - initialRenders, 5)
+    XCTAssertEqual(stats.phaseTransitions, [.interacting])
+  }
 }

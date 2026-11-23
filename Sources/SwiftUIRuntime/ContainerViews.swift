@@ -70,6 +70,12 @@ final class LazyHeightCache {
 }
 
 struct ScrollViewportContext: Equatable {
+  static let bucketSpan: Double = 128.0
+  static let virtualizationThreshold = 32
+  static func quantize(_ value: Double) -> Double {
+    guard value.isFinite else { return 0 }
+    return (value / bucketSpan).rounded(.down) * bucketSpan
+  }
   var offsetX: Double = 0
   var offsetY: Double = 0
   var viewportWidth: Double = 800
@@ -156,18 +162,22 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
     let lazyCtx: LazyContainerContext? =
       env.lazyContainerContext
       ?? env.lazyStackKey.map { LazyContainerContext(key: $0, axis: .verticalStack, spacing: 8) }
-    if let lazyCtx, let viewport = env.scrollViewportContext, data.count > 72 {
+    if let lazyCtx, let viewport = env.scrollViewportContext,
+      data.count > ScrollViewportContext.virtualizationThreshold
+    {
       EvaluationGraph.active?.recordScrollViewportRead()
       let stackKey = lazyCtx.key
       let spacing = lazyCtx.spacing
       let stackMetrics = LazyHeightCache.shared.stackViewport(stack: stackKey)
       let seeded = LazyHeightCache.shared.hasSamples(stack: stackKey)
-      let vpW = max(800, stackMetrics?.viewportWidth ?? viewport.viewportWidth)
-      let vpH = max(600, stackMetrics?.viewportHeight ?? viewport.viewportHeight)
+      let vpW = max(120, stackMetrics?.viewportWidth ?? viewport.viewportWidth)
+      let vpH = max(120, stackMetrics?.viewportHeight ?? viewport.viewportHeight)
       let localOffsetX = viewport.offsetX - (stackMetrics?.offsetX ?? 0)
       let localOffsetY = viewport.offsetY - (stackMetrics?.offsetY ?? 0)
       let avgExtent = LazyHeightCache.shared.averageHeight(stack: stackKey)
       let approxSpan = Double(data.count) * (avgExtent + spacing)
+      let leadingBuffer = 260.0
+      let trailingBuffer = ScrollViewportContext.bucketSpan + 260.0
       var children: [Element] = []
       children.reserveCapacity(data.count)
 
@@ -176,8 +186,8 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
         let clampedOffsetY = seeded
           ? max(0, min(localOffsetY, max(0, approxSpan - vpH)))
           : max(0, localOffsetY)
-        let minVisibleY = clampedOffsetY - 600
-        let maxVisibleY = clampedOffsetY + vpH + 800
+        let minVisibleY = clampedOffsetY - leadingBuffer
+        let maxVisibleY = clampedOffsetY + vpH + trailingBuffer
         var runningY = 0.0
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
@@ -205,8 +215,8 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
         let clampedOffsetX = seeded
           ? max(0, min(localOffsetX, max(0, approxSpan - vpW)))
           : max(0, localOffsetX)
-        let minVisibleX = clampedOffsetX - 600
-        let maxVisibleX = clampedOffsetX + vpW + 800
+        let minVisibleX = clampedOffsetX - leadingBuffer
+        let maxVisibleX = clampedOffsetX + vpW + trailingBuffer
         var runningX = 0.0
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
@@ -232,8 +242,8 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
 
       case .verticalGrid(let columns):
         let cols = max(1, columns)
-        let minVisibleY = localOffsetY - 600
-        let maxVisibleY = localOffsetY + vpH + 800
+        let minVisibleY = localOffsetY - leadingBuffer
+        let maxVisibleY = localOffsetY + vpH + trailingBuffer
         let sampleRowH = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: AnyHashable("__grid_row"))
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
@@ -253,14 +263,15 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
             var placeholder = NodeProps()
             placeholder.frameHeight = estH
             placeholder.fillWidth = true
+            placeholder.isLazyPlaceholder = true
             children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
           }
         }
 
       case .horizontalGrid(let rows):
         let rowCount = max(1, rows)
-        let minVisibleX = localOffsetX - 600
-        let maxVisibleX = localOffsetX + vpW + 800
+        let minVisibleX = localOffsetX - leadingBuffer
+        let maxVisibleX = localOffsetX + vpW + trailingBuffer
         let sampleColW = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: AnyHashable("__grid_col"))
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
@@ -280,6 +291,7 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
             var placeholder = NodeProps()
             placeholder.frameWidth = estW
             placeholder.fillHeight = true
+            placeholder.isLazyPlaceholder = true
             children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
           }
         }
@@ -375,8 +387,8 @@ public struct ScrollView<Content: View>: View, _PrimitiveView {
     p.fillHeight = axes.contains(.vertical)
     let savedViewport = EnvironmentValues.current.scrollViewportContext
     EnvironmentValues.current.scrollViewportContext = ScrollViewportContext(
-      offsetX: offset.x,
-      offsetY: offset.y,
+      offsetX: ScrollViewportContext.quantize(offset.x),
+      offsetY: ScrollViewportContext.quantize(offset.y),
       viewportWidth: 800,
       viewportHeight: 600,
       targetID: scrollTarget?.id
@@ -561,7 +573,9 @@ public struct LazyVStack<Content: View>: View, _PrimitiveView {
     var props = NodeProps()
     props.spacing = spacing
     props.horizontalAlignment = alignment
-    props.isLazyContainer = contentElement.props.isLazyContainer || children.count > 72
+    props.isLazyContainer =
+      contentElement.props.isLazyContainer
+      || children.count > ScrollViewportContext.virtualizationThreshold
     var el = Element(
       kind: .container(.vertical),
       props: props,
@@ -609,7 +623,9 @@ public struct LazyHStack<Content: View>: View, _PrimitiveView {
     var props = NodeProps()
     props.spacing = spacing
     props.verticalAlignment = alignment
-    props.isLazyContainer = contentElement.props.isLazyContainer || children.count > 72
+    props.isLazyContainer =
+      contentElement.props.isLazyContainer
+      || children.count > ScrollViewportContext.virtualizationThreshold
     var el = Element(
       kind: .container(.horizontal),
       props: props,

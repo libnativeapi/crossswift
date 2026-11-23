@@ -284,7 +284,7 @@ struct Surface {
   std::unordered_set<HWND> custom_views;
   uint32_t background_argb = 0xFFFFFFFFu;
   std::unordered_map<FontKey, std::unique_ptr<TextFont>, FontKeyHash> fonts;
-  std::unordered_map<std::wstring, std::unique_ptr<Image>> images;
+  std::unordered_map<std::wstring, std::unique_ptr<Bitmap>> images;
   std::unordered_map<std::string, std::wstring> wide_families;
   std::unordered_map<HWND, native_view_t> native_views;
   std::unordered_map<HWND, HWND> native_parents;
@@ -328,8 +328,13 @@ struct Surface {
   struct DeferredClip {
     double x, y, w, h;
   };
+  struct AppliedClip {
+    RECT clip;
+    LONG client_w, client_h;
+  };
   std::unordered_map<HWND, DeferredFrame> deferred_frames;
   std::unordered_map<HWND, DeferredClip> deferred_clips;
+  std::unordered_map<HWND, AppliedClip> applied_clips;
   struct PendingShadow {
     HDC dc = nullptr;
     HBITMAP dib = nullptr;
@@ -1800,9 +1805,19 @@ void RenderFrame(Surface *s) {
           continue;
         auto it = s->images.find(c.text);
         if (it == s->images.end()) {
-          if (s->images.size() >= 64)
-            s->images.clear();
-          it = s->images.emplace(c.text, std::make_unique<Image>(c.text.c_str())).first;
+          if (s->images.size() >= 512)
+            s->images.erase(s->images.begin());
+          std::unique_ptr<Bitmap> decoded;
+          Image src(c.text.c_str());
+          if (src.GetLastStatus() == Ok && src.GetWidth() > 0 && src.GetHeight() > 0) {
+            const UINT iw = src.GetWidth(), ih = src.GetHeight();
+            decoded = std::make_unique<Bitmap>(INT(iw), INT(ih), PixelFormat32bppPARGB);
+            Graphics img_g(decoded.get());
+            img_g.SetCompositingMode(CompositingModeSourceCopy);
+            img_g.DrawImage(&src, Rect(0, 0, INT(iw), INT(ih)),
+                            0, 0, INT(iw), INT(ih), UnitPixel);
+          }
+          it = s->images.emplace(c.text, std::move(decoded)).first;
         }
         if (it->second)
           target_g.DrawImage(it->second.get(), c.rect);
@@ -2672,6 +2687,7 @@ native_view_t NativeView(Surface *s, HWND hwnd) {
 void ReleaseControl(Surface *s, HWND hwnd) {
   s->deferred_frames.erase(hwnd);
   s->deferred_clips.erase(hwnd);
+  s->applied_clips.erase(hwnd);
   auto found = s->native_views.find(hwnd);
   if (found == s->native_views.end())
     return;
@@ -3147,8 +3163,8 @@ void CommitPendingResizeImpl(Surface *s, bool from_pos_changed) {
     s->deferred_clips.clear();
     for (const auto &entry : clips) {
       if (IsWindow(entry.first)) {
-        sui_control_clip(
-            entry.first, entry.second.x, entry.second.y, entry.second.w, entry.second.h);
+        sui_surface_control_clip(
+            s, entry.first, entry.second.x, entry.second.y, entry.second.w, entry.second.h);
       }
     }
   }
@@ -3588,11 +3604,33 @@ void sui_control_clip(void *control, double x, double y, double w, double h) {
 void sui_surface_control_clip(void *handle, void *control, double x, double y,
                               double w, double h) {
   auto *s = static_cast<Surface *>(handle);
+  HWND hwnd = static_cast<HWND>(control);
   if (s && s->defer_commit) {
-    s->deferred_clips[static_cast<HWND>(control)] = {x, y, w, h};
+    s->deferred_clips[hwnd] = {x, y, w, h};
     return;
   }
-  sui_control_clip(control, x, y, w, h);
+  double scale = GetDpiForWindow(hwnd) / 96.;
+  const bool visible = w > 0 && h > 0;
+  const bool style_visible = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VISIBLE) != 0;
+  if (style_visible != visible)
+    ShowWindow(hwnd, visible ? SW_SHOWNA : SW_HIDE);
+  RECT rect{};
+  GetClientRect(hwnd, &rect);
+  RECT clipped{int(std::floor(x * scale)),
+               int(std::floor(y * scale)),
+               int(std::ceil((x + w) * scale)),
+               int(std::ceil((y + h) * scale))};
+  if (s) {
+    auto it = s->applied_clips.find(hwnd);
+    if (it != s->applied_clips.end() &&
+        it->second.client_w == rect.right &&
+        it->second.client_h == rect.bottom &&
+        EqualRect(&it->second.clip, &clipped)) {
+      return;
+    }
+    s->applied_clips[hwnd] = {clipped, rect.right, rect.bottom};
+  }
+  ApplyRegion(hwnd, CreateRectRgnIndirect(&clipped));
 }
 void sui_control_opacity(void *control, double opacity) {
   auto hwnd = static_cast<HWND>(control);
@@ -3938,6 +3976,8 @@ void sui_surface_end(void *h) {
         RDW_INVALIDATE | RDW_NOCHILDREN | (any_pending_edit ? RDW_UPDATENOW : 0));
     for (auto &entry : s->edits) {
       const bool was_pending = entry.second.pending_text_paint;
+      if (!was_pending && !IsWindowVisible(entry.first))
+        continue;
       RECT r;
       GetWindowRect(entry.first, &r);
       MapWindowPoints(nullptr, s->host, reinterpret_cast<POINT *>(&r), 2);

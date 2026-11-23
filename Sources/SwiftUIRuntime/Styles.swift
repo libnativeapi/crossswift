@@ -118,6 +118,20 @@ public struct Animation: Equatable, Sendable {
   typealias Content = AnyView
   @ViewBuilder func body(content: Content) -> Body
 }
+private struct _ModifierStoredContent<Content: View>: View, _PrimitiveView {
+  typealias Body = Never
+  let content: Content
+  let ownerID: Int
+  var body: Never { fatalError("_ModifierStoredContent is primitive") }
+  func _makeElement(path: ViewPath) -> Element {
+    if let graph = EvaluationGraph.active {
+      return graph.withModifierStoredContent(ownerID: ownerID) {
+        _render(content, path: path)
+      }
+    }
+    return _render(content, path: path)
+  }
+}
 struct ModifierContent<Content: View, Modifier: ViewModifier>: View, _PrimitiveView {
   typealias Body = Never
   let content: Content
@@ -125,11 +139,13 @@ struct ModifierContent<Content: View, Modifier: ViewModifier>: View, _PrimitiveV
   var body: Never { fatalError("ModifierContent is primitive") }
   func _makeElement(path: ViewPath) -> Element {
     _installState(modifier, path: path)
+    let ownerID = EvaluationGraph.active?.currentNodeID ?? 0
+    let wrapped = AnyView(_ModifierStoredContent(content: content, ownerID: ownerID))
     let bodyValue: Modifier.Body
     if let graph = EvaluationGraph.active {
-      bodyValue = graph.trackObservation { modifier.body(content: AnyView(content)) }
+      bodyValue = graph.trackObservation { modifier.body(content: wrapped) }
     } else {
-      bodyValue = modifier.body(content: AnyView(content))
+      bodyValue = modifier.body(content: wrapped)
     }
     return _render(bodyValue, path: path)
   }

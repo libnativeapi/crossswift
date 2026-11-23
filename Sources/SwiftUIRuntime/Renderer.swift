@@ -69,6 +69,9 @@ import Foundation
   }
   private var pendingLongPress: PendingLongPress?
   private var unpublishedOffsets: [NodeID: Point] = [:]
+  private var wheelRemainders: [NodeID: Point] = [:]
+  private var activeScrollPhases: Set<NodeID> = []
+  private var scrollIdleTasks: [NodeID: Task<Void, Never>] = [:]
   private var hoverPending = false
   private var hoverPoint: CGPoint?
   private var pendingScroll: (id: NodeID, key: StateKey, offset: Point)?
@@ -121,6 +124,7 @@ import Foundation
 
   deinit {
     pendingLongPress?.cancelTimer()
+    for task in scrollIdleTasks.values { task.cancel() }
     StateRegistry.shared.removeObserver(rootPath)
   }
 
@@ -724,15 +728,23 @@ import Foundation
       return true
     }
     if event == 5 {
+      let scale = max(1.0, Double(backend.environment.displayScale))
       for node in chain where node.scrollAction != nil {
         let current = unpublishedOffsets[node.id] ?? node.props.scrollOffset
+        var remainder = wheelRemainders[node.id] ?? .zero
         var offset = current
         if modifiers.contains(.shift) || !node.props.scrollAxes.contains(.vertical) {
           if node.props.scrollAxes.contains(.horizontal) {
-            offset.x -= Double(value) * 0.4
+            let totalPx = (-Double(value) * 0.4 + remainder.x) * scale
+            let snappedPx = totalPx.rounded()
+            remainder.x = (totalPx - snappedPx) / scale
+            offset.x += snappedPx / scale
           }
         } else if node.props.scrollAxes.contains(.vertical) {
-          offset.y -= Double(value) * 0.4
+          let totalPx = (-Double(value) * 0.4 + remainder.y) * scale
+          let snappedPx = totalPx.rounded()
+          remainder.y = (totalPx - snappedPx) / scale
+          offset.y += snappedPx / scale
         }
         let insets = node.props.scrollContentInsets
         if let content = node.children.first {
@@ -740,9 +752,14 @@ import Foundation
           let maxX = max(minX, content.frame.width + insets.trailing - node.frame.width)
           let minY = -insets.top
           let maxY = max(minY, content.frame.height + insets.bottom - node.frame.height)
-          offset.x = max(minX, min(offset.x, maxX))
-          offset.y = max(minY, min(offset.y, maxY))
+          let clampedX = max(minX, min(offset.x, maxX))
+          let clampedY = max(minY, min(offset.y, maxY))
+          if clampedX != offset.x { remainder.x = 0 }
+          if clampedY != offset.y { remainder.y = 0 }
+          offset.x = clampedX
+          offset.y = clampedY
         }
+        wheelRemainders[node.id] = remainder
         if offset != current {
           hoverPending = true
           hoverPoint = backend.pointerLocation(fallback: point)
@@ -919,13 +936,19 @@ import Foundation
     }
     guard offset != (unpublishedOffsets[node.id] ?? node.props.scrollOffset) else { return }
     unpublishedOffsets[node.id] = offset
+    let lazyBucketUnchanged =
+      !containsLazyContainer(node)
+      || (ScrollViewportContext.quantize(node.props.scrollOffset.x) == ScrollViewportContext.quantize(offset.x)
+        && ScrollViewportContext.quantize(node.props.scrollOffset.y) == ScrollViewportContext.quantize(offset.y))
     // Global/named geometry and active presentations require a full pass.
     // Opaque layouts must reproduce exactly translated placement proposals.
+    // Note: if any phase or geometry handler below mutates @State other than
+    // `key`, StateRegistry's observer clears `pendingScroll` automatically and
+    // folds that update into a single render pass instead of two.
     if !needsRender || pendingScroll?.id == node.id, !isRendering, let key = node.scrollStateKey,
-      node.scrollGeometryHandlers.isEmpty,
       mounted?.hasActivePresentation == false,
       mounted?.hasLayoutAnimation == false,
-      !containsLazyContainer(node),
+      lazyBucketUnchanged,
       node.children.allSatisfy({
         layoutEngine.canTranslateScroll(
           $0, dx: node.props.scrollOffset.x - offset.x,
@@ -936,17 +959,39 @@ import Foundation
     } else {
       pendingScroll = nil
     }
-    for phaseHandler in node.scrollPhaseHandlers {
-      phaseHandler(.idle, .interacting)
-    }
-    node.scrollAction?(offset)
     if !node.scrollPhaseHandlers.isEmpty {
+      if activeScrollPhases.insert(node.id).inserted {
+        for phaseHandler in node.scrollPhaseHandlers {
+          phaseHandler(.idle, .interacting)
+        }
+      }
+      scrollIdleTasks[node.id]?.cancel()
+      let scrollID = node.id
       let handlers = node.scrollPhaseHandlers
-      Task { @MainActor in
-        try? await Task.sleep(nanoseconds: 140_000_000)
+      scrollIdleTasks[scrollID] = Task { @MainActor [weak self] in
+        do {
+          try await Task.sleep(nanoseconds: 160_000_000)
+        } catch {
+          return
+        }
+        guard !Task.isCancelled, let self else { return }
+        self.scrollIdleTasks.removeValue(forKey: scrollID)
+        guard self.activeScrollPhases.remove(scrollID) != nil else { return }
+        self.transactionDepth += 1
+        defer { self.finishTransaction() }
         for h in handlers { h(.interacting, .idle) }
       }
     }
+    if !node.scrollGeometryHandlers.isEmpty, let content = node.children.first {
+      let geo = ScrollGeometry(
+        contentOffset: CGPoint(x: offset.x, y: offset.y),
+        contentSize: CGSize(width: content.frame.width, height: content.frame.height),
+        contentInsets: insets,
+        containerSize: CGSize(width: node.frame.width, height: node.frame.height)
+      )
+      for h in node.scrollGeometryHandlers { h(geo) }
+    }
+    node.scrollAction?(offset)
   }
 
   private func containsLazyContainer(_ element: Element) -> Bool {
