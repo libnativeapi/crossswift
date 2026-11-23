@@ -33,10 +33,13 @@
     private struct RetainedButton {
       let view: NativeAPI.Button
       let listener: ListenerId
+      let isPlainButton: Bool
       var enabled: Bool?
       var visible: Bool?
       var label: String?
       var hitRadius: Double = 0
+      var hovered: Bool = false
+      var pressed: Bool = false
     }
     private struct RetainedEdit {
       let view: NativeAPI.TextField
@@ -193,6 +196,19 @@
           let backend = Unmanaged<WindowsDrawingBackend>.fromOpaque(context).takeUnretainedValue()
           if event == 1 || event == 2 { backend.nativeHoverEventCount += 1 }
           if event == 1 { backend.nativeHoverEnterCount += 1 }
+          if event >= 1 && event <= 4 {
+            let btnID = NodeID(rawValue: Int(id))
+            if var entry = backend.buttons[btnID], entry.isPlainButton {
+              let nextHover = event == 1 ? true : (event == 2 ? false : entry.hovered)
+              let nextPress = event == 3 ? true : (event == 4 ? false : entry.pressed)
+              if entry.hovered != nextHover || entry.pressed != nextPress {
+                entry.hovered = nextHover
+                entry.pressed = nextPress
+                backend.buttons[btnID] = entry
+                backend.repaintPlainButtonStateIfNeeded()
+              }
+            }
+          }
           if backend.schedulesUpdates && (event == 1 || event == 2) {
             backend.queuePointer()
             return
@@ -748,6 +764,12 @@
       draw(root, clip: root.frame)
       sui_surface_end(surface)
     }
+    private func repaintPlainButtonStateIfNeeded() {
+      guard !deliveringUpdate, pendingRender == nil, let surface, let root else { return }
+      sui_surface_begin(surface)
+      draw(root, clip: root.frame)
+      sui_surface_end(surface)
+    }
     private func updateButtons(
       _ node: Element, allowed: Bool = true, clip: Rect,
       background: SwiftUIRuntime.Color = .white, nativeClip: Rect? = nil,
@@ -817,10 +839,10 @@
           else {
             fatalError("nativeapi failed to create a button")
           }
-          let styled = node.kind == .styledButton
+          let isPlain = node.kind == .button
           if let surface {
             sui_surface_button(
-              surface, handle, Int64(node.id.rawValue), styled ? 1 : 0, button.nativeHandle)
+              surface, handle, Int64(node.id.rawValue), 1, button.nativeHandle)
           }
           let id = node.id
           let listener = button.addListener { [weak self] event in
@@ -828,7 +850,8 @@
               self?.enqueue { [weak self] in self?.tapHandler?(id) }
             }
           }
-          buttons[id] = RetainedButton(view: button, listener: listener, label: initialTitle)
+          buttons[id] = RetainedButton(
+            view: button, listener: listener, isPlainButton: isPlain, label: initialTitle)
         }
         var entry = buttons[node.id]!
         let button = entry.view
@@ -858,7 +881,11 @@
               }
               return radius
             }
-            entry.hitRadius = hitRadius(node)
+            let defaultRadius =
+              node.kind == .button
+              ? (node.props.cornerRadius > 0 ? node.props.cornerRadius : 6.0)
+              : 0.0
+            entry.hitRadius = max(defaultRadius, hitRadius(node))
           }
         }
         if !geometryOnly || !retained || nativeClip == nil {
@@ -1275,7 +1302,7 @@
         vector(
           p.path.transformed(x: r.minX, y: r.minY), fill: p.background ?? .clear,
           stroke: p.borderColor, width: p.borderWidth)
-      } else if !(node.kind == .button && occludedByPresentation),
+      } else if node.kind != .button,
         p.background != nil || (p.borderWidth > 0 && p.borderColor.opacity > 0)
       {
         sui_surface_shape(
@@ -1347,32 +1374,55 @@
           Double(font.size), font.weight.value, p.lineSpacing,
           (p.foreground ?? .black).opacity(localAlpha).argb)
       }
-      if node.kind == .button, occludedByPresentation {
+      if node.kind == .button {
         let isDark = environment.colorScheme == .dark
-        let btnFill = p.background ?? (
-          isDark
-            ? SwiftUIRuntime.Color(red: 0.22, green: 0.22, blue: 0.24, opacity: 0.96)
-            : SwiftUIRuntime.Color(red: 0.99, green: 0.99, blue: 0.995, opacity: 1.0)
-        )
+        let btnState = buttons[node.id]
+        let isHovered = p.enabled && !occludedByPresentation && (btnState?.hovered == true)
+        let isPressed = p.enabled && !occludedByPresentation && (btnState?.pressed == true)
+        let defaultFill: SwiftUIRuntime.Color = {
+          if !p.enabled {
+            return isDark
+              ? SwiftUIRuntime.Color.white.opacity(0.04)
+              : SwiftUIRuntime.Color.black.opacity(0.03)
+          }
+          if isPressed {
+            return isDark
+              ? SwiftUIRuntime.Color.white.opacity(0.20)
+              : SwiftUIRuntime.Color.black.opacity(0.14)
+          }
+          if isHovered {
+            return isDark
+              ? SwiftUIRuntime.Color.white.opacity(0.14)
+              : SwiftUIRuntime.Color.black.opacity(0.09)
+          }
+          return isDark
+            ? SwiftUIRuntime.Color.white.opacity(0.08)
+            : SwiftUIRuntime.Color.black.opacity(0.055)
+        }()
+        let btnFill = p.background ?? defaultFill
         let btnBorder =
           p.borderWidth > 0 && p.borderColor.opacity > 0
           ? p.borderColor
-          : (isDark ? SwiftUIRuntime.Color.white.opacity(0.14) : SwiftUIRuntime.Color.black.opacity(0.16))
-        let radius = p.cornerRadius > 0 ? p.cornerRadius : 5.0
+          : (isDark
+              ? SwiftUIRuntime.Color.white.opacity(p.enabled ? 0.14 : 0.07)
+              : SwiftUIRuntime.Color.black.opacity(p.enabled ? 0.12 : 0.06))
+        let radius = p.cornerRadius > 0 ? p.cornerRadius : 6.0
         sui_surface_shape(
           surface, r.minX, r.minY, r.width, r.height, radius,
           btnFill.opacity(localAlpha).argb, btnBorder.opacity(localAlpha).argb,
           p.borderWidth > 0 ? p.borderWidth : 1.0)
         let title = label(node)
         if !title.isEmpty {
-          let font = p.font ?? .body
+          let font = p.font ?? .callout
           let m = Self.measureText(title, font: font)
           let tx = r.minX + max(0, (r.width - m.width) * 0.5)
-          let ty = r.minY + (r.height - m.height) * 0.5
-          let defaultFg: SwiftUIRuntime.Color = isDark ? .white : .black
-          let fgAlpha = (p.enabled ? 1.0 : 0.45) * localAlpha
+          let defaultFg: SwiftUIRuntime.Color =
+            isDark
+            ? .white
+            : SwiftUIRuntime.Color(red: 0, green: 0, blue: 0, opacity: 0.88)
+          let fgAlpha = (p.enabled ? 1.0 : 0.42) * localAlpha
           sui_surface_text(
-            surface, tx, ty, max(r.width, m.width + 2), max(r.height, m.height + 2),
+            surface, tx, r.minY, max(0, m.width + 4), r.height,
             title, font.family, Double(font.size), font.weight.value, p.lineSpacing,
             (p.foreground ?? defaultFg).opacity(fgAlpha).argb)
         }

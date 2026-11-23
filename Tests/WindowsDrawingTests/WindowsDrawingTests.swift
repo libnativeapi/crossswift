@@ -500,6 +500,56 @@ final class WindowsDrawingTests: XCTestCase {
     XCTAssertEqual(state.draft, "go")
     XCTAssertEqual(state.committedAlias, "go")
   }
+
+  @MainActor
+  func testDefaultButtonInDarkFormRendersCustomBezelInsteadOfLightWin32Chrome() throws {
+    var tapped = 0
+    let scene = SwiftUIRuntime.Form {
+      SwiftUIRuntime.Section {
+        SwiftUIRuntime.HStack {
+          SwiftUIRuntime.Text("Providers")
+          SwiftUIRuntime.Spacer()
+          SwiftUIRuntime.Button("Manage…") { tapped += 1 }
+        }
+      }
+    }
+    .formStyle(.grouped)
+    .background(SwiftUIRuntime.Color(red: 0.10, green: 0.10, blue: 0.11))
+    .preferredColorScheme(.dark)
+
+    WindowsDrawingBackend.prepareApplication()
+    _ = NativeAPI.Application.shared.isRunning()
+    let window = try XCTUnwrap(NativeAPI.Window.create())
+    defer { _ = window.close() }
+    let backend = try XCTUnwrap(WindowsDrawingBackend(window: window))
+    backend.setBackgroundColor(SwiftUIRuntime.Color(red: 0.10, green: 0.10, blue: 0.11))
+    backend.environmentTransform = { $0.colorScheme = .dark }
+    let renderer = Renderer(
+      backend: backend, root: AnyView(scene), size: .init(width: 480, height: 180))
+    renderer.mount()
+
+    func findButton(_ node: Element) -> Element? {
+      if node.kind == .button, node.props.text == "Manage…" { return node }
+      return node.children.lazy.compactMap(findButton).first
+    }
+    let manageEl = try XCTUnwrap(findButton(try XCTUnwrap(renderer.tree)))
+    let manageNative = try XCTUnwrap(backend.nativeButton(manageEl.id))
+    let manageHandle = try XCTUnwrap(manageNative.nativeObject)
+
+    // Sample interior background pixel near the left bezel padding: must render dark surface fill
+    // rather than an unthemed >200 RGB light Win32 GDI push button.
+    let interiorRGB = control_print_pixel(manageHandle, 6, 6)
+    let r = Int((interiorRGB >> 16) & 0xFF)
+    let g = Int((interiorRGB >> 8) & 0xFF)
+    let b = Int(interiorRGB & 0xFF)
+    XCTAssertLessThan(r, 90, "Dark-mode default Button must not paint light Win32 button chrome")
+    XCTAssertLessThan(g, 90)
+    XCTAssertLessThan(b, 95)
+    XCTAssertGreaterThan(control_print_distinct_pixels(manageHandle), 20, "Button title glyphs must render inside custom-drawn button")
+
+    backend.activate(manageEl.id)
+    XCTAssertEqual(tapped, 1)
+  }
 }
 
 @Observable

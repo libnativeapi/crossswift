@@ -640,6 +640,42 @@ extern "C" int control_print_distinct_pixels(void *control) {
   return distinct;
 }
 
+extern "C" uint32_t control_print_pixel(void *control, int px, int py) {
+  HWND hwnd = static_cast<HWND>(control);
+  if (!hwnd || !IsWindow(hwnd)) return 0;
+  RECT cr{};
+  GetClientRect(hwnd, &cr);
+  const int cw = cr.right - cr.left;
+  const int ch = cr.bottom - cr.top;
+  if (cw <= 0 || ch <= 0) return 0;
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = cw;
+  bmi.bmiHeader.biHeight = -ch;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  uint32_t *pixels = nullptr;
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(screen);
+  HBITMAP dib = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, reinterpret_cast<void **>(&pixels), nullptr, 0);
+  ReleaseDC(nullptr, screen);
+  if (!dib || !pixels) {
+    if (dib) DeleteObject(dib);
+    DeleteDC(mem);
+    return 0;
+  }
+  HGDIOBJ old = SelectObject(mem, dib);
+  SendMessageW(hwnd, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT);
+  const int sx = px < 0 ? 0 : (px >= cw ? cw - 1 : px);
+  const int sy = py < 0 ? 0 : (py >= ch ? ch - 1 : py);
+  const uint32_t out = pixels[sy * cw + sx] & 0x00FFFFFFu;
+  SelectObject(mem, old);
+  DeleteObject(dib);
+  DeleteDC(mem);
+  return out;
+}
+
 extern "C" void control_send_key(void *control, int vk) {
   HWND hwnd = static_cast<HWND>(control);
   if (!hwnd || !IsWindow(hwnd)) return;

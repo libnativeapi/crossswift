@@ -25,6 +25,7 @@ int control_clip_width(void *control);
 int control_has_vscroll(void *control);
 int control_is_multiline_edit(void *control);
 int control_print_distinct_pixels(void *control);
+uint32_t control_print_pixel(void *control, int px, int py);
 void control_send_key(void *control, int vk);
 void control_send_char(void *control, int ch);
 int host_region_distinct_pixels(void *host, double x, double y, double w, double h);

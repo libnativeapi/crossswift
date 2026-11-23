@@ -218,40 +218,62 @@ public struct DefaultButtonStyle: ButtonStyle {
 
 public struct BorderedButtonStyle: ButtonStyle {
   public init() {}
+  private struct BodyView: View {
+    let configuration: Configuration
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovered = false
+
+    var body: some View {
+      let enabled = isEnabled
+      let isHovered = hovered
+      let isPressed = enabled && configuration.isPressed
+      #if os(Android) || CROSS_SWIFTUI_HARMONY
+      let hPad: CGFloat = 18
+      let vPad: CGFloat = 10
+      let minHeight: CGFloat = 38
+      let labelFont: Font = .body.weight(.medium)
+      #else
+      let hPad: CGFloat = 12
+      let vPad: CGFloat = 5
+      let minHeight: CGFloat = 24
+      let labelFont: Font = .callout
+      #endif
+      return configuration.label
+        .font(labelFont)
+        .opacity(enabled ? 1.0 : 0.42)
+        .padding(.horizontal, hPad)
+        .padding(.vertical, vPad)
+        .frame(minHeight: minHeight)
+        .background(
+          Color { scheme in
+            if !enabled {
+              return scheme == .dark ? (1, 1, 1, 0.04) : (0, 0, 0, 0.03)
+            }
+            if isPressed {
+              return scheme == .dark ? (1, 1, 1, 0.20) : (0, 0, 0, 0.14)
+            }
+            if isHovered {
+              return scheme == .dark ? (1, 1, 1, 0.14) : (0, 0, 0, 0.09)
+            }
+            return scheme == .dark ? (1, 1, 1, 0.08) : (0, 0, 0, 0.055)
+          },
+          in: RoundedRectangle(cornerRadius: 6)
+        )
+        .overlay {
+          RoundedRectangle(cornerRadius: 6)
+            .strokeBorder(
+              Color { scheme in
+                let alpha = !enabled ? 0.07 : (scheme == .dark ? 0.14 : 0.12)
+                return scheme == .dark ? (1, 1, 1, alpha) : (0, 0, 0, alpha)
+              },
+              lineWidth: 1
+            )
+        }
+        .onHover { hovered = $0 }
+    }
+  }
   public func makeBody(configuration: Configuration) -> some View {
-    let isEnabled = EnvironmentValues.current.isEnabled
-    let isPressed = isEnabled && configuration.isPressed
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
-    let hPad: CGFloat = 18
-    let vPad: CGFloat = 10
-    let labelFont: Font = .body.weight(.medium)
-    #else
-    let hPad: CGFloat = 10
-    let vPad: CGFloat = 5
-    let labelFont: Font = .callout
-    #endif
-    return configuration.label
-      .font(labelFont)
-      .opacity(isEnabled ? 1.0 : 0.42)
-      .padding(.horizontal, hPad)
-      .padding(.vertical, vPad)
-      .background(
-        Color { scheme in
-          let alpha = !isEnabled ? 0.04 : (isPressed ? 0.18 : 0.09)
-          return scheme == .dark ? (1, 1, 1, alpha) : (0, 0, 0, alpha)
-        },
-        in: RoundedRectangle(cornerRadius: 6)
-      )
-      .overlay {
-        RoundedRectangle(cornerRadius: 6)
-          .strokeBorder(
-            Color { scheme in
-              let alpha = !isEnabled ? 0.08 : (scheme == .dark ? 0.14 : 0.12)
-              return scheme == .dark ? (1, 1, 1, alpha) : (0, 0, 0, alpha)
-            },
-            lineWidth: 1
-          )
-      }
+    BodyView(configuration: configuration)
   }
 }
 

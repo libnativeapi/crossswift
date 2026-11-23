@@ -220,7 +220,9 @@ extension Button: _PrimitiveView {
     }
     var props = NodeProps()
     if role == .cancel { props.keyboardShortcut = .cancelAction }
-    if role == .destructive { props.foreground = Color(hex: 0xb91c1c) }
+    if role == .destructive {
+      props.foreground = Color.red._resolvePrimaryColor(in: EnvironmentValues.current)
+    }
     props.text = resolvedTitle
     return Element(kind: .button, props: props, action: action)
   }

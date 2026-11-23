@@ -454,10 +454,18 @@ public struct LayoutEngine {
     var size = Size.zero
     switch e.kind {
     case .text, .button:
-      size = textLayout(p, width: e.kind == .button ? nil : offer.width.map { Double($0) }).size
+      var textProps = p
+      if e.kind == .button, textProps.font == nil, textMeasurer != nil {
+        textProps.font = .callout
+      }
+      size = textLayout(textProps, width: e.kind == .button ? nil : offer.width.map { Double($0) }).size
       if e.kind == .button {
         size.width += metrics.buttonHorizontalPadding * 2
-        size.height += metrics.buttonVerticalPadding * 2
+        if textMeasurer != nil {
+          size.height = max(24, size.height + 10)
+        } else {
+          size.height += metrics.buttonVerticalPadding * 2
+        }
       }
     case .textField:
       size = textSize(p.text.isEmpty ? " " : p.text, p.font)
