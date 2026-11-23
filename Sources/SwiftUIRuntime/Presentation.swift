@@ -58,6 +58,7 @@ private struct PopoverView<Content: View, Panel: View>: View, _PrimitiveView {
     element.presentationEdge = edge
     element.presentationPopoverChrome = drawsPopoverChrome
     element.presentationColorScheme = colorScheme
+    element.dismissOnAction = !drawsPopoverChrome
     element.dismissPresentation = { isPresented.wrappedValue = false }
     return element
   }
@@ -414,19 +415,20 @@ private struct ContextMenuView<Content: View, Menu: View>: View, _PrimitiveView 
   func _makeElement(path: ViewPath) -> Element {
     var children = [_render(content, path: path.appending(index: 0))]
     if presented {
-      let panel = VStack(alignment: .leading, spacing: 4) {
+      let panel = VStack(alignment: .leading, spacing: 2) {
         menu
-          .buttonStyle(.plain)
+          ._menuItemButtonStyle()
       }
-      .padding(8)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(6)
+      .frame(minWidth: 140, maxWidth: 280, alignment: .leading)
       .fixedSize(horizontal: true, vertical: false)
-      .frame(minWidth: 160, maxWidth: 280, alignment: .leading)
       .background(
         Color { s in s == .dark ? (0.16, 0.16, 0.18, 0.98) : (0.98, 0.98, 0.99, 0.98) },
-        in: RoundedRectangle(cornerRadius: 8)
+        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
       )
       .overlay {
-        RoundedRectangle(cornerRadius: 8)
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
           .strokeBorder(
             Color { s in s == .dark ? (1, 1, 1, 0.14) : (0, 0, 0, 0.12) },
             lineWidth: 1

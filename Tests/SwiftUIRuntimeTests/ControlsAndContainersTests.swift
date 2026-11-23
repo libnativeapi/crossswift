@@ -709,4 +709,109 @@ final class ControlsAndContainersTests: XCTestCase {
     XCTAssertTrue(bottomTexts.contains("Candidate 148"))
     XCTAssertTrue(bottomTexts.contains("Candidate 149"))
   }
+
+  @MainActor
+  func testPickerAndMenuDropdownSelectionHighlightSpansFullMenuWidth() throws {
+    struct NarrowPickerHost: View {
+      @State var choice = "dark"
+      var body: some View {
+        Picker("Appearance", selection: $choice) {
+          Text(verbatim: "System").tag("system")
+          Text(verbatim: "Light").tag("light")
+          Text(verbatim: "Dark").tag("dark")
+        }
+        .pickerStyle(.menu)
+      }
+    }
+
+    let narrowRenderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(NarrowPickerHost()),
+      size: Size(width: 500, height: 400)
+    )
+    narrowRenderer.mount()
+
+    let trigger = try XCTUnwrap(findNode(in: narrowRenderer.tree!, text: "Dark"))
+    narrowRenderer.performTap(trigger.id)
+
+    // Presented menu panel is the last child of the root active presentation ZStack.
+    let narrowPanel = try XCTUnwrap(narrowRenderer.tree?.children.last)
+    XCTAssertGreaterThanOrEqual(narrowPanel.frame.width, 140)
+    let narrowRows = allNodes(narrowPanel).filter { $0.kind == .styledButton }
+    XCTAssertEqual(narrowRows.count, 3)
+    for row in narrowRows {
+      XCTAssertEqual(row.frame.minX, narrowPanel.frame.minX + 6, accuracy: 0.5)
+      XCTAssertEqual(row.frame.maxX, narrowPanel.frame.maxX - 6, accuracy: 0.5)
+    }
+    let selectedBg = try XCTUnwrap(
+      allNodes(narrowRows[2]).first { $0.kind == .shape && ($0.props.background?.opacity ?? 0) > 0.1 }
+    )
+    XCTAssertEqual(selectedBg.frame.minX, narrowPanel.frame.minX + 6, accuracy: 0.5)
+    XCTAssertEqual(selectedBg.frame.maxX, narrowPanel.frame.maxX - 6, accuracy: 0.5)
+
+    // Mixed short + wide options where the short option is selected:
+    struct MixedPickerHost: View {
+      @State var choice = "short"
+      var body: some View {
+        Picker("Retention", selection: $choice) {
+          Text(verbatim: "Off").tag("short")
+          Text(verbatim: "Follow System Appearance Automatically").tag("wide")
+        }
+        .pickerStyle(.menu)
+      }
+    }
+
+    let mixedRenderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(MixedPickerHost()),
+      size: Size(width: 500, height: 400)
+    )
+    mixedRenderer.mount()
+    let mixedTrigger = try XCTUnwrap(findNode(in: mixedRenderer.tree!, text: "Off"))
+    mixedRenderer.performTap(mixedTrigger.id)
+
+    let mixedPanel = try XCTUnwrap(mixedRenderer.tree?.children.last)
+    XCTAssertGreaterThan(mixedPanel.frame.width, 170)
+    let mixedRows = allNodes(mixedPanel).filter { $0.kind == .styledButton }
+    XCTAssertEqual(mixedRows.count, 2)
+    let shortSelectedBg = try XCTUnwrap(
+      allNodes(mixedRows[0]).first { $0.kind == .shape && ($0.props.background?.opacity ?? 0) > 0.1 }
+    )
+    XCTAssertEqual(shortSelectedBg.frame.minX, mixedPanel.frame.minX + 6, accuracy: 0.5)
+    XCTAssertEqual(shortSelectedBg.frame.maxX, mixedPanel.frame.maxX - 6, accuracy: 0.5)
+
+    // Action Menu: items fill inner menu width, highlight on hover, and dismiss on tap.
+    final class MenuTracker { var copies = 0 }
+    let tracker = MenuTracker()
+    let menuView = Menu("Actions") {
+      Button("Copy") { tracker.copies += 1 }
+      Button("Rename Selected Item") {}
+    }
+    let menuRenderer = Renderer(
+      backend: FakeBackend(),
+      root: AnyView(menuView),
+      size: Size(width: 500, height: 400)
+    )
+    menuRenderer.mount()
+    let menuTrigger = try XCTUnwrap(findNode(in: menuRenderer.tree!, text: "Actions"))
+    menuRenderer.performTap(menuTrigger.id)
+
+    let menuPanel = try XCTUnwrap(menuRenderer.tree?.children.last)
+    let menuButtons = allNodes(menuPanel).filter { $0.kind == .styledButton }
+    XCTAssertEqual(menuButtons.count, 2)
+    XCTAssertEqual(menuButtons[0].frame.minX, menuPanel.frame.minX + 6, accuracy: 0.5)
+    XCTAssertEqual(menuButtons[0].frame.maxX, menuPanel.frame.maxX - 6, accuracy: 0.5)
+
+    menuRenderer.interact(menuButtons[0].id, .hover(true))
+    let updatedMenuPanel = try XCTUnwrap(menuRenderer.tree?.children.last)
+    let hoveredBtn = allNodes(updatedMenuPanel).filter { $0.kind == .styledButton }[0]
+    let hoverBg = try XCTUnwrap(
+      allNodes(hoveredBtn).first { $0.kind == .shape && ($0.props.background?.opacity ?? 0) > 0.05 }
+    )
+    XCTAssertEqual(hoverBg.frame.maxX, updatedMenuPanel.frame.maxX - 6, accuracy: 0.5)
+
+    menuRenderer.performTap(hoveredBtn.id)
+    XCTAssertEqual(tracker.copies, 1)
+    XCTAssertNil(findNode(in: menuRenderer.tree!, text: "Rename Selected Item"))
+  }
 }

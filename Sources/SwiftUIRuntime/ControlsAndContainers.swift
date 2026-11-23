@@ -926,27 +926,21 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
                     Text(verbatim: opt.title)
                       .font(.callout)
                       .lineLimit(1)
-                    Spacer(minLength: 12)
                   }
-                  .padding(.horizontal, 8)
-                  .padding(.vertical, 5)
-                  .background(
-                    isSelected ? Color.accentColor.opacity(0.20) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 5)
-                  )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(_MenuRowButtonStyle(isSelected: isSelected, role: nil))
               }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(6)
+            .frame(minWidth: 140, maxWidth: 280, alignment: .leading)
             .fixedSize(horizontal: true, vertical: false)
-            .frame(minWidth: 160, maxWidth: 280, alignment: .leading)
             .background(
               Color { s in s == .dark ? (0.16, 0.16, 0.18, 0.98) : (0.98, 0.98, 0.99, 0.98) },
-              in: RoundedRectangle(cornerRadius: 8)
+              in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
             .overlay {
-              RoundedRectangle(cornerRadius: 8)
+              RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(Color { s in s == .dark ? (1, 1, 1, 0.14) : (0, 0, 0, 0.12) }, lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.16), radius: 12, x: 0, y: 4)
@@ -1283,22 +1277,87 @@ public struct Menu<Label: View, Content: View>: View {
     }
     .buttonStyle(.bordered)
     ._menuPopover(isPresented: $isExpanded, arrowEdge: .top) {
-      VStack(alignment: .leading, spacing: 4) {
+      VStack(alignment: .leading, spacing: 2) {
         content
-          .buttonStyle(.plain)
+          ._menuItemButtonStyle()
       }
-      .padding(8)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(6)
+      .frame(minWidth: 140, maxWidth: 280, alignment: .leading)
       .fixedSize(horizontal: true, vertical: false)
-      .frame(minWidth: 160, maxWidth: 280, alignment: .leading)
       .background(
         Color { s in s == .dark ? (0.16, 0.16, 0.18, 0.98) : (0.98, 0.98, 0.99, 0.98) },
-        in: RoundedRectangle(cornerRadius: 8)
+        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
       )
       .overlay {
-        RoundedRectangle(cornerRadius: 8)
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
           .strokeBorder(Color { s in s == .dark ? (1, 1, 1, 0.14) : (0, 0, 0, 0.12) }, lineWidth: 1)
       }
       .shadow(color: .black.opacity(0.16), radius: 12, x: 0, y: 4)
+    }
+  }
+}
+
+struct _MenuRowButtonStyle: ButtonStyle {
+  let isSelected: Bool
+  let role: ButtonRole?
+
+  func makeBody(configuration: Configuration) -> some View {
+    RowBody(configuration: configuration, isSelected: isSelected, role: role)
+  }
+
+  private struct RowBody: View {
+    let configuration: ButtonStyleConfiguration
+    let isSelected: Bool
+    let role: ButtonRole?
+    @State private var hovered = false
+
+    var body: some View {
+      let isEnabled = EnvironmentValues.current.isEnabled
+      let isPressed = isEnabled && configuration.isPressed
+      let isHovered = isEnabled && hovered
+      let isDestructive = role == .destructive
+      let isSelectedRow = isSelected
+      let fill: Color = {
+        if isPressed {
+          return isDestructive ? Color.red.opacity(0.24) : Color.accentColor.opacity(0.32)
+        }
+        if isHovered {
+          if isSelectedRow {
+            return Color.accentColor.opacity(0.28)
+          }
+          if isDestructive {
+            return Color.red.opacity(0.18)
+          }
+          return Color { s in s == .dark ? (1, 1, 1, 0.11) : (0, 0, 0, 0.08) }
+        }
+        if isSelectedRow {
+          return Color.accentColor.opacity(0.20)
+        }
+        return .clear
+      }()
+      HStack(spacing: 8) {
+        configuration.label
+        Spacer(minLength: 12)
+      }
+      .font(.callout)
+      .lineLimit(1)
+      .foregroundStyle(isDestructive ? Color.red : Color.primary)
+      .padding(.horizontal, 8)
+      .padding(.vertical, 5)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(fill, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+      .opacity(isEnabled ? 1.0 : 0.45)
+      .onHover { hovered = $0 }
+    }
+  }
+}
+
+extension View {
+  func _menuItemButtonStyle() -> some View {
+    environment(\.inheritedButtonStyle) { label, role, path, action in
+      let btn = Button(role: role, action: action) { label }
+      return _render(StyledButton(button: btn, style: _MenuRowButtonStyle(isSelected: false, role: role)), path: path)
     }
   }
 }
