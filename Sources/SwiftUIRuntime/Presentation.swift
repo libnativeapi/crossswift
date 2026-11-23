@@ -481,20 +481,14 @@ private struct AlertPresentation<Content: View, Actions: View, Message: View>: V
   func _makeElement(path: ViewPath) -> Element {
     var children = [_render(content, path: path.appending(index: 0))]
     if isPresented.wrappedValue {
-      let panel = VStack(alignment: .leading, spacing: 12) {
-        Text(title).font(.system(size: 16, weight: .semibold))
-        message
-        HStack {
-          Spacer()
-          actions
-        }
-      }
-      .padding(20)
-      .frame(width: 390)
-      .foregroundStyle(scheme == .dark ? Color.white : .black)
-      .background(
-        scheme == .dark ? Color(hex: 0x25262b) : .white, in: RoundedRectangle(cornerRadius: 10))
-      var panelElement = _render(panel, path: path.appending(index: 1))
+      var panelElement = _renderModalDialogCard(
+        title: title,
+        titleVisibility: .visible,
+        scheme: scheme,
+        actions: actions,
+        message: message,
+        path: path.appending(index: 1)
+      )
 
       // Extract semantic alert metadata for native mobile hosts (Android Material 3 / iOS style)
       let msgTree = _render(message, path: path.appending(index: 2))
@@ -516,7 +510,9 @@ private struct AlertPresentation<Content: View, Actions: View, Message: View>: V
           let role: String
           if el.props.keyboardShortcut == .cancelAction {
             role = "cancel"
-          } else if el.props.foreground == Color(hex: 0xb91c1c) || el.props.semanticControl?.subtitle == "destructive" {
+          } else if el.props.foreground == Color(hex: 0xb91c1c) || el.props.foreground == .red
+            || el.props.semanticControl?.subtitle == "destructive"
+          {
             role = "destructive"
           } else {
             role = "default"

@@ -190,8 +190,10 @@ public struct Button<Label: View>: View {
 extension Button: _PrimitiveView {
   func _makeElement(path: ViewPath) -> Element {
     if let inherited = EnvironmentValues.current.inheritedButtonStyle {
-      var el = inherited(AnyView(label), path.appending(index: 0), action)
-      if role == .cancel { el.props.keyboardShortcut = .cancelAction }
+      var el = inherited(AnyView(label), role, path.appending(index: 0), action)
+      if role == .cancel && el.props.keyboardShortcut == nil {
+        el.props.keyboardShortcut = .cancelAction
+      }
       return el
     }
     func hasOnlyText(_ el: Element) -> Bool {

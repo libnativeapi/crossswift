@@ -188,13 +188,92 @@ final class CompatibilityExtensionsTests: XCTestCase {
     renderer.performTap(background.id)
     XCTAssertEqual(actions.background, 0)
     let delete = try XCTUnwrap(findNode(in: renderer.tree!, text: "Delete"))
-    XCTAssertEqual(delete.props.foreground, Color(hex: 0xb91c1c))
+    XCTAssertEqual(delete.props.foreground, .red)
+    let cancel = try XCTUnwrap(findNode(in: renderer.tree!, text: "Cancel"))
+    XCTAssertLessThan(
+      cancel.frame.minX, delete.frame.minX,
+      "Cancel button should lead on the left of a two-action modal dialog")
     renderer.performTap(delete.id)
     XCTAssertEqual(actions.confirm, 1)
     XCTAssertNil(findNode(in: renderer.tree!, text: "Are you sure?"))
     let second = render(Content(actions: actions))
     XCTAssertTrue(second.input(event: 6, value: 27))
     XCTAssertNil(findNode(in: second.tree!, text: "Are you sure?"))
+  }
+
+  func testStyledButtonForwardsNativeHoverToMakeBodyModifiers() throws {
+    struct HoverPillStyle: ButtonStyle {
+      func makeBody(configuration: Configuration) -> some View {
+        HoverBody(configuration: configuration)
+      }
+      struct HoverBody: View {
+        let configuration: ButtonStyleConfiguration
+        @State private var hovered = false
+        var body: some View {
+          configuration.label
+            .padding(.horizontal, 16)
+            .frame(height: 34)
+            .background(Capsule().fill(Color.blue.opacity(hovered ? 0.28 : 0.20)))
+            .onHover { hovered = $0 }
+        }
+      }
+    }
+    let renderer = render(
+      Button("Save") {}.buttonStyle(HoverPillStyle()),
+      size: .init(width: 200, height: 80))
+    let styledBtn = try XCTUnwrap(findNode(in: renderer.tree!, kind: .styledButton))
+    let initialShape = try XCTUnwrap(allNodes(renderer.tree!).first { $0.kind == .shape })
+    XCTAssertEqual(initialShape.props.background?.opacity ?? 0, 0.20, accuracy: 0.01)
+
+    renderer.interact(styledBtn.id, .hover(true))
+    let hoveredShape = try XCTUnwrap(allNodes(renderer.tree!).first { $0.kind == .shape })
+    XCTAssertEqual(hoveredShape.props.background?.opacity ?? 0, 0.28, accuracy: 0.01)
+
+    renderer.interact(styledBtn.id, .hover(false))
+    let unhoveredShape = try XCTUnwrap(allNodes(renderer.tree!).first { $0.kind == .shape })
+    XCTAssertEqual(unhoveredShape.props.background?.opacity ?? 0, 0.20, accuracy: 0.01)
+  }
+
+  func testDialogViewThatFitsHorizontalActionButtonsShareWidthEqually() throws {
+    struct PillDialogButtonStyle: ButtonStyle {
+      let primary: Bool
+      func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+          .font(.system(size: 13, weight: primary ? .semibold : .medium))
+          .lineLimit(1)
+          .padding(.horizontal, 16)
+          .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34)
+          .background(Capsule().fill(primary ? Color.blue.opacity(0.24) : Color.white.opacity(0.08)))
+      }
+    }
+    let dialog = VStack(alignment: .leading, spacing: 18) {
+      Text("Relaunch Tinycast?")
+      ViewThatFits(in: .horizontal) {
+        HStack(spacing: 8) {
+          Button("Cancel") {}.buttonStyle(PillDialogButtonStyle(primary: false))
+          Button("Relaunch") {}.buttonStyle(PillDialogButtonStyle(primary: true))
+        }
+        VStack(spacing: 8) {
+          Button("Relaunch") {}.buttonStyle(PillDialogButtonStyle(primary: true))
+          Button("Cancel") {}.buttonStyle(PillDialogButtonStyle(primary: false))
+        }
+      }
+    }
+    .padding(16)
+    .frame(width: 320, alignment: .leading)
+
+    let renderer = render(dialog, size: .init(width: 400, height: 240))
+    let fitting = try XCTUnwrap(findNode(in: renderer.tree!, kind: .customLayout))
+    XCTAssertGreaterThan(fitting.children[0].frame.width, 0)
+    XCTAssertEqual(fitting.children[1].frame.width, 0)
+    XCTAssertTrue(fitting.children[1].props.clipped)
+    let buttons = allNodes(fitting.children[0]).filter { $0.kind == .styledButton }
+    XCTAssertEqual(buttons.count, 2)
+    XCTAssertEqual(buttons[0].frame.minY, buttons[1].frame.minY, accuracy: 0.5)
+    XCTAssertEqual(buttons[0].frame.height, 34, accuracy: 0.5)
+    XCTAssertEqual(buttons[1].frame.height, 34, accuracy: 0.5)
+    XCTAssertEqual(buttons[0].frame.width, buttons[1].frame.width, accuracy: 1.0)
+    XCTAssertGreaterThan(buttons[0].frame.width, 130)
   }
 
   func testSaturationAndCompatibilityMetadataSurviveRendering() throws {

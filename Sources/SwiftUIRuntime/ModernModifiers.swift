@@ -683,6 +683,156 @@ extension View {
 
 // MARK: - Presentations: confirmationDialog, sheet, alert overloads
 
+internal struct _ModalDialogActionButtonStyle: ButtonStyle {
+  let role: ButtonRole?
+
+  func makeBody(configuration: Configuration) -> some View {
+    BodyView(configuration: configuration, role: role)
+  }
+
+  private struct BodyView: View {
+    @Environment(\.isEnabled) private var isEnabled
+    let configuration: ButtonStyleConfiguration
+    let role: ButtonRole?
+    @State private var hovered = false
+
+    var body: some View {
+      configuration.label
+        .font(.system(size: 13, weight: role == .cancel ? .regular : .medium))
+        .foregroundStyle(labelColor)
+        .lineLimit(1)
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity)
+        .frame(height: 34)
+        .contentShape(Capsule())
+        .background(Capsule().fill(fillColor))
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .opacity(isEnabled ? 1 : 0.45)
+        .onHover { hovered = $0 }
+    }
+
+    private var fillColor: Color {
+      let isPressed = configuration.isPressed
+      let isHovered = hovered
+      switch role {
+      case .destructive:
+        return Color.red.opacity(accentOpacity)
+      case .cancel:
+        return Color { scheme in
+          if isPressed {
+            return scheme == .dark ? (1, 1, 1, 0.24) : (0, 0, 0, 0.18)
+          } else if isHovered {
+            return scheme == .dark ? (1, 1, 1, 0.16) : (0, 0, 0, 0.12)
+          } else {
+            return scheme == .dark ? (1, 1, 1, 0.10) : (0, 0, 0, 0.07)
+          }
+        }
+      case nil:
+        return Color.blue.opacity(accentOpacity)
+      }
+    }
+
+    private var accentOpacity: Double {
+      if configuration.isPressed { return 0.36 }
+      if hovered { return 0.28 }
+      return 0.20
+    }
+
+    private var labelColor: Color {
+      switch role {
+      case .destructive: return .red
+      case .cancel: return .secondary
+      case nil: return .blue
+      }
+    }
+  }
+}
+
+internal struct _PreparedElementsView: View, _PrimitiveView {
+  typealias Body = Never
+  let element: Element
+  var body: Never { fatalError() }
+  func _makeElement(path: ViewPath) -> Element { element }
+}
+
+@MainActor
+internal func _renderModalDialogCard<Actions: View, Message: View>(
+  title: String,
+  titleVisibility: Visibility,
+  scheme: ColorScheme,
+  actions: Actions,
+  message: Message,
+  path: ViewPath
+) -> Element {
+  let actionsTree = _render(
+    actions.environment(\.inheritedButtonStyle) { label, role, btnPath, action in
+      let btn = Button(role: role, action: action) { label }
+      return _render(
+        StyledButton(button: btn, style: _ModalDialogActionButtonStyle(role: role)),
+        path: btnPath
+      )
+    },
+    path: path.appending(index: 99)
+  )
+  var actionItems = flattenChildren(actionsTree)
+  var assignedDefault = false
+  for idx in actionItems.indices {
+    if actionItems[idx].props.keyboardShortcut == nil && !assignedDefault {
+      actionItems[idx].props.keyboardShortcut = .defaultAction
+      assignedDefault = true
+    }
+  }
+  if actionItems.count == 2 {
+    actionItems.sort { a, b in
+      let rankA = a.props.keyboardShortcut == .cancelAction ? 0 : 1
+      let rankB = b.props.keyboardShortcut == .cancelAction ? 0 : 1
+      return rankA < rankB
+    }
+  } else if actionItems.count > 2 {
+    actionItems.sort { a, b in
+      let rankA = a.props.keyboardShortcut == .cancelAction ? 1 : 0
+      let rankB = b.props.keyboardShortcut == .cancelAction ? 1 : 0
+      return rankA < rankB
+    }
+  }
+  var actionsContainerProps = NodeProps()
+  actionsContainerProps.spacing = 8
+  let actionsAxis: Axis = actionItems.count <= 2 ? .horizontal : .vertical
+  let actionsRow = Element(
+    kind: .container(actionsAxis),
+    props: actionsContainerProps,
+    children: actionItems
+  )
+
+  let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+  let panel = VStack(alignment: .leading, spacing: 18) {
+    VStack(alignment: .leading, spacing: 6) {
+      if titleVisibility != .hidden && !title.isEmpty {
+        Text(verbatim: title).font(.system(size: 15, weight: .semibold))
+      }
+      message
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+    .padding(.horizontal, 2)
+    _PreparedElementsView(element: actionsRow)
+  }
+  .padding(18)
+  .frame(width: 340, alignment: .leading)
+  .foregroundStyle(scheme == .dark ? Color.white : Color.black)
+  .background(
+    scheme == .dark ? Color(hex: 0x1c1d22, opacity: 0.98) : Color(hex: 0xf9f9fb, opacity: 0.98),
+    in: shape
+  )
+  .overlay {
+    shape.strokeBorder(
+      scheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.10), lineWidth: 1)
+  }
+  .shadow(color: Color.black.opacity(scheme == .dark ? 0.42 : 0.20), radius: 24, x: 0, y: 10)
+  return _render(panel, path: path)
+}
+
 private struct ModalCardPresentation<Content: View, Actions: View, Message: View>: View, _PrimitiveView {
   typealias Body = Never
   let content: Content
@@ -698,30 +848,16 @@ private struct ModalCardPresentation<Content: View, Actions: View, Message: View
   func _makeElement(path: ViewPath) -> Element {
     var children = [_render(content, path: path.appending(index: 0))]
     if isPresented.wrappedValue {
-      let panel = VStack(alignment: .leading, spacing: 12) {
-        if titleVisibility != .hidden && !title.isEmpty {
-          Text(verbatim: title).font(.system(size: 15, weight: .semibold))
-        }
-        message
-          .font(.callout)
-          .foregroundStyle(.secondary)
-        HStack(spacing: 8) {
-          Spacer()
-          actions
-        }
-      }
-      .padding(20)
-      .frame(width: 380)
-      .foregroundStyle(scheme == .dark ? Color.white : Color.black)
-      .background(
-        scheme == .dark ? Color(hex: 0x25262b) : Color.white,
-        in: RoundedRectangle(cornerRadius: 12)
+      children.append(
+        _renderModalDialogCard(
+          title: title,
+          titleVisibility: titleVisibility,
+          scheme: scheme,
+          actions: actions,
+          message: message,
+          path: path.appending(index: 1)
+        )
       )
-      .overlay {
-        RoundedRectangle(cornerRadius: 12)
-          .strokeBorder(scheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.12), lineWidth: 1)
-      }
-      children.append(_render(panel, path: path.appending(index: 1)))
     }
     var element = Element(kind: .presentation, children: children)
     element.presentationCentered = true

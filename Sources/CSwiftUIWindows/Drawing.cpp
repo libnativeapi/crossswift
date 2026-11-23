@@ -2471,7 +2471,8 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
   // NativeAPI observes notifications on its content HWND. Scroll grouping is
   // an implementation detail and must not interrupt BUTTON/EDIT notifications.
   if (hwnd != s->host &&
-      (msg == WM_COMMAND || msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORSTATIC))
+      (msg == WM_COMMAND || msg == WM_CTLCOLORBTN || msg == WM_CTLCOLOREDIT ||
+       msg == WM_CTLCOLORSTATIC))
     return SendMessageW(s->host, msg, wp, lp);
   if (hwnd == s->host && msg == WM_COMMAND && HIWORD(wp) == EN_CHANGE && lp) {
     auto edit_it = s->edits.find(reinterpret_cast<HWND>(lp));
@@ -2500,6 +2501,13 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
     if (s->input)
       s->input(s->context, 0, 8, 0, 0, 0, 0);
     return 0;
+  }
+  if (msg == WM_CTLCOLORBTN && lp) {
+    auto found = s->buttons.find(reinterpret_cast<HWND>(lp));
+    if (found != s->buttons.end() && found->second.custom_draw) {
+      SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
+      return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
+    }
   }
   if (msg == WM_DRAWITEM && lp) {
     auto *item = reinterpret_cast<DRAWITEMSTRUCT *>(lp);
@@ -2544,8 +2552,30 @@ LRESULT CALLBACK ButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
   auto found = s->buttons.find(hwnd);
   if (found == s->buttons.end())
     return DefSubclassProc(hwnd, msg, wp, lp);
-  if (found->second.passthrough && msg == WM_NCHITTEST)
-    return HTTRANSPARENT;
+  if (msg == WM_NCHITTEST) {
+    if (found->second.passthrough)
+      return HTTRANSPARENT;
+    if (found->second.custom_draw && found->second.clip_radius > 0) {
+      POINT pt{int(short(LOWORD(lp))), int(short(HIWORD(lp)))};
+      ScreenToClient(hwnd, &pt);
+      RECT rc{};
+      GetClientRect(hwnd, &rc);
+      const int cr = min(found->second.clip_radius, int(min(rc.right, rc.bottom) / 2));
+      if (cr > 0) {
+        int dx = 0, dy = 0;
+        if (pt.x < cr)
+          dx = cr - pt.x;
+        else if (pt.x >= rc.right - cr)
+          dx = pt.x - (rc.right - cr - 1);
+        if (pt.y < cr)
+          dy = cr - pt.y;
+        else if (pt.y >= rc.bottom - cr)
+          dy = pt.y - (rc.bottom - cr - 1);
+        if (dx > 0 && dy > 0 && dx * dx + dy * dy > cr * cr)
+          return HTTRANSPARENT;
+      }
+    }
+  }
   // Scrolling only moves the clipping parent with redraw suppressed. Native
   // button state changes can still schedule their own paint, which the next
   // canvas publication must absorb. Do not scan every HWND on every scroll.
@@ -4157,13 +4187,21 @@ void sui_button_update(void *h, void *button, double radius, const char *help,
   // Avoid allocating/querying HRGNs for every control on every scroll tick.
   if (hook.clip_width != rect.right || hook.clip_height != rect.bottom ||
       hook.clip_radius != r || !EqualRect(&hook.clip, &clipped)) {
-    HRGN region = r ? CreateRoundRectRgn(0, 0, rect.right + 1, rect.bottom + 1,
-                                         r * 2, r * 2)
-                    : CreateRectRgn(0, 0, rect.right, rect.bottom);
-    HRGN clip = CreateRectRgnIndirect(&clipped);
-    CombineRgn(region, region, clip, RGN_AND);
-    DeleteObject(clip);
-    ApplyRegion(hwnd, region);
+    if (hook.custom_draw) {
+      // Custom-drawn SwiftUI buttons paint anti-aliased GDI+ shapes onto the
+      // shared canvas; avoid 1-bit CreateRoundRectRgn staircase edges and only
+      // apply a rectangular region when scroll-clipped.
+      HRGN region = CreateRectRgnIndirect(&clipped);
+      ApplyRegion(hwnd, region);
+    } else {
+      HRGN region = r ? CreateRoundRectRgn(0, 0, rect.right + 1, rect.bottom + 1,
+                                           r * 2, r * 2)
+                      : CreateRectRgn(0, 0, rect.right, rect.bottom);
+      HRGN clip = CreateRectRgnIndirect(&clipped);
+      CombineRgn(region, region, clip, RGN_AND);
+      DeleteObject(clip);
+      ApplyRegion(hwnd, region);
+    }
     hook.clip = clipped;
     hook.clip_width = rect.right;
     hook.clip_height = rect.bottom;

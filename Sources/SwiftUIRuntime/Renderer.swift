@@ -330,10 +330,12 @@ import Foundation
   public func performTap(_ id: NodeID) {
     transactionDepth += 1
     defer { finishTransaction() }
-    guard let node = find(id, in: tree), node.props.enabled, node.props.visible,
-      node.props.hitTesting
+    var chain: [Element] = []
+    guard ancestry(id, in: tree, into: &chain) else { return }
+    guard let target = chain.first(where: { $0.action != nil }),
+      target.props.enabled, target.props.visible, target.props.hitTesting
     else { return }
-    node.action?()
+    target.action?()
   }
 
   /// Invokes the boolean change handler for a semantic toggle/switch control.
@@ -421,7 +423,26 @@ import Foundation
     switch interaction {
     case .hover(let value):
       if value && node.props.enabled {
-        updateHover(chain)
+        var hoverChain = chain
+        if node.kind == .styledButton {
+          var inner: [Element] = []
+          func collectHoverWrapperChain(_ el: Element) {
+            inner.insert(el, at: 0)
+            switch el.kind {
+            case .styledButton, .frame, .padding, .layer, .presentation:
+              if let first = el.children.first { collectHoverWrapperChain(first) }
+            case .zStack where el.children.count == 1:
+              collectHoverWrapperChain(el.children[0])
+            default:
+              break
+            }
+          }
+          if let first = node.children.first {
+            collectHoverWrapperChain(first)
+          }
+          hoverChain = inner + chain
+        }
+        updateHover(hoverChain)
       } else if hoveredNodeIDs.contains(id) {
         updateHover([])
       }
@@ -752,10 +773,11 @@ import Foundation
         return true
       }
       func shortcut(_ node: Element) -> Bool {
+        guard node.props.visible && node.props.enabled && node.props.hitTesting else { return false }
+        if node.props.clipped && (node.frame.width <= 0 || node.frame.height <= 0) { return false }
         if let shortcut = node.props.keyboardShortcut, shortcut.key == key,
           shortcut.modifiers == modifiers
-            || (shortcut.modifiers == .command && modifiers == .control),
-          node.props.enabled && node.props.hitTesting
+            || (shortcut.modifiers == .command && modifiers == .control)
         {
           node.action?()
           return true

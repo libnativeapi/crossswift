@@ -192,7 +192,8 @@ private enum ControlSizeKey: EnvironmentKey {
 }
 
 private enum InheritedButtonStyleKey: EnvironmentKey {
-  nonisolated(unsafe) static let defaultValue: (@MainActor (AnyView, ViewPath, @escaping () -> Void) -> Element)? = nil
+  nonisolated(unsafe) static let defaultValue:
+    (@MainActor (AnyView, ButtonRole?, ViewPath, @escaping () -> Void) -> Element)? = nil
 }
 
 extension EnvironmentValues {
@@ -200,7 +201,9 @@ extension EnvironmentValues {
     get { self[ControlSizeKey.self] }
     set { self[ControlSizeKey.self] = newValue }
   }
-  package var inheritedButtonStyle: (@MainActor (AnyView, ViewPath, @escaping () -> Void) -> Element)? {
+  package var inheritedButtonStyle:
+    (@MainActor (AnyView, ButtonRole?, ViewPath, @escaping () -> Void) -> Element)?
+  {
     get { self[InheritedButtonStyleKey.self] }
     set { self[InheritedButtonStyleKey.self] = newValue }
   }
@@ -332,9 +335,9 @@ extension ButtonStyle where Self == LinkButtonStyle {
 extension View {
   @_disfavoredOverload
   public func buttonStyle<S: ButtonStyle>(_ style: S) -> some View {
-    environment(\.inheritedButtonStyle) { label, path, action in
-      let body = style.makeBody(configuration: ButtonStyleConfiguration(label: label, isPressed: false))
-      return Element(kind: .styledButton, children: [_render(body, path: path)], action: action)
+    environment(\.inheritedButtonStyle) { label, role, path, action in
+      let btn = Button(role: role, action: action) { label }
+      return _render(StyledButton(button: btn, style: style), path: path)
     }
   }
 
