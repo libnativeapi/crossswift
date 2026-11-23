@@ -259,6 +259,7 @@ public struct GridItem: Sendable {
 }
 public struct LazyVGrid<Content: View>: View {
   let columns: [GridItem]
+  let alignment: HorizontalAlignment
   let spacing: CGFloat
   let content: Content
   public init(
@@ -269,11 +270,14 @@ public struct LazyVGrid<Content: View>: View {
     @ViewBuilder content: () -> Content
   ) {
     self.columns = columns
+    self.alignment = alignment
     self.spacing = spacing ?? 8
     self.content = content()
   }
   public var body: some View {
-    GridContent(layout: GridLayout(columns: columns, spacing: spacing), content: content)
+    GridContent(
+      layout: GridLayout(columns: columns, alignment: alignment, spacing: spacing),
+      content: content)
   }
 }
 
@@ -316,13 +320,22 @@ private struct GridContent<Content: View>: View, _PrimitiveView {
 private struct GridLayout: _LayoutBridge {
   var translatesWithBounds: Bool { true }
   let columns: [GridItem]
+  let alignment: HorizontalAlignment
   let spacing: CGFloat
+  func columnGap(after index: Int, totalColumns: Int) -> CGFloat {
+    guard index + 1 < totalColumns else { return 0 }
+    if index < columns.count, let itemSpacing = columns[index].spacing {
+      return itemSpacing
+    }
+    return spacing
+  }
   func widths(_ proposal: ProposedViewSize) -> [CGFloat] {
-    let width = proposal.width ?? 500
     if columns.count == 1, case .adaptive(let minimum, let maximum) = columns[0].size {
-      let n = max(1, Int((width + spacing) / (minimum + spacing)))
+      let width = proposal.width ?? 500
+      let colSpacing = columns[0].spacing ?? spacing
+      let n = max(1, Int((width + colSpacing) / (minimum + colSpacing)))
       return Array(
-        repeating: min(maximum, (width - CGFloat(n - 1) * spacing) / CGFloat(n)), count: n)
+        repeating: min(maximum, (width - CGFloat(n - 1) * colSpacing) / CGFloat(n)), count: n)
     }
     let flexible = columns.filter {
       if case .fixed = $0.size { return false }
@@ -332,8 +345,12 @@ private struct GridLayout: _LayoutBridge {
       if case .fixed(let w) = column.size { return sum + w }
       return sum
     }
+    let totalGaps = (0..<max(0, columns.count - 1)).reduce(CGFloat(0)) {
+      $0 + columnGap(after: $1, totalColumns: columns.count)
+    }
+    let width = proposal.width ?? (fixed + totalGaps + CGFloat(flexible) * 60)
     let remaining =
-      max(0, width - fixed - CGFloat(max(0, columns.count - 1)) * spacing)
+      max(0, width - fixed - totalGaps)
       / CGFloat(max(1, flexible))
     return columns.map {
       switch $0.size {
@@ -343,15 +360,16 @@ private struct GridLayout: _LayoutBridge {
       }
     }
   }
-  func frames(_ proposal: ProposedViewSize, children: [Element], engine: LayoutEngine) -> [CGRect] {
+  func frames(_ proposal: ProposedViewSize, children: [Element], engine: LayoutEngine) -> (slots: [CGRect], contentSize: CGSize) {
     let widths = widths(proposal)
-    guard !widths.isEmpty else { return [] }
+    guard !widths.isEmpty else { return ([], .zero) }
     var frames: [CGRect] = []
     var y: CGFloat = 0
+    var maxX: CGFloat = 0
     frames.reserveCapacity(children.count)
     for start in stride(from: 0, to: children.count, by: widths.count) {
       let end = min(start + widths.count, children.count)
-      var height: CGFloat = -.infinity
+      var height: CGFloat = 0
       for i in start..<end {
         let size = engine.sizeThatFits(
           children[i], proposal: ProposedViewSize(width: widths[i - start], height: nil))
@@ -359,32 +377,54 @@ private struct GridLayout: _LayoutBridge {
       }
       var x: CGFloat = 0
       for i in start..<end {
-        let w = widths[i - start]
+        let col = i - start
+        let w = widths[col]
         frames.append(CGRect(x: x, y: y, width: w, height: height))
-        x += w + spacing
+        maxX = max(maxX, x + w)
+        x += w + columnGap(after: col, totalColumns: widths.count)
       }
-      y += height + spacing
+      y += height + (end < children.count ? spacing : 0)
     }
-    return frames
+    return (frames, CGSize(width: maxX, height: y))
   }
   func measure(_ proposal: ProposedViewSize, children: [Element], engine: LayoutEngine) -> CGSize {
-    let slots = frames(proposal, children: children, engine: engine)
-    guard let first = slots.first else { return .zero }
-    var result = CGSize(width: first.maxX, height: first.maxY)
-    for frame in slots.dropFirst() {
-      result.width = max(result.width, frame.maxX)
-      result.height = max(result.height, frame.maxY)
+    let (_, contentSize) = frames(proposal, children: children, engine: engine)
+    if let pw = proposal.width, pw.isFinite {
+      return CGSize(width: max(contentSize.width, pw), height: contentSize.height)
     }
-    return result
+    return contentSize
   }
   func placements(_ bounds: CGRect, children: [Element], engine: LayoutEngine) -> [CGRect] {
-    let slots = frames(ProposedViewSize(bounds.size), children: children, engine: engine)
+    let (slots, contentSize) = frames(ProposedViewSize(bounds.size), children: children, engine: engine)
+    let extraX = max(0, bounds.width - contentSize.width)
+    let rowOffsetX: CGFloat =
+      switch alignment {
+      case .leading: 0
+      case .trailing: extraX
+      default: extraX * 0.5
+      }
+    let colCount = max(1, widths(ProposedViewSize(bounds.size)).count)
     return children.indices.map { index in
       guard index < slots.count else { return .zero }
       let slot = slots[index]
+      let col = index % colCount
+      let itemAlign = (col < columns.count ? columns[col].alignment : nil) ?? .center
       let size = engine.sizeThatFits(children[index], proposal: ProposedViewSize(slot.size))
+      let cellDX: CGFloat =
+        switch itemAlign.horizontal {
+        case .leading: 0
+        case .trailing: slot.width - size.width
+        default: (slot.width - size.width) * 0.5
+        }
+      let cellDY: CGFloat =
+        switch itemAlign.vertical {
+        case .top: 0
+        case .bottom: slot.height - size.height
+        default: (slot.height - size.height) * 0.5
+        }
       return CGRect(
-        x: bounds.minX + slot.minX, y: bounds.minY + slot.minY,
+        x: bounds.minX + rowOffsetX + slot.minX + cellDX,
+        y: bounds.minY + slot.minY + cellDY,
         width: size.width, height: size.height)
     }
   }

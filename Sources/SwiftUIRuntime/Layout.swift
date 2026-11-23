@@ -939,6 +939,14 @@ public struct LayoutEngine {
     case .presentation:
       if !e.children.isEmpty { place(&e.children[0], in: rect) }
       if e.children.count > 1 {
+        let savedScrollOrigin = pass?.activeScrollContentOrigin
+        let savedScrollViewport = pass?.activeScrollViewportSize
+        pass?.activeScrollContentOrigin = nil
+        pass?.activeScrollViewportSize = nil
+        defer {
+          pass?.activeScrollContentOrigin = savedScrollOrigin
+          pass?.activeScrollViewportSize = savedScrollViewport
+        }
         let size = measure(e.children[1], ProposedViewSize(width: 640, height: nil))
         place(
           &e.children[1],

@@ -550,6 +550,117 @@ final class WindowsDrawingTests: XCTestCase {
     backend.activate(manageEl.id)
     XCTAssertEqual(tapped, 1)
   }
+
+  @MainActor
+  func testChatPresetSymbolPickerPopoverRendersAll28IconsInCleanSixColumnGrid() throws {
+    let presetSymbols = [
+      "text.bubble", "bubble.left.and.bubble.right", "person.crop.circle", "brain", "lightbulb",
+      "sparkles", "graduationcap", "book", "doc.text", "pencil.and.outline", "magnifyingglass",
+      "chart.bar", "globe", "character.bubble", "curlybraces", "terminal", "ladybug", "hammer",
+      "paintbrush", "megaphone", "envelope", "briefcase", "cart", "heart", "star", "flag", "leaf",
+      "bolt",
+    ]
+    for sym in presetSymbols {
+      XCTAssertNotNil(
+        CrossAppKit.NSImage(systemSymbolName: sym, accessibilityDescription: nil),
+        "Missing SF Symbol in catalog: \(sym)")
+    }
+
+    @MainActor
+    final class PopoverState: ObservableObject {
+      @Published var open = false
+      @Published var notes = ""
+    }
+
+    struct PresetIconPopoverProbe: SwiftUIRuntime.View {
+      let symbols: [String]
+      @ObservedObject var state: PopoverState
+      var columns: [GridItem] {
+        Array(repeating: GridItem(.fixed(30), spacing: 6), count: 6)
+      }
+      var body: some SwiftUIRuntime.View {
+        SwiftUIRuntime.ScrollView {
+          SwiftUIRuntime.VStack(alignment: .leading, spacing: 12) {
+            SwiftUIRuntime.Color.clear.frame(height: 360)
+            SwiftUIRuntime.HStack {
+              SwiftUIRuntime.Spacer()
+              SwiftUIRuntime.Button("Automatic") { state.open = true }
+                .popover(isPresented: $state.open, arrowEdge: .bottom) {
+                  SwiftUIRuntime.VStack(alignment: .leading, spacing: 8) {
+                    SwiftUIRuntime.LazyVGrid(columns: columns, spacing: 6) {
+                      SwiftUIRuntime.ForEach(symbols, id: \.self) { symbol in
+                        SwiftUIRuntime.Button {} label: {
+                          SwiftUIRuntime.Image(systemName: symbol)
+                            .font(.system(size: 15, weight: .regular))
+                            .frame(width: 30, height: 26)
+                        }
+                        .buttonStyle(.plain)
+                      }
+                    }
+                  }
+                  .padding(8)
+                  .frame(width: 244)
+                }
+            }
+            SwiftUIRuntime.TextEditor(text: $state.notes)
+              .frame(height: 220)
+          }
+          .padding(18)
+        }
+        .preferredColorScheme(.dark)
+      }
+    }
+
+    WindowsDrawingBackend.prepareApplication()
+    _ = NativeAPI.Application.shared.isRunning()
+    let window = try XCTUnwrap(NativeAPI.Window.create())
+    defer { _ = window.close() }
+    window.setContentSize(NativeAPI.Size(width: 480, height: 520))
+    let backend = try XCTUnwrap(WindowsDrawingBackend(window: window))
+    backend.setBackgroundColor(SwiftUIRuntime.Color(red: 0.11, green: 0.11, blue: 0.12))
+    backend.environmentTransform = { $0.colorScheme = .dark }
+    let state = PopoverState()
+    let renderer = Renderer(
+      backend: backend,
+      root: AnyView(PresetIconPopoverProbe(symbols: presetSymbols, state: state)),
+      size: .init(width: 480, height: 520))
+    renderer.mount()
+    // Scroll outer ScrollView past multiple 128pt buckets, then open the Icon popover.
+    for _ in 0..<3 {
+      renderer.input(event: 5, point: CGPoint(x: 240, y: 260), value: -360)
+    }
+    state.open = true
+    renderer.renderIfNeeded()
+
+    let tree = try XCTUnwrap(renderer.tree)
+    let popoverPanel = try XCTUnwrap(tree.children.last)
+    var iconButtons: [Element] = []
+    func collectStyledButtons(_ node: Element) {
+      if node.kind == .styledButton { iconButtons.append(node); return }
+      for child in node.children { collectStyledButtons(child) }
+    }
+    collectStyledButtons(popoverPanel)
+    XCTAssertEqual(iconButtons.count, 28, "All 28 preset icon cells must materialize inside popover")
+
+    for (idx, btn) in iconButtons.enumerated() {
+      let col = idx % 6
+      let row = idx / 6
+      if col > 0 {
+        let prev = iconButtons[idx - 1]
+        XCTAssertEqual(btn.frame.minY, prev.frame.minY, accuracy: 0.5)
+        XCTAssertEqual(btn.frame.minX - prev.frame.maxX, 6.0, accuracy: 0.5)
+      } else if row > 0 {
+        let above = iconButtons[idx - 6]
+        XCTAssertEqual(btn.frame.minX, above.frame.minX, accuracy: 0.5)
+        XCTAssertEqual(btn.frame.minY - above.frame.maxY, 6.0, accuracy: 0.5)
+      }
+      let nativeBtn = try XCTUnwrap(backend.nativeButton(btn.id))
+      let handle = try XCTUnwrap(nativeBtn.nativeObject)
+      XCTAssertGreaterThan(
+        control_print_distinct_pixels(handle), 6,
+        "Symbol at index \(idx) (\(presetSymbols[idx])) rendered blank inside popover")
+    }
+  }
 }
 
 @Observable

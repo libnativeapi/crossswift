@@ -1461,11 +1461,13 @@ void DrawTextCommand(Surface *s, Graphics &g, SolidBrush &brush,
   }
 }
 void VectorPath(GraphicsPath &path, const std::vector<double> &commands) {
-  PointF current;
+  PointF current{};
+  PointF figure_start{};
   for (size_t i = 0; i < commands.size();) {
     const int op = int(commands[i++]);
     if (op == 3) {
       path.CloseFigure();
+      current = figure_start;
       continue;
     }
     if (i + (op == 2 ? 6 : 2) > commands.size())
@@ -1475,14 +1477,23 @@ void VectorPath(GraphicsPath &path, const std::vector<double> &commands) {
     if (op == 0) {
       path.StartFigure();
       current = p;
+      figure_start = p;
     } else if (op == 1) {
-      path.AddLine(current, p);
+      if (std::abs(current.X - p.X) > 1e-6f || std::abs(current.Y - p.Y) > 1e-6f) {
+        path.AddLine(current, p);
+      }
       current = p;
     } else if (op == 2) {
       PointF c2{float(commands[i]), float(commands[i + 1])},
           end{float(commands[i + 2]), float(commands[i + 3])};
       i += 4;
-      path.AddBezier(current, p, c2, end);
+      const bool degenerate =
+          std::abs(current.X - p.X) <= 1e-6f && std::abs(current.Y - p.Y) <= 1e-6f &&
+          std::abs(p.X - c2.X) <= 1e-6f && std::abs(p.Y - c2.Y) <= 1e-6f &&
+          std::abs(c2.X - end.X) <= 1e-6f && std::abs(c2.Y - end.Y) <= 1e-6f;
+      if (!degenerate) {
+        path.AddBezier(current, p, c2, end);
+      }
       current = end;
     }
   }

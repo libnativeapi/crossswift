@@ -53,7 +53,20 @@ private struct PopoverView<Content: View, Panel: View>: View, _PrimitiveView {
   var body: Never { fatalError() }
   func _makeElement(path: ViewPath) -> Element {
     var children = [_render(content, path: path.appending(index: 0))]
-    if isPresented.wrappedValue { children.append(_render(panel, path: path.appending(index: 1))) }
+    if isPresented.wrappedValue {
+      let savedScroll = EnvironmentValues.current.scrollViewportContext
+      let savedStack = EnvironmentValues.current.lazyStackKey
+      let savedLazy = EnvironmentValues.current.lazyContainerContext
+      EnvironmentValues.current.scrollViewportContext = nil
+      EnvironmentValues.current.lazyStackKey = nil
+      EnvironmentValues.current.lazyContainerContext = nil
+      defer {
+        EnvironmentValues.current.scrollViewportContext = savedScroll
+        EnvironmentValues.current.lazyStackKey = savedStack
+        EnvironmentValues.current.lazyContainerContext = savedLazy
+      }
+      children.append(_render(panel, path: path.appending(index: 1)))
+    }
     var element = Element(kind: .presentation, children: children)
     element.presentationEdge = edge
     element.presentationPopoverChrome = drawsPopoverChrome
@@ -280,6 +293,7 @@ func resolvePresentations(_ root: Element, in size: Size) -> Element {
       func translate(_ node: inout Element, dx: Double, dy: Double) {
         node.frame.origin.x += dx
         node.frame.origin.y += dy
+        node.customLayoutFrames = node.customLayoutFrames.map { $0.offsetBy(dx: dx, dy: dy) }
         for i in node.children.indices { translate(&node.children[i], dx: dx, dy: dy) }
       }
       translate(&panel, dx: x - panel.frame.minX, dy: y - panel.frame.minY)
