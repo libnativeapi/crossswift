@@ -1234,15 +1234,23 @@ open class UIDocumentPickerViewController: UIViewController {
         ? .saveFile
         : (allowsMultipleSelection ? .openFiles : .openFile)
       guard let dialog = NativeAPI.FileDialog.create(mode) else { return false }
-      dialog.setModality(.application)
-      if !allowedExtensions.isEmpty {
-        _ = dialog.setFileTypes(allowedExtensions)
+      dialog.setModality(.window)
+      if let owner = UIApplication.shared.keyWindow?.nativeWindow {
+        _ = dialog.setParentWindow(owner)
+      }
+      let dotted = allowedExtensions.compactMap { ext -> String? in
+        let clean = ext.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+        if clean == "*" { return "*" }
+        return clean.isEmpty ? nil : ".\(clean.lowercased())"
+      }
+      if !dotted.isEmpty {
+        _ = dialog.setFileTypes(dotted)
       }
       if isExporting, let first = exportURLs.first {
         _ = dialog.setSuggestedFileName(first.lastPathComponent)
       }
       if dialog.open(), dialog.result == .accepted, !dialog.paths.isEmpty {
-        let picked = dialog.paths.map { URL(fileURLWithPath: $0) }
+        let picked = dialog.paths.map { URL(filePath: $0) }
         delegate?.documentPicker(self, didPickDocumentsAt: picked)
       } else {
         delegate?.documentPickerWasCancelled(self)

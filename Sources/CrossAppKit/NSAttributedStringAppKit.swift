@@ -294,19 +294,34 @@ public enum NSTextAlignment: Int, Sendable {
     }
 
     public var abbreviatingWithTildeInPath: String {
-      let raw = self as String
+      var raw = self as String
+      #if os(Windows)
+        if raw.count >= 3, raw.first == "/",
+          raw[raw.index(raw.startIndex, offsetBy: 2)] == ":"
+        {
+          raw.removeFirst()
+        }
+      #endif
       let home = NSHomeDirectory()
       guard !home.isEmpty else { return raw }
-      if raw == home { return "~" }
-      let slashHome = home.hasSuffix("/") || home.hasSuffix("\\") ? home : home + "/"
-      let backslashHome = home.hasSuffix("/") || home.hasSuffix("\\") ? home : home + "\\"
-      if raw.hasPrefix(slashHome) {
-        return "~/" + raw.dropFirst(slashHome.count)
-      }
-      if raw.hasPrefix(backslashHome) {
-        return "~\\" + raw.dropFirst(backslashHome.count)
-      }
-      return raw
+      #if os(Windows)
+        var normHome = home.replacingOccurrences(of: "\\", with: "/")
+        while normHome.count > 1 && normHome.hasSuffix("/") { normHome.removeLast() }
+        var normRaw = raw.replacingOccurrences(of: "\\", with: "/")
+        while normRaw.count > 3 && normRaw.hasSuffix("/") { normRaw.removeLast() }
+        if normRaw.caseInsensitiveCompare(normHome) == .orderedSame { return "~" }
+        if normRaw.lowercased().hasPrefix(normHome.lowercased() + "/") {
+          return "~/" + normRaw.dropFirst(normHome.count + 1)
+        }
+        return raw.replacingOccurrences(of: "/", with: "\\")
+      #else
+        if raw == home { return "~" }
+        let slashHome = home.hasSuffix("/") ? home : home + "/"
+        if raw.hasPrefix(slashHome) {
+          return "~/" + raw.dropFirst(slashHome.count)
+        }
+        return raw
+      #endif
     }
   }
 

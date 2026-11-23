@@ -275,7 +275,7 @@ open class NSStatusBarButton: NSButton {
   @MainActor internal weak var ownerStatusItem: NSStatusItem?
 
   private func _syncStatusItemAppearanceIfNeeded() {
-    nonisolated(unsafe) let button = self
+    let button = self
     _performOnMainActor { button.ownerStatusItem?.syncButtonAppearance() }
   }
 
@@ -366,7 +366,7 @@ open class NSStatusItem: NSObject {
         }
         _ = tray.setVisible(true)
         listenerId = tray.addListener { [weak self] event in
-          nonisolated(unsafe) let boxSelf = self
+          let boxSelf = self
           nonisolated(unsafe) let boxEvent = event
           _performOnMainActor {
             guard let self = boxSelf else { return }
@@ -478,19 +478,65 @@ open class NSSavePanel: NSPanel {
     )
   }
 
+  #if !os(macOS)
+    @MainActor
+    fileprivate static func _attachActiveParentWindow(
+      _ dialog: NativeAPI.FileDialog, excluding panel: NSWindow
+    ) {
+      dialog.setModality(.window)
+      let owner =
+        NSApplication.shared.keyWindow
+        ?? NSApplication.shared.mainWindow
+        ?? NSApplication.shared.windows.first(where: { $0 !== panel && $0.isVisible })
+      if let ownerWindow = owner?.nativeWindow {
+        _ = dialog.setParentWindow(ownerWindow)
+      }
+    }
+
+    internal static func _normalizeDialogExtensions(
+      _ types: [UTType], allowAppBundleShortcuts: Bool
+    ) -> [String] {
+      var seen = Set<String>()
+      var result: [String] = []
+      func append(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+        guard !trimmed.isEmpty else { return }
+        let dotted = ".\(trimmed.lowercased())"
+        if seen.insert(dotted).inserted {
+          result.append(dotted)
+        }
+      }
+      for ut in types {
+        #if os(Windows)
+          if allowAppBundleShortcuts && ut == .applicationBundle {
+            append("exe")
+            append("lnk")
+            continue
+          }
+        #endif
+        if ut.conforms(to: .directory) { continue }
+        if let ext = ut.preferredFilenameExtension {
+          append(ext)
+        }
+      }
+      return result
+    }
+  #endif
+
   open func runModal() -> NSModalResponse {
     #if !os(macOS)
       guard let dialog = NativeAPI.FileDialog.create(.saveFile) else { return .cancel }
-      dialog.setModality(.application)
+      Self._attachActiveParentWindow(dialog, excluding: self)
       if !nameFieldStringValue.isEmpty {
         _ = dialog.setSuggestedFileName(nameFieldStringValue)
       }
-      let exts = allowedContentTypes.compactMap(\.preferredFilenameExtension)
+      let exts = Self._normalizeDialogExtensions(
+        allowedContentTypes, allowAppBundleShortcuts: false)
       if !exts.isEmpty { _ = dialog.setFileTypes(exts) }
       guard dialog.open(), dialog.result == .accepted, let first = dialog.paths.first else {
         return .cancel
       }
-      self.url = URL(fileURLWithPath: first)
+      self.url = URL(filePath: first)
       return .OK
     #else
       return .cancel
@@ -517,8 +563,11 @@ open class NSOpenPanel: NSSavePanel {
 
   open override func runModal() -> NSModalResponse {
     #if !os(macOS)
+      let onlyDirectoryTypes =
+        !allowedContentTypes.isEmpty
+        && allowedContentTypes.allSatisfy { $0.conforms(to: .directory) }
       let mode: NativeAPI.FileDialogMode
-      if canChooseDirectories && !canChooseFiles {
+      if canChooseDirectories && (!canChooseFiles || onlyDirectoryTypes) {
         mode = .selectFolder
       } else if allowsMultipleSelection {
         mode = .openFiles
@@ -526,13 +575,16 @@ open class NSOpenPanel: NSSavePanel {
         mode = .openFile
       }
       guard let dialog = NativeAPI.FileDialog.create(mode) else { return .cancel }
-      dialog.setModality(.application)
-      let exts = allowedContentTypes.compactMap(\.preferredFilenameExtension)
-      if !exts.isEmpty { _ = dialog.setFileTypes(exts) }
+      Self._attachActiveParentWindow(dialog, excluding: self)
+      if mode != .selectFolder {
+        let exts = Self._normalizeDialogExtensions(
+          allowedContentTypes, allowAppBundleShortcuts: true)
+        if !exts.isEmpty { _ = dialog.setFileTypes(exts) }
+      }
       guard dialog.open(), dialog.result == .accepted, !dialog.paths.isEmpty else {
         return .cancel
       }
-      self.urls = dialog.paths.map { URL(fileURLWithPath: $0) }
+      self.urls = dialog.paths.map { URL(filePath: $0) }
       self.url = self.urls.first
       return .OK
     #else

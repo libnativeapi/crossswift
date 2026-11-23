@@ -1,4 +1,5 @@
 import XCTest
+import UniformTypeIdentifiers
 @testable import CrossAppKit
 
 final class CrossAppKitTests: XCTestCase {
@@ -133,5 +134,26 @@ final class CrossAppKitTests: XCTestCase {
     XCTAssertTrue(pb.writeObjects([item]))
     XCTAssertEqual(pb.string(forType: customType), "payload")
     XCTAssertEqual(pb.types?.contains(customType), true)
+  }
+
+  @MainActor
+  func testOpenSavePanelExtensionsAndTildeAbbreviation() {
+    XCTAssertEqual(
+      CrossAppKit.NSSavePanel._normalizeDialogExtensions([.json, .plainText], allowAppBundleShortcuts: false),
+      [".json", ".txt"]
+    )
+    XCTAssertTrue([UTType.folder, UTType.applicationBundle].allSatisfy { $0.conforms(to: .directory) })
+    #if os(Windows)
+      XCTAssertEqual(
+        CrossAppKit.NSSavePanel._normalizeDialogExtensions([.applicationBundle], allowAppBundleShortcuts: true),
+        [".exe", ".lnk"]
+      )
+      let home = NSHomeDirectory()
+      if !home.isEmpty {
+        let sub = URL(filePath: home).appendingPathComponent("Desktop").path
+        XCTAssertEqual((sub as NSString).abbreviatingWithTildeInPath, "~/Desktop")
+      }
+      XCTAssertEqual(("/D:/Apps/Tools" as NSString).abbreviatingWithTildeInPath, "D:\\Apps\\Tools")
+    #endif
   }
 }

@@ -22,33 +22,44 @@ extension EnvironmentValues {
       NSWorkspace.shared.open(url) ? .handled : .discarded
     }
     values._fileDialogService = _FileDialogService(
-      presentOpen: { allowedExtensions, allowsMultiple, completion in
+      presentOpen: { [weak window] allowedExtensions, allowsMultiple, completion in
         let mode: NativeAPI.FileDialogMode = allowsMultiple ? .openFiles : .openFile
         guard let dialog = NativeAPI.FileDialog.create(mode) else {
           completion(.failure(FileDialogUnavailableError()))
           return
         }
-        dialog.setModality(.application)
-        if !allowedExtensions.isEmpty {
-          _ = dialog.setFileTypes(allowedExtensions)
+        dialog.setModality(.window)
+        if let window {
+          _ = dialog.setParentWindow(window)
+        }
+        let dotted = allowedExtensions.compactMap { ext -> String? in
+          let clean = ext.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+          if clean == "*" { return "*" }
+          return clean.isEmpty ? nil : ".\(clean.lowercased())"
+        }
+        if !dotted.isEmpty {
+          _ = dialog.setFileTypes(dotted)
         }
         if dialog.open(), dialog.result == .accepted {
-          completion(.success(dialog.paths.map { URL(fileURLWithPath: $0) }))
+          completion(.success(dialog.paths.map { URL(filePath: $0) }))
         } else {
           completion(.success([]))
         }
       },
-      presentSave: { suggestedName, payload, completion in
+      presentSave: { [weak window] suggestedName, payload, completion in
         guard let dialog = NativeAPI.FileDialog.create(.saveFile) else {
           completion(.failure(FileDialogUnavailableError()))
           return
         }
-        dialog.setModality(.application)
+        dialog.setModality(.window)
+        if let window {
+          _ = dialog.setParentWindow(window)
+        }
         if let suggestedName, !suggestedName.isEmpty {
           _ = dialog.setSuggestedFileName(suggestedName)
         }
         if dialog.open(), dialog.result == .accepted, let path = dialog.paths.first {
-          let destURL = URL(fileURLWithPath: path)
+          let destURL = URL(filePath: path)
           if let payload {
             do {
               try payload.write(to: destURL, options: .atomic)
