@@ -1,5 +1,6 @@
 #if !os(macOS)
   import Combine
+  import CrossFoundation
   import CrossSwiftUI
   import Foundation
   import Security
@@ -132,6 +133,46 @@
       let randStatus = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
       XCTAssertEqual(randStatus, errSecSuccess)
       XCTAssertTrue(bytes.contains { $0 != 0 })
+    }
+
+    @MainActor
+    func testDisablingParentPipeInheritanceDeliversImmediateEOFWhileSiblingRuns() throws {
+      final class Box: @unchecked Sendable { var ran = false }
+      let box = Box()
+      RunLoop.main.perform(inModes: [.common]) {
+        box.ran = true
+      }
+      _ = RunLoop.main.limitDate(forMode: .default)
+      XCTAssertTrue(box.ran)
+
+      #if os(Windows)
+        let child1 = Process()
+        let stdio = try Pipe._makeChildStdioPipes()
+        child1.executableURL = URL(fileURLWithPath: "C:\\Windows\\System32\\findstr.exe")
+        child1.arguments = [".*"]
+        child1.standardInput = stdio.childInput
+        child1.standardOutput = stdio.childOutput
+        try child1.run()
+        try? stdio.childInput.close()
+        try? stdio.childOutput.close()
+
+        // Spawn a long-lived sibling process while parentWriting is still open.
+        let sibling = Process()
+        sibling.executableURL = URL(fileURLWithPath: "C:\\Windows\\System32\\ping.exe")
+        sibling.arguments = ["-n", "6", "127.0.0.1"]
+        try sibling.run()
+        defer { sibling.terminate() }
+
+        // Closing the parent's write handle must deliver immediate EOF to child1 without waiting for sibling.
+        let closeTime = Date()
+        try? stdio.parentWriting.close()
+        defer { try? stdio.parentReading.close() }
+        child1.waitUntilExit()
+        let elapsed = Date().timeIntervalSince(closeTime)
+        XCTAssertLessThan(
+          elapsed, 0.5,
+          "Expected child1 to receive pipe EOF immediately (<0.5s) while sibling runs, got \(elapsed)s")
+      #endif
     }
   }
 #endif

@@ -15,6 +15,8 @@ import Carbon
 #endif
 #if os(Windows)
   import CAppKitWindows
+  import WinSDK
+  import ucrt
 #endif
 #if !os(macOS)
   import SwiftUIRuntime
@@ -380,6 +382,60 @@ import Carbon
   #if os(Windows)
     extension FileHandle {
       public var fileDescriptor: Int32 { -1 }
+    }
+
+    extension Pipe {
+      /// Creates stdin/stdout pipe pairs for a child `Process` where ONLY the child's
+      /// two ends are inheritable (`HANDLE_FLAG_INHERIT`), preventing sibling processes
+      /// spawned later with `bInheritHandles = TRUE` from leaking the parent's pipe ends.
+      public static func _makeChildStdioPipes() throws -> (
+        childInput: FileHandle,
+        parentWriting: FileHandle,
+        parentReading: FileHandle,
+        childOutput: FileHandle
+      ) {
+        var sa = SECURITY_ATTRIBUTES(
+          nLength: DWORD(MemoryLayout<SECURITY_ATTRIBUTES>.size),
+          lpSecurityDescriptor: nil,
+          bInheritHandle: true
+        )
+        var inRead: HANDLE?
+        var inWrite: HANDLE?
+        guard CreatePipe(&inRead, &inWrite, &sa, 0),
+          let validInRead = inRead, let validInWrite = inWrite
+        else {
+          throw CocoaError(.fileReadUnknown)
+        }
+        var outRead: HANDLE?
+        var outWrite: HANDLE?
+        guard CreatePipe(&outRead, &outWrite, &sa, 0),
+          let validOutRead = outRead, let validOutWrite = outWrite
+        else {
+          CloseHandle(validInRead)
+          CloseHandle(validInWrite)
+          throw CocoaError(.fileReadUnknown)
+        }
+        _ = SetHandleInformation(validInWrite, DWORD(HANDLE_FLAG_INHERIT), 0)
+        _ = SetHandleInformation(validOutRead, DWORD(HANDLE_FLAG_INHERIT), 0)
+
+        let inReadFd = _open_osfhandle(intptr_t(bitPattern: validInRead), _O_RDONLY | _O_BINARY)
+        let inWriteFd = _open_osfhandle(intptr_t(bitPattern: validInWrite), _O_WRONLY | _O_BINARY)
+        let outReadFd = _open_osfhandle(intptr_t(bitPattern: validOutRead), _O_RDONLY | _O_BINARY)
+        let outWriteFd = _open_osfhandle(intptr_t(bitPattern: validOutWrite), _O_WRONLY | _O_BINARY)
+        guard inReadFd >= 0, inWriteFd >= 0, outReadFd >= 0, outWriteFd >= 0 else {
+          if inReadFd >= 0 { _close(inReadFd) } else { CloseHandle(validInRead) }
+          if inWriteFd >= 0 { _close(inWriteFd) } else { CloseHandle(validInWrite) }
+          if outReadFd >= 0 { _close(outReadFd) } else { CloseHandle(validOutRead) }
+          if outWriteFd >= 0 { _close(outWriteFd) } else { CloseHandle(validOutWrite) }
+          throw CocoaError(.fileReadUnknown)
+        }
+        return (
+          childInput: FileHandle(fileDescriptor: inReadFd, closeOnDealloc: true),
+          parentWriting: FileHandle(fileDescriptor: inWriteFd, closeOnDealloc: true),
+          parentReading: FileHandle(fileDescriptor: outReadFd, closeOnDealloc: true),
+          childOutput: FileHandle(fileDescriptor: outWriteFd, closeOnDealloc: true)
+        )
+      }
     }
   #endif
 

@@ -320,6 +320,7 @@ if buildDesktopNative {
       name: "CrossShimsTests",
       dependencies: [
         "Combine",
+        "CrossFoundation",
         "Security",
         "ServiceManagement",
         "SwiftUIRuntime",
