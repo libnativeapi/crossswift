@@ -213,6 +213,7 @@ public struct LayoutEngine {
     var presentation = element.kind == .presentation
     var preferences =
       element.geometryBuilder != nil || !element.preferences.isEmpty
+      || !element.anchorPreferences.isEmpty
       || element.preferenceAction != nil || !element.preferenceTransforms.isEmpty
     for i in element.children.indices {
       let priorChild = previous.flatMap { i < $0.children.count ? $0.children[i] : nil }

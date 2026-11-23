@@ -49,6 +49,7 @@ extension Anchor.Source where Value == CGPoint {
 extension GeometryProxy {
   public subscript<T>(_ anchor: Anchor<T>) -> T {
     if let rect = anchor.value as? CGRect {
+      snapshot.dependsOnPosition = true
       let local = CGRect(
         x: rect.minX - snapshot.rect.minX,
         y: rect.minY - snapshot.rect.minY,
@@ -58,6 +59,7 @@ extension GeometryProxy {
       return local as! T
     }
     if let pt = anchor.value as? CGPoint {
+      snapshot.dependsOnPosition = true
       let local = CGPoint(x: pt.x - snapshot.rect.minX, y: pt.y - snapshot.rect.minY)
       return local as! T
     }
@@ -132,9 +134,21 @@ extension View {
   }
 
   public func overlayPreferenceValue<K: PreferenceKey, Overlay: View>(
-    _ key: K.Type, @ViewBuilder _ content: @escaping (K.Value) -> Overlay
+    _ key: K.Type = K.self,
+    alignment: Alignment = .center,
+    @ViewBuilder _ content: @escaping (K.Value) -> Overlay
   ) -> some View where K.Value: Equatable {
-    PreferenceOverlay<Overlay, Self, K>(content: self, overlay: content)
+    PreferenceOverlay<Overlay, Self, K>(
+      content: self, alignment: alignment, behind: false, overlay: content)
+  }
+
+  public func backgroundPreferenceValue<K: PreferenceKey, Background: View>(
+    _ key: K.Type = K.self,
+    alignment: Alignment = .center,
+    @ViewBuilder _ content: @escaping (K.Value) -> Background
+  ) -> some View where K.Value: Equatable {
+    PreferenceOverlay<Background, Self, K>(
+      content: self, alignment: alignment, behind: true, overlay: content)
   }
 
   public func anchorPreference<A, K: PreferenceKey>(
@@ -142,7 +156,44 @@ extension View {
     value source: Anchor<A>.Source,
     transform: @escaping (Anchor<A>) -> K.Value
   ) -> some View {
-    self.preference(key: key, value: transform(Anchor(source.resolve(.zero))))
+    TransformView(content: self) { node in
+      node.anchorPreferences.append { rect, preferences in
+        let next = transform(Anchor(source.resolve(rect)))
+        let identifier = ObjectIdentifier(K.self)
+        let reduceFn: (Any, Any) -> Any = { old, new in
+          var value = old as! K.Value
+          K.reduce(value: &value, nextValue: { new as! K.Value })
+          return value
+        }
+        if let existing = preferences[identifier] {
+          preferences[identifier] = PreferenceValue(
+            value: reduceFn(existing.value, next), reduce: reduceFn)
+        } else {
+          preferences[identifier] = PreferenceValue(value: next, reduce: reduceFn)
+        }
+      }
+    }
+  }
+
+  public func transformAnchorPreference<A, K: PreferenceKey>(
+    key: K.Type = K.self,
+    value source: Anchor<A>.Source,
+    transform: @escaping (inout K.Value, Anchor<A>) -> Void
+  ) -> some View {
+    TransformView(content: self) { node in
+      node.anchorPreferences.append { rect, preferences in
+        let identifier = ObjectIdentifier(K.self)
+        var value = preferences[identifier]?.value as? K.Value ?? K.defaultValue
+        transform(&value, Anchor(source.resolve(rect)))
+        preferences[identifier] = PreferenceValue(
+          value: value,
+          reduce: { old, new in
+            var result = old as! K.Value
+            K.reduce(value: &result) { new as! K.Value }
+            return result
+          })
+      }
+    }
   }
 
 }
@@ -159,6 +210,14 @@ func resolvePreferences(_ node: Element) -> [ObjectIdentifier: PreferenceValue] 
       }
     }
   }
+  if !node.anchorPreferences.isEmpty {
+    let rect = CGRect(
+      x: node.frame.minX, y: node.frame.minY,
+      width: node.frame.width, height: node.frame.height)
+    for anchorPref in node.anchorPreferences {
+      anchorPref(rect, &result)
+    }
+  }
   for transform in node.preferenceTransforms { transform(&result) }
   if let action = node.preferenceAction {
     let values = result
@@ -169,11 +228,17 @@ func resolvePreferences(_ node: Element) -> [ObjectIdentifier: PreferenceValue] 
 private struct PreferenceOverlay<Overlay: View, Content: View, Key: PreferenceKey>: View
 where Key.Value: Equatable {
   let content: Content
+  let alignment: Alignment
+  let behind: Bool
   let overlay: (Key.Value) -> Overlay
   @State private var value = Key.defaultValue
 
   var body: some View {
-    content.onPreferenceChange(Key.self) { value = $0 }.overlay { overlay(value) }
+    LayerView(
+      content: content.onPreferenceChange(Key.self) { value = $0 },
+      layer: overlay(value),
+      behind: behind,
+      alignment: alignment)
   }
 }
 

@@ -1007,6 +1007,14 @@ import Foundation
     let published = Date.timeIntervalSinceReferenceDate
     if let commands { backend.perform(commands) }
     backend.didScroll(updated, viewport: viewport)
+    if updated.hasPreferences {
+      LifecycleRegistry.shared.begin(root: rootPath)
+      let savedActiveRoot = LifecycleRegistry.shared.activeRoot
+      LifecycleRegistry.shared.activeRoot = ObjectIdentifier(rootPath)
+      _ = resolvePreferences(updated)
+      LifecycleRegistry.shared.activeRoot = savedActiveRoot
+      LifecycleRegistry.shared.commit(root: rootPath)
+    }
     lastTimings["backend"] = (Date.timeIntervalSinceReferenceDate - published) * 1000
     isRendering = false
     return true

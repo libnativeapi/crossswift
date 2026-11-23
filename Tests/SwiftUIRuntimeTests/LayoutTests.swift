@@ -133,4 +133,77 @@ final class LayoutTests: XCTestCase {
     XCTAssertEqual(tree.children[0].props.enabled, false)
     XCTAssertEqual(tree.children[1].props.enabled, true)
   }
+
+  func testAnchorPreferencePositionsOverlayCalloutBelowRightAlignedRecorder() {
+    struct RecorderAnchorKey: PreferenceKey {
+      static let defaultValue: Anchor<CGRect>? = nil
+      static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = value ?? nextValue()
+      }
+    }
+
+    var resolvedField: CGRect?
+    let root = HStack(spacing: 0) {
+      Color.gray.frame(width: 200)
+      Form {
+        Section {
+          HStack(spacing: 16) {
+            Text("Show Launcher")
+            Spacer(minLength: 16)
+            Text("Record Hotkey")
+              .frame(width: 120, height: 24)
+              .anchorPreference(key: RecorderAnchorKey.self, value: .bounds) { $0 }
+          }
+        } header: {
+          Text("Global Shortcuts")
+        }
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .overlayPreferenceValue(RecorderAnchorKey.self) { anchor in
+        GeometryReader { proxy in
+          let field = anchor.map { proxy[$0] }
+          let _ = { resolvedField = field }()
+          Color.clear.overlay {
+            if let field {
+              let calloutSize = CGSize(width: 176, height: 104)
+              let gap: CGFloat = 8
+              let centerX = min(max(field.midX, calloutSize.width / 2 + 4), proxy.size.width - calloutSize.width / 2 - 4)
+              let centerY = field.maxY + gap + calloutSize.height / 2
+              Text("CalloutPopup")
+                .frame(width: calloutSize.width, height: calloutSize.height)
+                .position(x: centerX, y: centerY)
+            }
+          }
+        }
+      }
+    }
+
+    let renderer = Renderer(backend: FakeBackend(), root: AnyView(root), size: Size(width: 780, height: 560))
+    renderer.mount()
+
+    guard let field = resolvedField else {
+      return XCTFail("Expected anchorPreference to resolve non-nil CGRect")
+    }
+    XCTAssertEqual(field.width, 120, accuracy: 0.5)
+    XCTAssertEqual(field.height, 24, accuracy: 0.5)
+    XCTAssertGreaterThan(field.minX, 400, "Recorder should sit near the right edge of the detail pane")
+    XCTAssertGreaterThan(field.minY, 30)
+    XCTAssertLessThan(field.minY, 112, "Top row should place callout below the recorder")
+
+    func findNode(named label: String, in node: Element) -> Element? {
+      if node.props.text == label { return node }
+      for child in node.children {
+        if let hit = findNode(named: label, in: child) { return hit }
+      }
+      return nil
+    }
+    guard let tree = renderer.tree, let calloutText = findNode(named: "CalloutPopup", in: tree) else {
+      return XCTFail("Expected CalloutPopup to be mounted in overlay")
+    }
+    let globalRecorderMinX = 200.0 + Double(field.minX)
+    let globalRecorderMaxY = Double(field.maxY)
+    let calloutMidX = calloutText.frame.minX + calloutText.frame.width / 2
+    XCTAssertGreaterThan(calloutText.frame.minY, globalRecorderMaxY, "Callout text should render below the recorder control")
+    XCTAssertGreaterThan(calloutMidX, globalRecorderMinX - 40, "Callout should align horizontally under the recorder")
+  }
 }

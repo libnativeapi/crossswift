@@ -342,6 +342,7 @@ public struct Element {
   var horizontalGuide: ((ViewDimensions) -> CGFloat)? = nil
   var verticalGuide: ((ViewDimensions) -> CGFloat)? = nil
   var preferences: [ObjectIdentifier: PreferenceValue] = [:]
+  var anchorPreferences: [(CGRect, inout [ObjectIdentifier: PreferenceValue]) -> Void] = []
   var preferenceTransforms: [(inout [ObjectIdentifier: PreferenceValue]) -> Void] = []
   var preferenceAction: (([ObjectIdentifier: PreferenceValue]) -> Void)? = nil
   var geometryBuilder: ((CGRect) -> Element)? = nil
@@ -559,11 +560,32 @@ func normalize(_ element: Element, previous: Element? = nil) -> Element {
       }
       if single.explicitID == nil { single.explicitID = result.explicitID }
       if single.tagValue == nil { single.tagValue = result.tagValue }
+      for (k, v) in result.preferences {
+        if let existing = single.preferences[k] {
+          single.preferences[k] = PreferenceValue(value: v.reduce(existing.value, v.value), reduce: v.reduce)
+        } else {
+          single.preferences[k] = v
+        }
+      }
+      single.anchorPreferences.append(contentsOf: result.anchorPreferences)
+      single.preferenceTransforms.append(contentsOf: result.preferenceTransforms)
+      if let outerAction = result.preferenceAction {
+        let innerAction = single.preferenceAction
+        single.preferenceAction = { values in
+          innerAction?(values)
+          outerAction(values)
+        }
+      }
       return single
     default:
       var props = result.props
       props.spacing = 0
-      return Element(kind: .container(.vertical), props: props, children: result.children)
+      var box = Element(kind: .container(.vertical), props: props, children: result.children)
+      box.preferences = result.preferences
+      box.anchorPreferences = result.anchorPreferences
+      box.preferenceTransforms = result.preferenceTransforms
+      box.preferenceAction = result.preferenceAction
+      return box
     }
   }
   return result
