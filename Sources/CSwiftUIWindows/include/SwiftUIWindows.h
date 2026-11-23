@@ -100,6 +100,7 @@ sui_paint_stats sui_surface_paint_stats(void *surface);
 sui_paint_stats sui_surface_total_paint_stats(void *surface);
 double sui_surface_publish_time(void *surface, int stage);
 void sui_control_tab_visible(void *surface, void *control, int visible);
+void sui_control_set_passthrough(void *surface, void *control, int passthrough);
 void sui_surface_end(void *surface);
 void sui_control_frame(void *surface, void *control, double x, double y,
                        double width, double height);

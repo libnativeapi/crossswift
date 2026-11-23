@@ -71,6 +71,7 @@ struct ButtonHook {
   RECT clip{};
   int clip_width = -1, clip_height = -1, clip_radius = -1;
   bool tab_visible = true;
+  bool passthrough = false;
 };
 struct EditHook {
   int64_t id;
@@ -89,6 +90,7 @@ struct EditHook {
   bool ime_composing = false;
   bool multiline = false;
   bool unthemed = false;
+  bool passthrough = false;
   uint32_t text_argb = 0xFF000000u;
   uint32_t placeholder_argb = 0x6B000000u;
   std::wstring placeholder;
@@ -2332,6 +2334,8 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
   auto found = s->edits.find(hwnd);
   if (found == s->edits.end())
     return DefSubclassProc(hwnd, msg, wp, lp);
+  if (found->second.passthrough && msg == WM_NCHITTEST)
+    return HTTRANSPARENT;
   const bool transparent = found->second.transparent_bg;
   auto id = found->second.id;
   if (msg == WM_IME_STARTCOMPOSITION) {
@@ -2515,6 +2519,8 @@ LRESULT CALLBACK ButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
   auto found = s->buttons.find(hwnd);
   if (found == s->buttons.end())
     return DefSubclassProc(hwnd, msg, wp, lp);
+  if (found->second.passthrough && msg == WM_NCHITTEST)
+    return HTTRANSPARENT;
   // Scrolling only moves the clipping parent with redraw suppressed. Native
   // button state changes can still schedule their own paint, which the next
   // canvas publication must absorb. Do not scan every HWND on every scroll.
@@ -3933,6 +3939,33 @@ void sui_control_tab_visible(void *handle, void *control, int visible) {
   auto found = s->buttons.find(static_cast<HWND>(control));
   if (found != s->buttons.end())
     found->second.tab_visible = visible != 0;
+}
+void sui_control_set_passthrough(void *handle, void *control, int passthrough) {
+  auto *s = static_cast<Surface *>(handle);
+  if (!s || !control) return;
+  HWND hwnd = static_cast<HWND>(control);
+  const bool want = passthrough != 0;
+  auto btn = s->buttons.find(hwnd);
+  if (btn != s->buttons.end()) {
+    if (btn->second.passthrough != want) {
+      btn->second.passthrough = want;
+      if (want) {
+        if (btn->second.hovered) {
+          btn->second.hovered = false;
+          SendMessageW(hwnd, WM_MOUSELEAVE, 0, 0);
+        }
+        if (GetFocus() == hwnd) SetFocus(s->host);
+      }
+    }
+    return;
+  }
+  auto ed = s->edits.find(hwnd);
+  if (ed != s->edits.end()) {
+    if (ed->second.passthrough != want) {
+      ed->second.passthrough = want;
+      if (want && GetFocus() == hwnd) SetFocus(s->host);
+    }
+  }
 }
 void sui_control_frame(void *handle, void *control, double x, double y,
                        double width, double height) {

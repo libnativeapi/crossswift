@@ -27,6 +27,7 @@
     private var contentListener: ListenerId?
     private var pendingEvents: [() -> Void] = []
     private var modalControls: Set<NodeID>?
+    private var presentationOccluderRects: [Rect] = []
     private var controlBranches: Set<NodeID> = []
     private var desiredFocus: NodeID?
     private struct RetainedButton {
@@ -545,6 +546,24 @@
 
     private func publish(_ root: Element, on surface: UnsafeMutableRawPointer, geometryOnly: Bool = false) {
       publicationCount += 1
+      presentationOccluderRects.removeAll(keepingCapacity: true)
+      if root.hasActivePresentation {
+        var fullScrim = false
+        for overlay in root.children.dropFirst() {
+          let isFullBackdrop = overlay.kind == .shape && overlay.frame == root.frame
+          if isFullBackdrop {
+            if (overlay.props.background?.opacity ?? 0) > 0.001 {
+              fullScrim = true
+              break
+            }
+          } else if overlay.frame.width > 0 && overlay.frame.height > 0 {
+            presentationOccluderRects.append(overlay.frame)
+          }
+        }
+        if fullScrim {
+          presentationOccluderRects = [root.frame]
+        }
+      }
       var started = Date.timeIntervalSinceReferenceDate
       draw(root, clip: root.frame)
       lastTimings["draw"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
@@ -710,6 +729,15 @@
       let controlAllowed = allowed && modalAllowed
       let blockedByPresentation =
         !modalAllowed || (root?.hasActivePresentation == true && !allowed)
+      let occludedByPresentation =
+        blockedByPresentation
+        && (!modalAllowed
+          || presentationOccluderRects.contains(where: {
+            let inter = $0.intersection(node.frame)
+            return inter.width > 0 && inter.height > 0
+          }))
+      let passthroughForPresentation =
+        blockedByPresentation && !occludedByPresentation && node.kind != .styledButton
       let clip = node.props.clipped ? clip.intersection(node.frame) : clip
       var nativeClip = nativeClip.map { node.props.clipped ? $0.intersection(node.frame) : $0 }
       let parentBackground = background
@@ -734,8 +762,9 @@
       let wantsFocus = desiredFocus == node.id
       let viewport = node.frame.intersection(clip)
       let shownInViewport =
-        node.props.visible && !blockedByPresentation && viewport.width > 0 && viewport.height > 0
+        node.props.visible && !occludedByPresentation && viewport.width > 0 && viewport.height > 0
       let inViewport = shownInViewport && controlAllowed
+      let buttonShown = shownInViewport && (controlAllowed || passthroughForPresentation)
       // Keep child HWND coordinates stable while the ScrollView's content moves.
       // The shared framebuffer remains in surface coordinates at native DPI.
       let grouped = node.kind == .scroll && node.children.first != nil
@@ -750,7 +779,7 @@
         nativeClip = r
       }
       defer { if grouped, let surface { sui_controls_pop(surface) } }
-      if node.kind == .styledButton || node.kind == .button, buttons[node.id] != nil || inViewport {
+      if node.kind == .styledButton || node.kind == .button, buttons[node.id] != nil || buttonShown {
         let retained = buttons[node.id] != nil
         if buttons[node.id] == nil {
           let initialTitle = label(node)
@@ -774,14 +803,14 @@
         var entry = buttons[node.id]!
         let button = entry.view
         let r = node.frame
-        if inViewport || nativeClip != nil, let surface, let handle = button.nativeObject {
+        if buttonShown || nativeClip != nil, let surface, let handle = button.nativeObject {
           sui_control_frame(surface, handle, r.minX, r.minY, r.width, r.height)
         }
         // A scroll-only publication preserves state and labels. Native parent
         // clipping handles visibility inside a scroll group; ungrouped controls
         // still need visibility refreshed when their viewport changes.
         if !geometryOnly || !retained {
-          let enabled = node.props.enabled && controlAllowed
+          let enabled = node.props.enabled && (controlAllowed || passthroughForPresentation)
           if entry.enabled != enabled {
             if button.isEnabled != enabled { button.setEnabled(enabled) }
             entry.enabled = enabled
@@ -806,7 +835,7 @@
           // Opacity-zero shortcut buttons still participate in the renderer's
           // key handling, but their HWND must not paint or occlude the canvas.
           let visible = node.props.visible && node.props.opacity > 0
-            && controlAllowed && (nativeClip != nil || inViewport)
+            && (controlAllowed || passthroughForPresentation) && (nativeClip != nil || buttonShown)
           if entry.visible != visible {
             if button.isVisible != visible { button.setVisible(visible) }
             entry.visible = visible
@@ -815,8 +844,10 @@
         buttons[node.id] = entry
           if let surface, let handle = button.nativeObject {
             sui_control_tab_visible(surface, handle, inViewport ? 1 : 0)
+            sui_control_set_passthrough(surface, handle, passthroughForPresentation ? 1 : 0)
             let visible =
-              node.props.visible && controlAllowed ? r.intersection(nativeClip ?? clip) : .zero
+              node.props.visible && (controlAllowed || passthroughForPresentation)
+              ? r.intersection(nativeClip ?? clip) : .zero
             sui_button_update(
               surface, handle, entry.hitRadius, node.props.help,
               visible.minX - r.minX, visible.minY - r.minY, visible.width, visible.height)
@@ -921,7 +952,7 @@
               edit.view.setAccessibilityLabel(name)
               edit.accessibilityLabel = name
             }
-            let enabled = p.enabled && controlAllowed
+            let enabled = p.enabled && (controlAllowed || passthroughForPresentation)
             if !retained || edit.enabled != enabled {
               edit.view.setEnabled(enabled)
               edit.enabled = enabled
@@ -960,6 +991,7 @@
               p.multiline ? 1 : 0)
           }
           sui_edit_order(surface, handle)
+          sui_control_set_passthrough(surface, handle, passthroughForPresentation ? 1 : 0)
           sui_control_opacity(handle, p.opacity)
           let visible = shownInViewport ? editRect.intersection(nativeClip ?? clip) : .zero
           sui_surface_control_clip(
@@ -1029,11 +1061,23 @@
       button.view.dispose()
     }
     private func draw(
-      _ node: Element, clip: Rect, transformedAncestor: Bool = false, inheritedOpacity: Double = 1.0
+      _ node: Element, clip: Rect, transformedAncestor: Bool = false,
+      inheritedOpacity: Double = 1.0, allowed: Bool = true
     ) {
       guard let surface, node.props.visible else { return }
       var p = node.props
+      let allowed = allowed && p.hitTesting
+      let modalAllowed = modalControls?.contains(node.id) ?? true
+      let blockedByPresentation =
+        !modalAllowed || (root?.hasActivePresentation == true && !allowed)
       let r = node.frame
+      let occludedByPresentation =
+        blockedByPresentation
+        && (!modalAllowed
+          || presentationOccluderRects.contains(where: {
+            let inter = $0.intersection(r)
+            return inter.width > 0 && inter.height > 0
+          }))
       var translated = false
       if let motion = motions[node.id] {
         let now = Date.timeIntervalSinceReferenceDate
@@ -1071,7 +1115,8 @@
         if visible.width <= 0 || visible.height <= 0 { return }
       }
       if canCull && node.children.isEmpty && p.shadows.isEmpty
-        && (node.kind == .text || node.kind == .image || node.kind == .shape)
+        && (node.kind == .text || node.kind == .image || node.kind == .shape
+          || node.kind == .button || node.kind == .textField)
       {
         let margin = max(2, max(p.borderWidth, p.blurRadius * 2))
         let ink = Rect(
@@ -1131,7 +1176,9 @@
         vector(
           p.path.transformed(x: r.minX, y: r.minY), fill: p.background ?? .clear,
           stroke: p.borderColor, width: p.borderWidth)
-      } else if p.background != nil || (p.borderWidth > 0 && p.borderColor.opacity > 0) {
+      } else if !(node.kind == .button && occludedByPresentation),
+        p.background != nil || (p.borderWidth > 0 && p.borderColor.opacity > 0)
+      {
         sui_surface_shape(
           surface, r.minX, r.minY, r.width, r.height, p.cornerRadius,
           (p.background ?? .clear).opacity(localAlpha).argb, p.borderColor.opacity(localAlpha).argb,
@@ -1201,6 +1248,59 @@
           Double(font.size), font.weight.value, p.lineSpacing,
           (p.foreground ?? .black).opacity(localAlpha).argb)
       }
+      if node.kind == .button, occludedByPresentation {
+        let isDark = environment.colorScheme == .dark
+        let btnFill = p.background ?? (
+          isDark
+            ? SwiftUIRuntime.Color(red: 0.22, green: 0.22, blue: 0.24, opacity: 0.96)
+            : SwiftUIRuntime.Color(red: 0.99, green: 0.99, blue: 0.995, opacity: 1.0)
+        )
+        let btnBorder =
+          p.borderWidth > 0 && p.borderColor.opacity > 0
+          ? p.borderColor
+          : (isDark ? SwiftUIRuntime.Color.white.opacity(0.14) : SwiftUIRuntime.Color.black.opacity(0.16))
+        let radius = p.cornerRadius > 0 ? p.cornerRadius : 5.0
+        sui_surface_shape(
+          surface, r.minX, r.minY, r.width, r.height, radius,
+          btnFill.opacity(localAlpha).argb, btnBorder.opacity(localAlpha).argb,
+          p.borderWidth > 0 ? p.borderWidth : 1.0)
+        let title = label(node)
+        if !title.isEmpty {
+          let font = p.font ?? .body
+          let m = Self.measureText(title, font: font)
+          let tx = r.minX + max(0, (r.width - m.width) * 0.5)
+          let ty = r.minY + (r.height - m.height) * 0.5
+          let defaultFg: SwiftUIRuntime.Color = isDark ? .white : .black
+          let fgAlpha = (p.enabled ? 1.0 : 0.45) * localAlpha
+          sui_surface_text(
+            surface, tx, ty, max(r.width, m.width + 2), max(r.height, m.height + 2),
+            title, font.family, Double(font.size), font.weight.value, p.lineSpacing,
+            (p.foreground ?? defaultFg).opacity(fgAlpha).argb)
+        }
+      }
+      if node.kind == .textField, occludedByPresentation {
+        let isDark = environment.colorScheme == .dark
+        let defaultFg: SwiftUIRuntime.Color = isDark ? .white : .black
+        let resolvedFg = p.foreground ?? defaultFg
+        let isEmpty = p.text.isEmpty
+        let rawDisplay = isEmpty
+          ? p.placeholder
+          : (p.secure ? String(repeating: "•", count: p.text.count) : p.text)
+        if !rawDisplay.isEmpty {
+          let font = p.font ?? .body
+          let m = Self.measureText(rawDisplay, font: font)
+          let ty = p.multiline ? r.minY : (r.minY + (r.height - m.height) * 0.5)
+          let textColor = isEmpty
+            ? resolvedFg.opacity(0.42 * localAlpha)
+            : resolvedFg.opacity((p.enabled ? 1.0 : 0.5) * localAlpha)
+          sui_surface_clip(surface, r.minX, r.minY, r.width, r.height, 0)
+          sui_surface_text(
+            surface, r.minX + 1.0, ty, max(0, r.width - 2.0), max(r.height, m.height + 2),
+            rawDisplay, font.family, Double(font.size), font.weight.value, p.lineSpacing,
+            textColor.argb)
+          sui_surface_restore(surface)
+        }
+      }
       let cacheScroll =
         node.kind == .scroll && canCull && p.clipped && p.cornerRadius == 0
         && node.clipPathBuilder == nil && motions.isEmpty && node.children.first != nil
@@ -1216,7 +1316,7 @@
         draw(
           child, clip: clip,
           transformedAncestor: transformedAncestor || transformed || translated || needsLayer,
-          inheritedOpacity: nextInheritedOpacity)
+          inheritedOpacity: nextInheritedOpacity, allowed: allowed)
       }
       if node.kind == .scroll, p.showsScrollIndicators, let child = node.children.first {
         let color = (p.foreground ?? .gray).opacity(0.3).argb

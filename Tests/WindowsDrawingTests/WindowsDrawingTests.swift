@@ -355,6 +355,82 @@ final class WindowsDrawingTests: XCTestCase {
     item.button?.image = symImg
     XCTAssertNotNil(item.nativeTrayIcon?.icon)
   }
+
+  func testPopoverKeepsBackgroundButtonAndSidebarPlaceholderVisibleOnCanvas() throws {
+    final class PopoverModel: ObservableObject {
+      @Published var picking = false
+      @Published var query = ""
+    }
+    struct PopoverScene: SwiftUIRuntime.View {
+      @ObservedObject var model: PopoverModel
+      var body: some SwiftUIRuntime.View {
+        SwiftUIRuntime.HStack(spacing: 20) {
+          SwiftUIRuntime.TextField("Search", text: $model.query)
+            .frame(width: 160, height: 28)
+          SwiftUIRuntime.VStack(spacing: 12) {
+            SwiftUIRuntime.Spacer()
+            SwiftUIRuntime.Button("Covered Row") {}
+            SwiftUIRuntime.Button("Add Application…") { model.picking = true }
+              .popover(isPresented: $model.picking, arrowEdge: .bottom) {
+                SwiftUIRuntime.Text("App Picker")
+                  .frame(width: 140, height: 80)
+              }
+          }
+        }
+        .padding(16)
+        .frame(width: 460, height: 260)
+      }
+    }
+
+    WindowsDrawingBackend.prepareApplication()
+    _ = NativeAPI.Application.shared.isRunning()
+    let window = try XCTUnwrap(NativeAPI.Window.create())
+    defer { _ = window.close() }
+    let backend = try XCTUnwrap(WindowsDrawingBackend(window: window))
+    let model = PopoverModel()
+    let renderer = Renderer(
+      backend: backend, root: AnyView(PopoverScene(model: model)),
+      size: .init(width: 460, height: 260))
+    renderer.mount()
+
+    func collectNodes(_ kind: ElementKind, in node: Element, into out: inout [Element]) {
+      if node.kind == kind { out.append(node) }
+      for child in node.children { collectNodes(kind, in: child, into: &out) }
+    }
+    var initialFields: [Element] = []
+    collectNodes(.textField, in: try XCTUnwrap(renderer.tree), into: &initialFields)
+    let searchID = try XCTUnwrap(initialFields.first?.id)
+    let searchEdit = try XCTUnwrap(backend.nativeTextField(searchID))
+    let searchHandle = try XCTUnwrap(searchEdit.nativeObject)
+    let clipBefore = control_clip_width(searchHandle)
+    XCTAssertEqual(control_visible(searchHandle), 1)
+    XCTAssertGreaterThan(clipBefore, 0)
+
+    model.picking = true
+    renderer.renderIfNeeded()
+
+    let tree = try XCTUnwrap(renderer.tree)
+    let base = try XCTUnwrap(tree.children.first)
+    var buttons: [Element] = []
+    collectNodes(.button, in: base, into: &buttons)
+    let coveredButton = try XCTUnwrap(buttons.first { $0.props.text == "Covered Row" })
+    let addButton = try XCTUnwrap(buttons.first { $0.props.text == "Add Application…" })
+
+    // Non-occluded sidebar TextField and anchor Button keep their exact live HWNDs (zero glyph shift).
+    XCTAssertEqual(control_visible(searchHandle), 1)
+    XCTAssertEqual(control_clip_width(searchHandle), clipBefore)
+    XCTAssertTrue(searchEdit.isEnabled)
+
+    let addNative = try XCTUnwrap(backend.nativeButton(addButton.id))
+    let addHandle = try XCTUnwrap(addNative.nativeObject)
+    XCTAssertEqual(control_visible(addHandle), 1)
+    XCTAssertTrue(addNative.isEnabled)
+
+    // Occluded button directly underneath the popover hides its HWND so the popover sits cleanly on top.
+    let coveredNative = try XCTUnwrap(backend.nativeButton(coveredButton.id))
+    let coveredHandle = try XCTUnwrap(coveredNative.nativeObject)
+    XCTAssertEqual(control_visible(coveredHandle), 0)
+  }
 }
 
 @Observable

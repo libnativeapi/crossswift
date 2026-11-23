@@ -1103,14 +1103,36 @@ import Foundation
     var mountedTree = buildTree()
     var start = Date.timeIntervalSinceReferenceDate
     var commands: [RenderCommand]? = backend.needsRenderCommands ? [] : nil
-    reconcile(
-      old: old,
-      new: &mountedTree,
-      parent: nil,
-      index: 0,
-      commands: &commands,
-      allocator: &allocator
-    )
+    if commands == nil && old.hasActivePresentation != mountedTree.hasActivePresentation {
+      if mountedTree.hasActivePresentation, !mountedTree.children.isEmpty {
+        mountedTree.id = allocator.allocate()
+        reconcile(
+          old: old, new: &mountedTree.children[0], parent: mountedTree.id, index: 0,
+          commands: &commands, allocator: &allocator)
+        for i in 1..<mountedTree.children.count {
+          mountSubtree(
+            &mountedTree.children[i], parent: mountedTree.id, index: i,
+            commands: &commands, allocator: &allocator)
+        }
+      } else if let oldBase = old.children.first {
+        reconcile(
+          old: oldBase, new: &mountedTree, parent: nil, index: 0,
+          commands: &commands, allocator: &allocator)
+      } else {
+        reconcile(
+          old: old, new: &mountedTree, parent: nil, index: 0,
+          commands: &commands, allocator: &allocator)
+      }
+    } else {
+      reconcile(
+        old: old,
+        new: &mountedTree,
+        parent: nil,
+        index: 0,
+        commands: &commands,
+        allocator: &allocator
+      )
+    }
     mounted = mountedTree
     tree = mountedTree
     refreshMountedGeometryChildren(mountedTree)

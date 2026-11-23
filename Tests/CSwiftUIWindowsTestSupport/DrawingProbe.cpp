@@ -538,3 +538,52 @@ drawing_probe_result drawing_probe(void) {
   DestroyWindow(p.host);
   return p.result;
 }
+
+extern "C" int host_region_distinct_pixels(void *raw_host, double x, double y, double w, double h) {
+  HWND host = static_cast<HWND>(raw_host);
+  if (!host || !IsWindow(host) || w <= 0 || h <= 0) return 0;
+  RECT client{};
+  GetClientRect(host, &client);
+  const int cw = client.right - client.left;
+  const int ch = client.bottom - client.top;
+  if (cw <= 0 || ch <= 0) return 0;
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = cw;
+  bmi.bmiHeader.biHeight = -ch;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  uint32_t *pixels = nullptr;
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(screen);
+  HBITMAP dib = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, reinterpret_cast<void **>(&pixels), nullptr, 0);
+  ReleaseDC(nullptr, screen);
+  if (!dib || !pixels) {
+    if (dib) DeleteObject(dib);
+    DeleteDC(mem);
+    return 0;
+  }
+  HGDIOBJ old = SelectObject(mem, dib);
+  SendMessageW(host, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(mem), PRF_CLIENT);
+  const double scale = GetDpiForWindow(host) / 96.0;
+  const int x0 = (std::max)(0, int(std::floor(x * scale)));
+  const int y0 = (std::max)(0, int(std::floor(y * scale)));
+  const int x1 = (std::min)(cw, int(std::ceil((x + w) * scale)));
+  const int y1 = (std::min)(ch, int(std::ceil((y + h) * scale)));
+  int distinct = 0;
+  if (x1 > x0 && y1 > y0) {
+    const uint32_t base = pixels[y0 * cw + x0] & 0x00FFFFFFu;
+    for (int py = y0; py < y1; ++py) {
+      for (int px = x0; px < x1; ++px) {
+        if ((pixels[py * cw + px] & 0x00FFFFFFu) != base) {
+          ++distinct;
+        }
+      }
+    }
+  }
+  SelectObject(mem, old);
+  DeleteObject(dib);
+  DeleteDC(mem);
+  return distinct;
+}

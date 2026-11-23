@@ -22,6 +22,7 @@ int shadow_probe(const uint8_t *alpha, int width, int height, double inset,
 int editor_resize_probe(void);
 int control_visible(void *control);
 int control_clip_width(void *control);
+int host_region_distinct_pixels(void *host, double x, double y, double w, double h);
 #ifdef __cplusplus
 }
 #endif
