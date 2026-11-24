@@ -908,6 +908,7 @@ open class NSButton: NSControl {
   public var isBordered: Bool = true
   public var bezelStyle: BezelStyle = .rounded
   public var keyEquivalent: String = ""
+  public var keyEquivalentModifierMask: NSEvent.ModifierFlags = []
 
   public override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -939,6 +940,16 @@ open class NSButton: NSControl {
   @discardableResult
   public func sendAction(on mask: NSEvent.EventTypeMask) -> Int { 0 }
   public func performClick(_ sender: Any?) { _ = sendAction(action, to: target) }
+
+  open override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    if isEnabled, !isHidden, !keyEquivalent.isEmpty,
+      event.matchesKeyEquivalent(keyEquivalent, modifierMask: keyEquivalentModifierMask)
+    {
+      performClick(nil)
+      return true
+    }
+    return super.performKeyEquivalent(with: event)
+  }
 }
 
 @MainActor
@@ -1253,13 +1264,13 @@ open class NSTextView: NSText {
         selector = nil
       }
       guard let selector else { return false }
-      let ev = NSEvent(
+      let ev = NSEvent.win32KeyEvent(
         type: .keyDown,
-        locationInWindow: .zero,
+        vk: win32VK,
         modifierFlags: modifierFlags,
+        location: .zero,
         windowNumber: window?.windowNumber ?? 0,
-        window: window,
-        keyCode: NSEvent.carbonKeyCode(fromWin32VK: win32VK)
+        window: window
       )
       let prev = NSApplication.shared.currentEvent
       NSApplication.shared.currentEvent = ev

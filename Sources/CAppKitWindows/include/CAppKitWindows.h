@@ -37,6 +37,19 @@ int cak_terminate_pid(uint32_t pid, int force);
 uint32_t *cak_enum_gui_pids(int *out_count);
 uint8_t *cak_file_icon_png(const char *utf8_path, int size_px, size_t *out_len);
 uint8_t *cak_shell_thumbnail_png(const char *utf8_path, int max_px, int *out_w, int *out_h, size_t *out_len);
+// mode_flags bitmask: bit 0 (1) = allow icon, bit 1 (2) = allow thumbnail.
+// Returns NULL if the path does not exist or no permitted representation is available.
+// out_is_icon receives 1 when an icon fallback/representation was produced, 0 for a thumbnail.
+uint8_t *cak_shell_thumbnail_png_ex(
+    const char *utf8_path,
+    int max_w,
+    int max_h,
+    uint32_t mode_flags,
+    int *out_w,
+    int *out_h,
+    int *out_is_icon,
+    size_t *out_len
+);
 int cak_resolve_lnk(
     const char *utf8_lnk_path,
     char *target_buf, int target_cap,
@@ -68,7 +81,33 @@ void cak_enable_per_monitor_dpi(void);
 void cak_window_set_backdrop(void *hwnd, int backdrop_kind, int is_dark);
 void cak_window_set_tool_style(void *hwnd, int hide_from_taskbar, int non_activating);
 void cak_window_apply_frameless(void *hwnd, int is_frameless);
+void cak_window_frame_insets(
+    void *hwnd,
+    uint32_t style_mask,
+    double dpi_scale,
+    double *out_left,
+    double *out_top,
+    double *out_right,
+    double *out_bottom
+);
 uint32_t cak_modifier_flags(void);
+// Dead-key-safe keyboard layout translation via ToUnicodeEx (flag 0x4) + MapVirtualKeyExW.
+// modifier_flags uses NSEvent.ModifierFlags bits (capsLock=1<<16, shift=1<<17, control=1<<18,
+// option=1<<19, command=1<<20). ignore_mode: 0=apply modifiers, 1=keep Shift only
+// (charactersIgnoringModifiers), 2=ignore all modifiers. hkl=0 uses GetKeyboardLayout(0).
+int cak_translate_vk_to_utf8(
+    uint32_t vk,
+    uint32_t scan_code,
+    uint32_t modifier_flags,
+    uint64_t hkl,
+    int ignore_mode,
+    char *out_buf,
+    int out_cap,
+    int *out_is_dead
+);
+uint32_t cak_map_vk_to_scancode(uint32_t vk, uint64_t hkl);
+uint32_t cak_map_scancode_to_vk(uint32_t scan_code, uint64_t hkl);
+uint64_t cak_current_keyboard_layout(void);
 void cak_set_cursor(int cursor_kind);
 void *cak_focused_hwnd(void);
 int cak_is_edit_hwnd(void *hwnd);

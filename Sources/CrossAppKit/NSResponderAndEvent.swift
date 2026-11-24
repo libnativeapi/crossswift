@@ -332,15 +332,21 @@ open class NSEvent: NSObject, @unchecked Sendable {
     }
   }
 
-  /// Translates a Win32 virtual keycode (`VK_*`) into macOS HIToolbox `kVK_*`.
-  public static func carbonKeyCode(fromWin32VK vk: Int) -> UInt16 {
+  /// Translates a Win32 virtual keycode (`VK_*`) and optional AT Set 1 scan code
+  /// (`MapVirtualKeyExW` / `WM_KEYDOWN` lParam) into macOS HIToolbox `kVK_*`.
+  public static func carbonKeyCode(fromWin32VK vk: Int, scanCode: UInt32 = 0) -> UInt16 {
+    if scanCode != 0, let fromScan = carbonKeyCode(fromATScanCode: scanCode) {
+      return fromScan
+    }
     switch vk {
     case 0x0D: return 0x24 // Return
     case 0x09: return 0x30 // Tab
     case 0x20: return 0x31 // Space
     case 0x08: return 0x33 // Backspace -> kVK_Delete
     case 0x1B: return 0x35 // Escape
+    case 0x0C: return 0x47 // VK_CLEAR -> kVK_ANSI_KeypadClear
     case 0x2E: return 0x75 // Delete -> kVK_ForwardDelete
+    case 0x2F: return 0x72 // VK_HELP -> kVK_Help
     case 0x25: return 0x7B // Left
     case 0x27: return 0x7C // Right
     case 0x28: return 0x7D // Down
@@ -385,10 +391,33 @@ open class NSEvent: NSObject, @unchecked Sendable {
     case 0x37: return 0x1A // 7
     case 0x38: return 0x1C // 8
     case 0x39: return 0x19 // 9
-    case 0xBC: return 0x2B // ,
-    case 0xBE: return 0x2F // .
-    case 0xBD: return 0x1B // -
-    case 0xBB: return 0x18 // =
+    case 0xBA: return 0x29 // VK_OEM_1 (;)
+    case 0xBB: return 0x18 // VK_OEM_PLUS (=)
+    case 0xBC: return 0x2B // VK_OEM_COMMA (,)
+    case 0xBD: return 0x1B // VK_OEM_MINUS (-)
+    case 0xBE: return 0x2F // VK_OEM_PERIOD (.)
+    case 0xBF: return 0x2C // VK_OEM_2 (/)
+    case 0xC0: return 0x32 // VK_OEM_3 (`)
+    case 0xDB: return 0x21 // VK_OEM_4 ([)
+    case 0xDC: return 0x2A // VK_OEM_5 (\)
+    case 0xDD: return 0x1E // VK_OEM_6 (])
+    case 0xDE: return 0x27 // VK_OEM_7 (')
+    case 0xE2: return 0x0A // VK_OEM_102 -> kVK_ISO_Section
+    case 0x60: return 0x52 // VK_NUMPAD0
+    case 0x61: return 0x53 // VK_NUMPAD1
+    case 0x62: return 0x54 // VK_NUMPAD2
+    case 0x63: return 0x55 // VK_NUMPAD3
+    case 0x64: return 0x56 // VK_NUMPAD4
+    case 0x65: return 0x57 // VK_NUMPAD5
+    case 0x66: return 0x58 // VK_NUMPAD6
+    case 0x67: return 0x59 // VK_NUMPAD7
+    case 0x68: return 0x5B // VK_NUMPAD8
+    case 0x69: return 0x5C // VK_NUMPAD9
+    case 0x6A: return 0x43 // VK_MULTIPLY
+    case 0x6B: return 0x45 // VK_ADD
+    case 0x6D: return 0x4E // VK_SUBTRACT
+    case 0x6E: return 0x41 // VK_DECIMAL
+    case 0x6F: return 0x4B // VK_DIVIDE
     case 0x70: return 0x7A // F1
     case 0x71: return 0x78 // F2
     case 0x72: return 0x63 // F3
@@ -401,7 +430,457 @@ open class NSEvent: NSObject, @unchecked Sendable {
     case 0x79: return 0x6D // F10
     case 0x7A: return 0x67 // F11
     case 0x7B: return 0x6F // F12
+    case 0x7C: return 0x69 // F13
+    case 0x7D: return 0x6B // F14
+    case 0x7E: return 0x71 // F15
+    case 0x7F: return 0x6A // F16
+    case 0x80: return 0x40 // F17
+    case 0x81: return 0x4F // F18
+    case 0x82: return 0x50 // F19
+    case 0x83: return 0x5A // F20
+    case 0x10, 0xA0: return 0x38 // Shift / LShift
+    case 0xA1: return 0x3C       // RShift
+    case 0x11, 0xA2: return 0x3B // Control / LControl
+    case 0xA3: return 0x3E       // RControl
+    case 0x12, 0xA4: return 0x3A // Alt / LAlt -> Option
+    case 0xA5: return 0x3D       // RAlt -> RightOption
+    case 0x5B: return 0x37       // LWin -> Command
+    case 0x5C: return 0x36       // RWin -> RightCommand
+    case 0x14: return 0x39       // CapsLock
+    case 0x5D: return 0x6E       // VK_APPS -> ContextualMenu
     default: return UInt16(vk & 0xFF)
+    }
+  }
+
+  /// Translates an AT Set 1 hardware scan code (with `0xE000` prefix for extended keys)
+  /// to the physical macOS HIToolbox `kVK_*` position.
+  public static func carbonKeyCode(fromATScanCode scanCode: UInt32) -> UInt16? {
+    switch scanCode {
+    case 0x1E: return 0x00 // A
+    case 0x1F: return 0x01 // S
+    case 0x20: return 0x02 // D
+    case 0x21: return 0x03 // F
+    case 0x23: return 0x04 // H
+    case 0x22: return 0x05 // G
+    case 0x2C: return 0x06 // Z
+    case 0x2D: return 0x07 // X
+    case 0x2E: return 0x08 // C
+    case 0x2F: return 0x09 // V
+    case 0x56: return 0x0A // ISO Section
+    case 0x30: return 0x0B // B
+    case 0x10: return 0x0C // Q
+    case 0x11: return 0x0D // W
+    case 0x12: return 0x0E // E
+    case 0x13: return 0x0F // R
+    case 0x15: return 0x10 // Y
+    case 0x14: return 0x11 // T
+    case 0x02: return 0x12 // 1
+    case 0x03: return 0x13 // 2
+    case 0x04: return 0x14 // 3
+    case 0x05: return 0x15 // 4
+    case 0x07: return 0x16 // 6
+    case 0x06: return 0x17 // 5
+    case 0x0D: return 0x18 // =
+    case 0x0A: return 0x19 // 9
+    case 0x08: return 0x1A // 7
+    case 0x0C: return 0x1B // -
+    case 0x09: return 0x1C // 8
+    case 0x0B: return 0x1D // 0
+    case 0x1B: return 0x1E // ]
+    case 0x18: return 0x1F // O
+    case 0x16: return 0x20 // U
+    case 0x1A: return 0x21 // [
+    case 0x17: return 0x22 // I
+    case 0x19: return 0x23 // P
+    case 0x1C: return 0x24 // Return
+    case 0x26: return 0x25 // L
+    case 0x24: return 0x26 // J
+    case 0x28: return 0x27 // '
+    case 0x25: return 0x28 // K
+    case 0x27: return 0x29 // ;
+    case 0x2B: return 0x2A // \
+    case 0x33: return 0x2B // ,
+    case 0x35: return 0x2C // /
+    case 0x31: return 0x2D // N
+    case 0x32: return 0x2E // M
+    case 0x34: return 0x2F // .
+    case 0x0F: return 0x30 // Tab
+    case 0x39: return 0x31 // Space
+    case 0x29: return 0x32 // `
+    case 0x0E: return 0x33 // Backspace
+    case 0x01: return 0x35 // Escape
+    case 0xE05C: return 0x36 // RightCommand
+    case 0xE05B: return 0x37 // Command
+    case 0x2A: return 0x38 // Shift
+    case 0x3A: return 0x39 // CapsLock
+    case 0x38: return 0x3A // Option
+    case 0x1D: return 0x3B // Control
+    case 0x36: return 0x3C // RightShift
+    case 0xE038: return 0x3D // RightOption
+    case 0xE01D: return 0x3E // RightControl
+    case 0xE035: return 0x4B // KeypadDivide
+    case 0xE01C: return 0x4C // KeypadEnter
+    default: return nil
+    }
+  }
+
+  /// Translates a macOS HIToolbox `kVK_*` keycode back into a Win32 virtual keycode (`VK_*`).
+  public static func win32VirtualKey(fromCarbonKeyCode keyCode: UInt16) -> Int? {
+    switch keyCode {
+    case 0x00: return 0x41 // A
+    case 0x01: return 0x53 // S
+    case 0x02: return 0x44 // D
+    case 0x03: return 0x46 // F
+    case 0x04: return 0x48 // H
+    case 0x05: return 0x47 // G
+    case 0x06: return 0x5A // Z
+    case 0x07: return 0x58 // X
+    case 0x08: return 0x43 // C
+    case 0x09: return 0x56 // V
+    case 0x0A: return 0xE2 // ISO Section
+    case 0x0B: return 0x42 // B
+    case 0x0C: return 0x51 // Q
+    case 0x0D: return 0x57 // W
+    case 0x0E: return 0x45 // E
+    case 0x0F: return 0x52 // R
+    case 0x10: return 0x59 // Y
+    case 0x11: return 0x54 // T
+    case 0x12: return 0x31 // 1
+    case 0x13: return 0x32 // 2
+    case 0x14: return 0x33 // 3
+    case 0x15: return 0x34 // 4
+    case 0x16: return 0x36 // 6
+    case 0x17: return 0x35 // 5
+    case 0x18: return 0xBB // =
+    case 0x19: return 0x39 // 9
+    case 0x1A: return 0x37 // 7
+    case 0x1B: return 0xBD // -
+    case 0x1C: return 0x38 // 8
+    case 0x1D: return 0x30 // 0
+    case 0x1E: return 0xDD // ]
+    case 0x1F: return 0x4F // O
+    case 0x20: return 0x55 // U
+    case 0x21: return 0xDB // [
+    case 0x22: return 0x49 // I
+    case 0x23: return 0x50 // P
+    case 0x24, 0x4C: return 0x0D // Return / KeypadEnter
+    case 0x25: return 0x4C // L
+    case 0x26: return 0x4A // J
+    case 0x27: return 0xDE // '
+    case 0x28: return 0x4B // K
+    case 0x29: return 0xBA // ;
+    case 0x2A: return 0xDC // \
+    case 0x2B: return 0xBC // ,
+    case 0x2C: return 0xBF // /
+    case 0x2D: return 0x4E // N
+    case 0x2E: return 0x4D // M
+    case 0x2F: return 0xBE // .
+    case 0x30: return 0x09 // Tab
+    case 0x31: return 0x20 // Space
+    case 0x32: return 0xC0 // `
+    case 0x33: return 0x08 // Backspace
+    case 0x35: return 0x1B // Escape
+    case 0x36: return 0x5C // RWin
+    case 0x37: return 0x5B // LWin
+    case 0x38: return 0xA0 // LShift
+    case 0x39: return 0x14 // CapsLock
+    case 0x3A: return 0xA4 // LAlt
+    case 0x3B: return 0xA2 // LCtrl
+    case 0x3C: return 0xA1 // RShift
+    case 0x3D: return 0xA5 // RAlt
+    case 0x3E: return 0xA3 // RCtrl
+    case 0x40: return 0x80 // F17
+    case 0x41: return 0x6E // KeypadDecimal
+    case 0x43: return 0x6A // KeypadMultiply
+    case 0x45: return 0x6B // KeypadPlus
+    case 0x47: return 0x0C // KeypadClear
+    case 0x4B: return 0x6F // KeypadDivide
+    case 0x4E: return 0x6D // KeypadMinus
+    case 0x4F: return 0x81 // F18
+    case 0x50: return 0x82 // F19
+    case 0x52: return 0x60 // Keypad0
+    case 0x53: return 0x61 // Keypad1
+    case 0x54: return 0x62 // Keypad2
+    case 0x55: return 0x63 // Keypad3
+    case 0x56: return 0x64 // Keypad4
+    case 0x57: return 0x65 // Keypad5
+    case 0x58: return 0x66 // Keypad6
+    case 0x59: return 0x67 // Keypad7
+    case 0x5A: return 0x83 // F20
+    case 0x5B: return 0x68 // Keypad8
+    case 0x5C: return 0x69 // Keypad9
+    case 0x60: return 0x74 // F5
+    case 0x61: return 0x75 // F6
+    case 0x62: return 0x76 // F7
+    case 0x63: return 0x72 // F3
+    case 0x64: return 0x77 // F8
+    case 0x65: return 0x78 // F9
+    case 0x67: return 0x7A // F11
+    case 0x69: return 0x7C // F13
+    case 0x6A: return 0x7F // F16
+    case 0x6B: return 0x7D // F14
+    case 0x6D: return 0x79 // F10
+    case 0x6E: return 0x5D // ContextualMenu
+    case 0x6F: return 0x7B // F12
+    case 0x71: return 0x7E // F15
+    case 0x72: return 0x2F // Help
+    case 0x73: return 0x24 // Home
+    case 0x74: return 0x21 // PageUp
+    case 0x75: return 0x2E // ForwardDelete
+    case 0x76: return 0x73 // F4
+    case 0x77: return 0x23 // End
+    case 0x78: return 0x71 // F2
+    case 0x79: return 0x22 // PageDown
+    case 0x7A: return 0x70 // F1
+    case 0x7B: return 0x25 // Left
+    case 0x7C: return 0x27 // Right
+    case 0x7D: return 0x28 // Down
+    case 0x7E: return 0x26 // Up
+    default: return nil
+    }
+  }
+
+  /// AppKit special Unicode scalar string for non-printable navigation, function, and editing keys.
+  public static func specialKeyCharacter(
+    forWin32VK vk: Int,
+    scanCode: UInt32 = 0,
+    modifierFlags: ModifierFlags = []
+  ) -> String? {
+    switch vk {
+    case 0x26: return "\u{F700}" // Up
+    case 0x28: return "\u{F701}" // Down
+    case 0x25: return "\u{F702}" // Left
+    case 0x27: return "\u{F703}" // Right
+    case 0x70...0x83:
+      if let scalar = UnicodeScalar(0xF704 + (vk - 0x70)) {
+        return String(scalar)
+      }
+      return ""
+    case 0x2E: return "\u{F728}" // ForwardDelete
+    case 0x24: return "\u{F729}" // Home
+    case 0x23: return "\u{F72B}" // End
+    case 0x21: return "\u{F72C}" // PageUp
+    case 0x22: return "\u{F72D}" // PageDown
+    case 0x2F: return "\u{F746}" // Help
+    case 0x0C: return "\u{F739}" // Clear
+    case 0x08: return "\u{007F}" // Backspace -> AppKit Delete
+    case 0x0D: return (scanCode & 0xE000) == 0xE000 ? "\u{0003}" : "\r"
+    case 0x09: return modifierFlags.contains(.shift) ? "\u{0019}" : "\t"
+    case 0x1B: return "\u{001B}" // Escape
+    case 0x10...0x14, 0x5B, 0x5C, 0x90, 0x91, 0xA0...0xA5:
+      return "" // Modifier-only keys emit no characters
+    default:
+      return nil
+    }
+  }
+
+  /// Translates a Win32 virtual key into AppKit `characters` and `charactersIgnoringModifiers`
+  /// using Win32 `ToUnicodeEx` (with dead-key-safe flag `0x0004`) and `MapVirtualKeyExW`.
+  ///
+  /// Matches AppKit semantics:
+  /// - `characters` reflects active modifiers (`shift`, `capsLock`, `control`, `option`/AltGr),
+  ///   while keeping `.command` neutral and returning `""` on dead keys.
+  /// - `charactersIgnoringModifiers` applies `shift` only (ignoring `command`/`option`/`control`/`capsLock`)
+  ///   and preserves the spacing character for dead keys.
+  public static func translateWin32Key(
+    vk: Int,
+    scanCode: UInt32 = 0,
+    modifierFlags: ModifierFlags = [],
+    keyboardLayout: UInt64 = 0
+  ) -> (characters: String, charactersIgnoringModifiers: String, isDeadKey: Bool) {
+    if let special = specialKeyCharacter(
+      forWin32VK: vk,
+      scanCode: scanCode,
+      modifierFlags: modifierFlags
+    ) {
+      return (special, special, false)
+    }
+
+    #if os(Windows)
+      let modBits = UInt32(modifierFlags.rawValue & 0xFFFFFFFF)
+      var buf = [CChar](repeating: 0, count: 64)
+      var deadChars: Int32 = 0
+      let lenChars = cak_translate_vk_to_utf8(
+        UInt32(clamping: vk),
+        scanCode,
+        modBits,
+        keyboardLayout,
+        0,
+        &buf,
+        Int32(buf.count),
+        &deadChars
+      )
+      let rawChars = lenChars > 0 ? String(cString: buf) : ""
+      let isDead = deadChars != 0
+      let chars = isDead ? "" : rawChars
+
+      var ignBuf = [CChar](repeating: 0, count: 64)
+      var deadIgn: Int32 = 0
+      let lenIgn = cak_translate_vk_to_utf8(
+        UInt32(clamping: vk),
+        scanCode,
+        modBits,
+        keyboardLayout,
+        1,
+        &ignBuf,
+        Int32(ignBuf.count),
+        &deadIgn
+      )
+      let ignChars = lenIgn > 0 ? String(cString: ignBuf) : rawChars
+      if !chars.isEmpty || !ignChars.isEmpty || isDead || deadIgn != 0 {
+        return (chars, ignChars, isDead || deadIgn != 0)
+      }
+    #endif
+
+    let fallback = fallbackUSCharacter(forWin32VK: vk, shift: modifierFlags.contains(.shift))
+    let capsXorShift = modifierFlags.contains(.shift) != modifierFlags.contains(.capsLock)
+    let fallbackWithMods: String
+    if modifierFlags.contains(.control) && !modifierFlags.contains(.option),
+      let scalar = fallback.unicodeScalars.first,
+      (0x61...0x7A).contains(scalar.value) || (0x41...0x5A).contains(scalar.value)
+    {
+      let ctrlCode = (scalar.value & 0x1F)
+      fallbackWithMods = UnicodeScalar(ctrlCode).map { String($0) } ?? fallback
+    } else if (0x41...0x5A).contains(vk) {
+      fallbackWithMods = capsXorShift ? fallback.uppercased() : fallback.lowercased()
+    } else {
+      fallbackWithMods = fallback
+    }
+    return (fallbackWithMods, fallback, false)
+  }
+
+  /// Constructs an `NSEvent` from a Win32 keyboard message using layout-aware `ToUnicodeEx`
+  /// character mapping and physical keycode translation.
+  public static func win32KeyEvent(
+    type: EventType = .keyDown,
+    vk: Int,
+    scanCode: UInt32 = 0,
+    modifierFlags: ModifierFlags = [],
+    location: NSPoint = .zero,
+    timestamp: TimeInterval = ProcessInfo.processInfo.systemUptime,
+    windowNumber: Int = 0,
+    window: NSWindow? = nil,
+    isARepeat: Bool = false,
+    keyboardLayout: UInt64 = 0
+  ) -> NSEvent {
+    let code = carbonKeyCode(fromWin32VK: vk, scanCode: scanCode)
+    if type == .flagsChanged {
+      return NSEvent(
+        type: .flagsChanged,
+        locationInWindow: location,
+        modifierFlags: modifierFlags,
+        timestamp: timestamp,
+        windowNumber: windowNumber,
+        window: window,
+        characters: nil,
+        charactersIgnoringModifiers: nil,
+        isARepeat: false,
+        keyCode: code
+      )
+    }
+    let translated = translateWin32Key(
+      vk: vk,
+      scanCode: scanCode,
+      modifierFlags: modifierFlags,
+      keyboardLayout: keyboardLayout
+    )
+    return NSEvent(
+      type: type,
+      locationInWindow: location,
+      modifierFlags: modifierFlags,
+      timestamp: timestamp,
+      windowNumber: windowNumber,
+      window: window,
+      characters: translated.characters,
+      charactersIgnoringModifiers: translated.charactersIgnoringModifiers,
+      isARepeat: isARepeat,
+      keyCode: code
+    )
+  }
+
+  /// Returns the characters generated by this key event as if the specified modifier flags
+  /// were applied under the current keyboard layout (macOS 10.15+ AppKit API).
+  public func characters(byApplyingModifiers modifiers: ModifierFlags) -> String? {
+    guard type == .keyDown || type == .keyUp else { return nil }
+    guard let vk = Self.win32VirtualKey(fromCarbonKeyCode: keyCode) else {
+      return modifiers.contains(.shift)
+        ? charactersIgnoringModifiers?.uppercased()
+        : charactersIgnoringModifiers?.lowercased()
+    }
+    let scan: UInt32 = keyCode == 0x4C ? 0xE01C : 0
+    return Self.translateWin32Key(vk: vk, scanCode: scan, modifierFlags: modifiers).characters
+  }
+
+  /// Matches this key event against an AppKit `keyEquivalent` string and modifier mask.
+  ///
+  /// Follows AppKit shortcut rules:
+  /// - An uppercase alphabetic `keyEquivalent` (e.g. `"Z"`) implicitly requires `.shift`.
+  /// - A non-alphabetic shifted symbol `keyEquivalent` (e.g. `"?"`, `"+"`, `"!"`) matches when
+  ///   produced with `.shift` even if `modifierMask` did not explicitly list `.shift`.
+  public func matchesKeyEquivalent(_ keyEquivalent: String, modifierMask: ModifierFlags) -> Bool {
+    guard type == .keyDown, !keyEquivalent.isEmpty else { return false }
+    let shortcutMask: ModifierFlags = [.command, .option, .control, .shift]
+    let eventMods = modifierFlags.intersection(shortcutMask)
+    var requiredMods = modifierMask.intersection(shortcutMask)
+
+    let lowerEq = keyEquivalent.lowercased()
+    let upperEq = keyEquivalent.uppercased()
+    let isCaseSensitiveLetter = lowerEq != upperEq
+    if isCaseSensitiveLetter && keyEquivalent == upperEq {
+      requiredMods.insert(.shift)
+    }
+
+    let ign = charactersIgnoringModifiers ?? ""
+    let ch = characters ?? ""
+
+    if eventMods == requiredMods {
+      if isCaseSensitiveLetter {
+        return ign.lowercased() == lowerEq
+      }
+      return ign == keyEquivalent || ch == keyEquivalent
+    }
+
+    // Allow Shift used solely to type a non-letter layout symbol (e.g. Cmd+? via Shift+/).
+    if !isCaseSensitiveLetter,
+      !requiredMods.contains(.shift),
+      eventMods == requiredMods.union(.shift)
+    {
+      return ign == keyEquivalent || ch == keyEquivalent
+    }
+    return false
+  }
+
+  private static func fallbackUSCharacter(forWin32VK vk: Int, shift: Bool) -> String {
+    if (0x41...0x5A).contains(vk), let scalar = UnicodeScalar(vk) {
+      let s = String(scalar)
+      return shift ? s.uppercased() : s.lowercased()
+    }
+    if (0x30...0x39).contains(vk) {
+      let unshifted = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+      let shifted = [")", "!", "@", "#", "$", "%", "^", "&", "*", "("]
+      let idx = vk - 0x30
+      return shift ? shifted[idx] : unshifted[idx]
+    }
+    switch vk {
+    case 0x20: return " "
+    case 0xBA: return shift ? ":" : ";"
+    case 0xBB: return shift ? "+" : "="
+    case 0xBC: return shift ? "<" : ","
+    case 0xBD: return shift ? "_" : "-"
+    case 0xBE: return shift ? ">" : "."
+    case 0xBF: return shift ? "?" : "/"
+    case 0xC0: return shift ? "~" : "`"
+    case 0xDB: return shift ? "{" : "["
+    case 0xDC: return shift ? "|" : "\\"
+    case 0xDD: return shift ? "}" : "]"
+    case 0xDE: return shift ? "\"" : "'"
+    case 0x60...0x69: return String(vk - 0x60)
+    case 0x6A: return "*"
+    case 0x6B: return "+"
+    case 0x6D: return "-"
+    case 0x6E: return "."
+    case 0x6F: return "/"
+    default: return ""
     }
   }
 }

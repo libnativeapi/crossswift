@@ -89,6 +89,7 @@ open class NSApplication: NSResponder, @unchecked Sendable {
   public private(set) var isRunning: Bool = false
   public var currentEvent: NSEvent?
   public var modalWindow: NSWindow?
+  internal weak var lastKeyWindow: NSWindow?
 
   public var appearance: NSAppearance? {
     didSet {
@@ -226,11 +227,19 @@ open class NSApplication: NSResponder, @unchecked Sendable {
   }
 
   public func activate(ignoringOtherApps flag: Bool = true) {
+    let wasActive = isActive
     isActive = true
     #if !os(macOS)
       _ = NativeAPI.Application.shared.show()
     #endif
-    keyWindow?.makeKeyAndOrderFront(nil)
+    if let target = modalWindow ?? keyWindow ?? mainWindow, target.isVisible {
+      target.makeKeyAndOrderFront(nil)
+    }
+    if !wasActive {
+      let note = Notification(name: Self.didBecomeActiveNotification, object: self)
+      NotificationCenter.default.post(note)
+      delegate?.applicationDidBecomeActive(note)
+    }
   }
 
   public func activate() {
@@ -238,10 +247,16 @@ open class NSApplication: NSResponder, @unchecked Sendable {
   }
 
   public func hide(_ sender: Any?) {
+    let wasActive = isActive
     isActive = false
     #if !os(macOS)
       _ = NativeAPI.Application.shared.hide()
     #endif
+    if wasActive {
+      let note = Notification(name: Self.didResignActiveNotification, object: self)
+      NotificationCenter.default.post(note)
+      delegate?.applicationDidResignActive(note)
+    }
   }
 
   public func registerForRemoteNotifications() {}

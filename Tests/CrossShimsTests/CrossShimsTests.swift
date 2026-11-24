@@ -135,7 +135,6 @@
       XCTAssertTrue(bytes.contains { $0 != 0 })
     }
 
-    @MainActor
     func testDisablingParentPipeInheritanceDeliversImmediateEOFWhileSiblingRuns() throws {
       final class Box: @unchecked Sendable { var ran = false }
       let box = Box()

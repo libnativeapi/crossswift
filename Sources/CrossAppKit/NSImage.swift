@@ -517,7 +517,10 @@ open class NSImage: NSObject, @unchecked Sendable {
     }
 
     public func cgImage(forProposedRect proposedDestRect: UnsafeMutablePointer<NSRect>?, context referenceContext: NSGraphicsContext?, hints: [String: Any]?) -> CGImage? {
-      CGImage(width: max(Int(size.width), 1), height: max(Int(size.height), 1), pngData: imageData)
+      if let rep = representations.first, rep.pixelsWide > 0, rep.pixelsHigh > 0 {
+        return CGImage(width: rep.pixelsWide, height: rep.pixelsHigh, pngData: imageData)
+      }
+      return CGImage(width: max(Int(size.width), 1), height: max(Int(size.height), 1), pngData: imageData)
     }
   #endif
 

@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <cerrno>
@@ -37,6 +38,7 @@
 #include <share.h>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -76,14 +78,28 @@ void CopyToBuf(const std::string &s, char *buf, int cap) {
 }
 
 void EnsureGdiPlus() {
+  static std::once_flag once;
   static ULONG_PTR token = 0;
-  static bool initialized = false;
-  if (!initialized) {
+  std::call_once(once, []() {
     Gdiplus::GdiplusStartupInput input;
-    if (Gdiplus::GdiplusStartup(&token, &input, nullptr) == Gdiplus::Ok) {
-      initialized = true;
-    }
+    Gdiplus::GdiplusStartup(&token, &input, nullptr);
+  });
+}
+
+template <typename Fn>
+void RunInSTA(Fn &&fn) {
+  HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  if (hrInit == RPC_E_CHANGED_MODE) {
+    std::thread sta([&]() {
+      HRESULT hrSta = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+      fn();
+      if (SUCCEEDED(hrSta)) CoUninitialize();
+    });
+    sta.join();
+    return;
   }
+  fn();
+  if (SUCCEEDED(hrInit)) CoUninitialize();
 }
 
 bool GetPngClsid(CLSID *out_clsid) {
@@ -389,15 +405,19 @@ static Gdiplus::Bitmap *BitmapFromHBitmapPreservingAlpha(HBITMAP hbmp) {
     bmi.bmiHeader.biCompression = BI_RGB;
     std::vector<uint8_t> pixels((size_t)w * (size_t)h * 4);
     HDC hdc = GetDC(nullptr);
-    int scanlines = GetDIBits(hdc, hbmp, 0, (UINT)h, pixels.data(), &bmi, DIB_RGB_COLORS);
-    ReleaseDC(nullptr, hdc);
+    int scanlines = hdc ? GetDIBits(hdc, hbmp, 0, (UINT)h, pixels.data(), &bmi, DIB_RGB_COLORS) : 0;
+    if (hdc) ReleaseDC(nullptr, hdc);
     if (scanlines > 0) {
       bool any_alpha = false;
+      bool has_semi_alpha = false;
+      bool looks_premultiplied = true;
       if (bm.bmBitsPixel == 32) {
-        for (size_t i = 3; i < pixels.size(); i += 4) {
-          if (pixels[i] != 0) {
-            any_alpha = true;
-            break;
+        for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+          uint8_t a = pixels[i + 3];
+          if (a != 0) any_alpha = true;
+          if (a > 0 && a < 255) has_semi_alpha = true;
+          if (pixels[i] > a || pixels[i + 1] > a || pixels[i + 2] > a) {
+            looks_premultiplied = false;
           }
         }
       }
@@ -406,10 +426,14 @@ static Gdiplus::Bitmap *BitmapFromHBitmapPreservingAlpha(HBITMAP hbmp) {
           pixels[i] = 255;
         }
       }
-      auto *out = new Gdiplus::Bitmap(w, h, PixelFormat32bppARGB);
+      const Gdiplus::PixelFormat fmt =
+          (any_alpha && has_semi_alpha && looks_premultiplied)
+              ? PixelFormat32bppPARGB
+              : PixelFormat32bppARGB;
+      auto *out = new Gdiplus::Bitmap(w, h, fmt);
       Gdiplus::BitmapData bd{};
       Gdiplus::Rect rect(0, 0, w, h);
-      if (out->LockBits(&rect, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bd) == Gdiplus::Ok) {
+      if (out->LockBits(&rect, Gdiplus::ImageLockModeWrite, fmt, &bd) == Gdiplus::Ok) {
         for (int y = 0; y < h; ++y) {
           std::memcpy(
               static_cast<uint8_t *>(bd.Scan0) + y * bd.Stride,
@@ -928,69 +952,158 @@ uint8_t *cak_file_icon_png(const char *utf8_path, int size_px, size_t *out_len) 
   return png;
 }
 
-uint8_t *cak_shell_thumbnail_png(const char *utf8_path, int max_px, int *out_w, int *out_h, size_t *out_len) {
+static uint8_t *EncodeScaledBitmapToPng(
+    Gdiplus::Bitmap *bmp,
+    int max_w,
+    int max_h,
+    int *out_w,
+    int *out_h,
+    size_t *out_len
+) {
+  if (!bmp || bmp->GetLastStatus() != Gdiplus::Ok) return nullptr;
+  int bw = (int)bmp->GetWidth();
+  int bh = (int)bmp->GetHeight();
+  if (bw <= 0 || bh <= 0) return nullptr;
+
+  if (bw > max_w || bh > max_h) {
+    double scale = std::min((double)max_w / (double)bw, (double)max_h / (double)bh);
+    int nw = std::max(1, (int)std::lround((double)bw * scale));
+    int nh = std::max(1, (int)std::lround((double)bh * scale));
+    Gdiplus::Bitmap dst(nw, nh, PixelFormat32bppARGB);
+    {
+      Gdiplus::Graphics g(&dst);
+      g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+      g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+      g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+      g.DrawImage(bmp, 0, 0, nw, nh);
+    }
+    uint8_t *png = EncodeBitmapToPng(&dst, out_len);
+    if (png) {
+      if (out_w) *out_w = nw;
+      if (out_h) *out_h = nh;
+    }
+    return png;
+  }
+
+  uint8_t *png = EncodeBitmapToPng(bmp, out_len);
+  if (png) {
+    if (out_w) *out_w = bw;
+    if (out_h) *out_h = bh;
+  }
+  return png;
+}
+
+uint8_t *cak_shell_thumbnail_png_ex(
+    const char *utf8_path,
+    int max_w,
+    int max_h,
+    uint32_t mode_flags,
+    int *out_w,
+    int *out_h,
+    int *out_is_icon,
+    size_t *out_len
+) {
   if (out_w) *out_w = 0;
   if (out_h) *out_h = 0;
+  if (out_is_icon) *out_is_icon = 0;
   if (out_len) *out_len = 0;
+
+  const bool allow_icon = (mode_flags & 1u) != 0;
+  const bool allow_thumb = (mode_flags & 2u) != 0;
+  if (!utf8_path || !*utf8_path || max_w <= 0 || max_h <= 0 || (!allow_icon && !allow_thumb)) {
+    return nullptr;
+  }
+
   std::wstring w = ToWide(utf8_path);
-  if (w.empty() || max_px <= 0) return nullptr;
+  if (w.empty()) return nullptr;
   for (auto &ch : w) {
     if (ch == L'/') ch = L'\\';
   }
   if (w.size() >= 3 && w[0] == L'\\' && iswalpha(w[1]) && w[2] == L':') {
     w.erase(0, 1);
   }
-  HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  DWORD attrs = GetFileAttributesW(w.c_str());
+  if (attrs == INVALID_FILE_ATTRIBUTES) {
+    return nullptr;
+  }
+  const bool is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+  wchar_t full_buf[MAX_PATH * 4] = {};
+  std::wstring full_path = _wfullpath(full_buf, w.c_str(), MAX_PATH * 4) ? std::wstring(full_buf) : w;
+
+  EnsureGdiPlus();
   uint8_t *png = nullptr;
-  IShellItemImageFactory *factory = nullptr;
-  if (SUCCEEDED(SHCreateItemFromParsingName(w.c_str(), nullptr, IID_PPV_ARGS(&factory))) && factory) {
-    SIZE req{max_px, max_px};
-    HBITMAP hbmp = nullptr;
-    if (SUCCEEDED(factory->GetImage(req, SIIGBF_BIGGERSIZEOK, &hbmp)) && hbmp) {
-      Gdiplus::Bitmap *bmp = BitmapFromHBitmapPreservingAlpha(hbmp);
-      if (bmp && bmp->GetWidth() > 0 && bmp->GetHeight() > 0) {
-        int bw = (int)bmp->GetWidth();
-        int bh = (int)bmp->GetHeight();
-        if (bw > max_px || bh > max_px) {
-          double scale = (double)max_px / (double)std::max(bw, bh);
-          int nw = std::max(1, (int)(bw * scale + 0.5));
-          int nh = std::max(1, (int)(bh * scale + 0.5));
-          Gdiplus::Bitmap dst(nw, nh, PixelFormat32bppARGB);
-          {
-            Gdiplus::Graphics g(&dst);
-            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-            g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
-            g.DrawImage(bmp, 0, 0, nw, nh);
-          }
-          png = EncodeBitmapToPng(&dst, out_len);
+  int resolved_w = 0;
+  int resolved_h = 0;
+  int resolved_is_icon = 0;
+  size_t resolved_len = 0;
+
+  RunInSTA([&]() {
+    IShellItemImageFactory *factory = nullptr;
+    const bool has_factory =
+        SUCCEEDED(SHCreateItemFromParsingName(full_path.c_str(), nullptr, IID_PPV_ARGS(&factory))) &&
+        factory != nullptr;
+
+    auto try_factory = [&](SIIGBF flags, int is_icon_flag) -> bool {
+      if (!has_factory) return false;
+      SIZE req{max_w, max_h};
+      HBITMAP hbmp = nullptr;
+      if (SUCCEEDED(factory->GetImage(req, flags, &hbmp)) && hbmp) {
+        Gdiplus::Bitmap *bmp = BitmapFromHBitmapPreservingAlpha(hbmp);
+        DeleteObject(hbmp);
+        if (bmp) {
+          png = EncodeScaledBitmapToPng(bmp, max_w, max_h, &resolved_w, &resolved_h, &resolved_len);
+          delete bmp;
           if (png) {
-            if (out_w) *out_w = nw;
-            if (out_h) *out_h = nh;
-          }
-        } else {
-          png = EncodeBitmapToPng(bmp, out_len);
-          if (png) {
-            if (out_w) *out_w = bw;
-            if (out_h) *out_h = bh;
+            resolved_is_icon = is_icon_flag;
+            return true;
           }
         }
       }
-      delete bmp;
-      DeleteObject(hbmp);
-    }
-    factory->Release();
-  }
-  if (SUCCEEDED(hrInit)) CoUninitialize();
-  if (png) return png;
+      return false;
+    };
 
-  png = cak_file_icon_png(utf8_path, max_px, out_len);
-  if (png && out_len && *out_len > 0) {
-    int iw = 32, ih = 32;
-    cak_image_dimensions(png, *out_len, &iw, &ih);
-    if (out_w) *out_w = iw;
-    if (out_h) *out_h = ih;
+    if (allow_thumb) {
+      if (!try_factory(SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK, 0) && !is_dir) {
+        // Fallback for raster image files when Shell thumbnail extraction is unavailable.
+        Gdiplus::Bitmap direct(full_path.c_str());
+        if (direct.GetLastStatus() == Gdiplus::Ok && direct.GetWidth() > 0 && direct.GetHeight() > 0) {
+          png = EncodeScaledBitmapToPng(&direct, max_w, max_h, &resolved_w, &resolved_h, &resolved_len);
+          if (png) resolved_is_icon = 0;
+        }
+      }
+    }
+
+    if (!png && allow_icon) {
+      if (!try_factory(SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, 1)) {
+        SHFILEINFOW sfi{};
+        UINT sfi_flags = SHGFI_ICON | (std::max(max_w, max_h) > 20 ? SHGFI_LARGEICON : SHGFI_SMALLICON);
+        if (SHGetFileInfoW(full_path.c_str(), attrs, &sfi, sizeof(sfi), sfi_flags) && sfi.hIcon) {
+          Gdiplus::Bitmap *bmp = BitmapFromHIconWithAlpha(sfi.hIcon);
+          DestroyIcon(sfi.hIcon);
+          if (bmp) {
+            png = EncodeScaledBitmapToPng(bmp, max_w, max_h, &resolved_w, &resolved_h, &resolved_len);
+            delete bmp;
+            if (png) resolved_is_icon = 1;
+          }
+        }
+      }
+    }
+
+    if (factory) factory->Release();
+  });
+
+  if (png) {
+    if (out_w) *out_w = resolved_w;
+    if (out_h) *out_h = resolved_h;
+    if (out_is_icon) *out_is_icon = resolved_is_icon;
+    if (out_len) *out_len = resolved_len;
   }
   return png;
+}
+
+uint8_t *cak_shell_thumbnail_png(const char *utf8_path, int max_px, int *out_w, int *out_h, size_t *out_len) {
+  return cak_shell_thumbnail_png_ex(utf8_path, max_px, max_px, 3u, out_w, out_h, nullptr, out_len);
 }
 
 int cak_resolve_lnk(
@@ -1269,6 +1382,68 @@ void cak_window_apply_frameless(void *hwnd_ptr, int is_frameless) {
           SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOCOPYBITS);
 }
 
+void cak_window_frame_insets(
+    void *hwnd_ptr,
+    uint32_t style_mask,
+    double dpi_scale,
+    double *out_left,
+    double *out_top,
+    double *out_right,
+    double *out_bottom
+) {
+  if (out_left) *out_left = 0.0;
+  if (out_top) *out_top = 0.0;
+  if (out_right) *out_right = 0.0;
+  if (out_bottom) *out_bottom = 0.0;
+
+  const bool is_titled = (style_mask & 1u) != 0;
+  if (!is_titled) return;
+
+  HWND hwnd = static_cast<HWND>(hwnd_ptr);
+  double scale = dpi_scale > 0.0 ? dpi_scale : 1.0;
+  if (hwnd && IsWindow(hwnd)) {
+    UINT win_dpi = GetDpiForWindow(hwnd);
+    if (win_dpi > 0) {
+      scale = static_cast<double>(win_dpi) / 96.0;
+    }
+    if (!IsIconic(hwnd)) {
+      LONG_PTR win_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+      if ((win_style & WS_CAPTION) != 0) {
+        RECT wr{}, cr{};
+        POINT client_origin{0, 0};
+        if (GetWindowRect(hwnd, &wr) && GetClientRect(hwnd, &cr) &&
+            ClientToScreen(hwnd, &client_origin)) {
+          const int left_px = client_origin.x - wr.left;
+          const int top_px = client_origin.y - wr.top;
+          const int right_px = wr.right - (client_origin.x + cr.right);
+          const int bottom_px = wr.bottom - (client_origin.y + cr.bottom);
+          if (left_px >= 0 && top_px >= 0 && right_px >= 0 && bottom_px >= 0 &&
+              (left_px > 0 || top_px > 0 || right_px > 0 || bottom_px > 0)) {
+            if (out_left) *out_left = static_cast<double>(left_px) / scale;
+            if (out_top) *out_top = static_cast<double>(top_px) / scale;
+            if (out_right) *out_right = static_cast<double>(right_px) / scale;
+            if (out_bottom) *out_bottom = static_cast<double>(bottom_px) / scale;
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+  if ((style_mask & (1u << 2)) != 0) style |= WS_MINIMIZEBOX;
+  if ((style_mask & (1u << 3)) != 0) style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
+  DWORD ex_style = WS_EX_WINDOWEDGE;
+  RECT r{0, 0, 200, 200};
+  UINT dpi = static_cast<UINT>(std::max<long>(96L, std::lround(scale * 96.0)));
+  if (AdjustWindowRectExForDpi(&r, style, FALSE, ex_style, dpi)) {
+    if (out_left) *out_left = static_cast<double>(-r.left) / scale;
+    if (out_top) *out_top = static_cast<double>(-r.top) / scale;
+    if (out_right) *out_right = static_cast<double>(r.right - 200) / scale;
+    if (out_bottom) *out_bottom = static_cast<double>(r.bottom - 200) / scale;
+  }
+}
+
 uint32_t cak_modifier_flags(void) {
   uint32_t flags = 0;
   if (GetAsyncKeyState(VK_SHIFT) & 0x8000) flags |= (1u << 17);   // .shift
@@ -1277,6 +1452,105 @@ uint32_t cak_modifier_flags(void) {
   if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) flags |= (1u << 20); // .command
   if (GetKeyState(VK_CAPITAL) & 0x0001) flags |= (1u << 16);      // .capsLock
   return flags;
+}
+
+uint64_t cak_current_keyboard_layout(void) {
+  return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(GetKeyboardLayout(0)));
+}
+
+uint32_t cak_map_vk_to_scancode(uint32_t vk, uint64_t hkl) {
+  HKL layout = hkl != 0 ? reinterpret_cast<HKL>(static_cast<uintptr_t>(hkl)) : GetKeyboardLayout(0);
+  UINT sc = MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC_EX, layout);
+  if (sc == 0) sc = MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, layout);
+  return static_cast<uint32_t>(sc);
+}
+
+uint32_t cak_map_scancode_to_vk(uint32_t scan_code, uint64_t hkl) {
+  HKL layout = hkl != 0 ? reinterpret_cast<HKL>(static_cast<uintptr_t>(hkl)) : GetKeyboardLayout(0);
+  UINT vk = MapVirtualKeyExW(scan_code, MAPVK_VSC_TO_VK_EX, layout);
+  if (vk == 0) vk = MapVirtualKeyExW(scan_code, MAPVK_VSC_TO_VK, layout);
+  return static_cast<uint32_t>(vk);
+}
+
+int cak_translate_vk_to_utf8(
+    uint32_t vk,
+    uint32_t scan_code,
+    uint32_t modifier_flags,
+    uint64_t hkl,
+    int ignore_mode,
+    char *out_buf,
+    int out_cap,
+    int *out_is_dead
+) {
+  if (out_buf && out_cap > 0) out_buf[0] = '\0';
+  if (out_is_dead) *out_is_dead = 0;
+  if (vk == 0 || vk > 0xFFu) return 0;
+
+  HKL layout = hkl != 0 ? reinterpret_cast<HKL>(static_cast<uintptr_t>(hkl)) : GetKeyboardLayout(0);
+  UINT sc = scan_code;
+  if (sc == 0) {
+    sc = MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC_EX, layout);
+    if (sc == 0) sc = MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, layout);
+  }
+
+  BYTE key_state[256] = {};
+  const bool has_caps = (modifier_flags & (1u << 16)) != 0;
+  const bool has_shift = (modifier_flags & (1u << 17)) != 0;
+  const bool has_ctrl = (modifier_flags & (1u << 18)) != 0;
+  const bool has_alt = (modifier_flags & (1u << 19)) != 0;
+
+  if (ignore_mode == 0) {
+    if (has_shift) {
+      key_state[VK_SHIFT] = 0x80;
+      key_state[VK_LSHIFT] = 0x80;
+    }
+    if (has_caps) {
+      key_state[VK_CAPITAL] = 0x01;
+    }
+    if (has_ctrl) {
+      key_state[VK_CONTROL] = 0x80;
+      key_state[VK_LCONTROL] = 0x80;
+    }
+    if (has_alt) {
+      key_state[VK_MENU] = 0x80;
+      key_state[VK_LMENU] = 0x80;
+    }
+  } else if (ignore_mode == 1) {
+    // AppKit charactersIgnoringModifiers applies Shift only.
+    if (has_shift) {
+      key_state[VK_SHIFT] = 0x80;
+      key_state[VK_LSHIFT] = 0x80;
+    }
+  }
+
+  // Flag bit 2 (0x0004): do not modify thread keyboard / dead-key state (Win10 1607+).
+  constexpr UINT kNoStateChangeFlag = 0x0004u;
+  wchar_t wbuf[16] = {};
+  int res = ToUnicodeEx(vk, sc, key_state, wbuf, 16, kNoStateChangeFlag, layout);
+
+  // Bare Alt (without Ctrl/AltGr) returns 0 on Windows for normal keys; retry without VK_MENU
+  // so Option+key shortcuts still yield a meaningful character while preserving AltGr (Ctrl+Alt).
+  if (res == 0 && ignore_mode == 0 && has_alt && !has_ctrl) {
+    key_state[VK_MENU] = 0;
+    key_state[VK_LMENU] = 0;
+    res = ToUnicodeEx(vk, sc, key_state, wbuf, 16, kNoStateChangeFlag, layout);
+  }
+
+  if (res < 0) {
+    if (out_is_dead) *out_is_dead = 1;
+    if (wbuf[0] != L'\0') {
+      std::string utf8 = ToUtf8(std::wstring(1, wbuf[0]));
+      CopyToBuf(utf8, out_buf, out_cap);
+      return static_cast<int>(std::min<size_t>(utf8.size(), out_cap > 0 ? static_cast<size_t>(out_cap - 1) : 0));
+    }
+    return 0;
+  }
+  if (res == 0) return 0;
+
+  const int count = std::min(res, 16);
+  std::string utf8 = ToUtf8(std::wstring(wbuf, static_cast<size_t>(count)));
+  CopyToBuf(utf8, out_buf, out_cap);
+  return static_cast<int>(std::min<size_t>(utf8.size(), out_cap > 0 ? static_cast<size_t>(out_cap - 1) : 0));
 }
 
 void cak_set_cursor(int cursor_kind) {

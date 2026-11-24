@@ -29,8 +29,12 @@ open class NSMenuItem: NSObject {
   public weak var target: AnyObject?
   public var action: Selector?
   public var actionClosure: (() -> Void)?
-  public var keyEquivalent: String
-  public var keyEquivalentModifierMask: NSEvent.ModifierFlags = [.command]
+  public var keyEquivalent: String {
+    didSet { syncNativeAccelerator() }
+  }
+  public var keyEquivalentModifierMask: NSEvent.ModifierFlags = [.command] {
+    didSet { syncNativeAccelerator() }
+  }
   public var image: NSImage? {
     didSet {
       #if !os(macOS)
@@ -104,21 +108,29 @@ open class NSMenuItem: NSObject {
     self.init(title: "", action: nil, keyEquivalent: "")
   }
 
+  private func syncNativeAccelerator() {
+    #if !os(macOS) && !CROSS_SWIFTUI_HARMONY
+      guard let item = nativeItem, !keyEquivalent.isEmpty else { return }
+      var mods: NativeAPI.ModifierKey = []
+      if keyEquivalentModifierMask.contains(.command) { mods.insert(.ctrl) }
+      if keyEquivalentModifierMask.contains(.control) { mods.insert(.ctrl) }
+      if keyEquivalentModifierMask.contains(.shift) { mods.insert(.shift) }
+      if keyEquivalentModifierMask.contains(.option) { mods.insert(.alt) }
+      let lower = keyEquivalent.lowercased()
+      let upper = keyEquivalent.uppercased()
+      if lower != upper && keyEquivalent == upper {
+        mods.insert(.shift)
+      }
+      item.setAccelerator(NativeAPI.KeyboardAccelerator(modifiers: mods, key: upper))
+    #endif
+  }
+
   private func setupNativeItem(isSeparator: Bool) {
     #if !os(macOS)
       let kind: NativeAPI.MenuItemType = isSeparator ? .separator : .normal
       if let item = NativeAPI.MenuItem.createWithLabelAndType(title, type: kind) {
         self.nativeItem = item
-        #if !CROSS_SWIFTUI_HARMONY
-          if !keyEquivalent.isEmpty {
-            var mods: NativeAPI.ModifierKey = []
-            if keyEquivalentModifierMask.contains(.command) { mods.insert(.ctrl) }
-            if keyEquivalentModifierMask.contains(.control) { mods.insert(.ctrl) }
-            if keyEquivalentModifierMask.contains(.shift) { mods.insert(.shift) }
-            if keyEquivalentModifierMask.contains(.option) { mods.insert(.alt) }
-            item.setAccelerator(NativeAPI.KeyboardAccelerator(modifiers: mods, key: keyEquivalent.uppercased()))
-          }
-        #endif
+        syncNativeAccelerator()
         listenerId = item.addListener { [weak self] event in
           if case .itemClicked = event {
             #if CROSS_SWIFTUI_HARMONY
@@ -251,6 +263,23 @@ open class NSMenu: NSObject {
     #if !os(macOS)
       nativeMenu?.clear()
     #endif
+  }
+
+  open func performKeyEquivalent(with event: NSEvent) -> Bool {
+    guard event.type == .keyDown else { return false }
+    delegate?.menuNeedsUpdate(self)
+    for item in items where !item.isSeparatorItem && !item.isHidden {
+      if let sub = item.submenu, sub.performKeyEquivalent(with: event) {
+        return true
+      }
+      if item.isEnabled, !item.keyEquivalent.isEmpty,
+        event.matchesKeyEquivalent(item.keyEquivalent, modifierMask: item.keyEquivalentModifierMask)
+      {
+        item.invoke()
+        return true
+      }
+    }
+    return false
   }
 
   @discardableResult
@@ -569,6 +598,17 @@ open class NSSavePanel: NSPanel {
   open func runModal() -> NSModalResponse {
     #if !os(macOS)
       guard let dialog = NativeAPI.FileDialog.create(.saveFile) else { return .cancel }
+      let previousKey = NSApplication.shared.keyWindow
+      let previousModal = NSApplication.shared.modalWindow
+      NSApplication.shared.modalWindow = self
+      defer {
+        NSApplication.shared.modalWindow = previousModal
+        if let previousKey, previousKey !== self, previousKey.isVisible, previousKey.canBecomeKey,
+          NSApplication.shared.keyWindow == nil
+        {
+          previousKey.makeKey()
+        }
+      }
       Self._attachActiveParentWindow(dialog, excluding: self)
       if !nameFieldStringValue.isEmpty {
         _ = dialog.setSuggestedFileName(nameFieldStringValue)
@@ -618,6 +658,17 @@ open class NSOpenPanel: NSSavePanel {
         mode = .openFile
       }
       guard let dialog = NativeAPI.FileDialog.create(mode) else { return .cancel }
+      let previousKey = NSApplication.shared.keyWindow
+      let previousModal = NSApplication.shared.modalWindow
+      NSApplication.shared.modalWindow = self
+      defer {
+        NSApplication.shared.modalWindow = previousModal
+        if let previousKey, previousKey !== self, previousKey.isVisible, previousKey.canBecomeKey,
+          NSApplication.shared.keyWindow == nil
+        {
+          previousKey.makeKey()
+        }
+      }
       Self._attachActiveParentWindow(dialog, excluding: self)
       if mode != .selectFolder {
         let exts = Self._normalizeDialogExtensions(

@@ -611,8 +611,11 @@ open class NSWindow: NSResponder {
   public var isReleasedWhenClosed: Bool = false
   public var isRestorable: Bool = false
   public var hidesOnDeactivate: Bool = false
+  private var storedContentMinSize: NSSize?
+  private var storedContentMaxSize: NSSize?
   public var minSize: NSSize = .zero {
     didSet {
+      storedContentMinSize = nil
       #if !os(macOS)
         nativeWindow?.setMinimumSize(NativeAPI.Size(width: Double(minSize.width), height: Double(minSize.height)))
       #endif
@@ -620,18 +623,33 @@ open class NSWindow: NSResponder {
   }
   public var maxSize: NSSize = NSSize(width: 10000, height: 10000) {
     didSet {
+      storedContentMaxSize = nil
       #if !os(macOS)
         nativeWindow?.setMaximumSize(NativeAPI.Size(width: Double(maxSize.width), height: Double(maxSize.height)))
       #endif
     }
   }
   public var contentMinSize: NSSize {
-    get { minSize }
-    set { minSize = newValue }
+    get {
+      if let stored = storedContentMinSize { return stored }
+      return contentRect(forFrameRect: NSRect(origin: .zero, size: minSize)).size
+    }
+    set {
+      let frameMin = frameRect(forContentRect: NSRect(origin: .zero, size: newValue)).size
+      minSize = frameMin
+      storedContentMinSize = newValue
+    }
   }
   public var contentMaxSize: NSSize {
-    get { maxSize }
-    set { maxSize = newValue }
+    get {
+      if let stored = storedContentMaxSize { return stored }
+      return contentRect(forFrameRect: NSRect(origin: .zero, size: maxSize)).size
+    }
+    set {
+      let frameMax = frameRect(forContentRect: NSRect(origin: .zero, size: newValue)).size
+      maxSize = frameMax
+      storedContentMaxSize = newValue
+    }
   }
   public private(set) var isMiniaturized: Bool = false
 
@@ -698,6 +716,8 @@ open class NSWindow: NSResponder {
   private var hasPendingNativeBounds = false
   private var isCommittingNativeBounds = false
   private var pendingContentSize: NSSize = .zero
+  private weak var previousKeyWindow: NSWindow?
+  private var didNotifyWillClose = false
   #if os(Windows)
     private static let transparentEnvelopeBleed: Double = 6.0
     private var nativeEnvelopeTopLeft: (x: Double, y: Double, width: Double, height: Double)?
@@ -773,6 +793,78 @@ open class NSWindow: NSResponder {
     }
   }
 
+  internal static func _frameInsets(
+    forStyleMask style: StyleMask,
+    hwnd: UnsafeMutableRawPointer? = nil,
+    dpiScale: CGFloat? = nil
+  ) -> (left: CGFloat, top: CGFloat, right: CGFloat, bottom: CGFloat) {
+    guard style.contains(.titled) else { return (0, 0, 0, 0) }
+    #if os(Windows)
+      let scale = Double(max(1.0, dpiScale ?? NSScreen.main?.backingScaleFactor ?? 1.0))
+      var l: Double = 0
+      var t: Double = 0
+      var r: Double = 0
+      var b: Double = 0
+      cak_window_frame_insets(hwnd, UInt32(style.rawValue & 0xFFFFFFFF), scale, &l, &t, &r, &b)
+      return (CGFloat(l), CGFloat(t), CGFloat(r), CGFloat(b))
+    #else
+      return (0, 0, 0, 0)
+    #endif
+  }
+
+  open class func frameRect(forContentRect cRect: NSRect, styleMask style: StyleMask) -> NSRect {
+    let insets = _frameInsets(forStyleMask: style)
+    return NSRect(
+      x: cRect.origin.x - insets.left,
+      y: cRect.origin.y - insets.bottom,
+      width: cRect.width + insets.left + insets.right,
+      height: cRect.height + insets.top + insets.bottom
+    )
+  }
+
+  open class func contentRect(forFrameRect fRect: NSRect, styleMask style: StyleMask) -> NSRect {
+    let insets = _frameInsets(forStyleMask: style)
+    return NSRect(
+      x: fRect.origin.x + insets.left,
+      y: fRect.origin.y + insets.bottom,
+      width: max(0, fRect.width - insets.left - insets.right),
+      height: max(0, fRect.height - insets.top - insets.bottom)
+    )
+  }
+
+  private func currentFrameInsets() -> (left: CGFloat, top: CGFloat, right: CGFloat, bottom: CGFloat) {
+    #if os(Windows)
+      let scale = CGFloat(snappedWindowScale())
+      return Self._frameInsets(
+        forStyleMask: styleMask,
+        hwnd: nativeWindow?.nativeObject,
+        dpiScale: scale
+      )
+    #else
+      return (0, 0, 0, 0)
+    #endif
+  }
+
+  open func frameRect(forContentRect contentRect: NSRect) -> NSRect {
+    let insets = currentFrameInsets()
+    return NSRect(
+      x: contentRect.origin.x - insets.left,
+      y: contentRect.origin.y - insets.bottom,
+      width: contentRect.width + insets.left + insets.right,
+      height: contentRect.height + insets.top + insets.bottom
+    )
+  }
+
+  open func contentRect(forFrameRect frameRect: NSRect) -> NSRect {
+    let insets = currentFrameInsets()
+    return NSRect(
+      x: frameRect.origin.x + insets.left,
+      y: frameRect.origin.y + insets.bottom,
+      width: max(0, frameRect.width - insets.left - insets.right),
+      height: max(0, frameRect.height - insets.top - insets.bottom)
+    )
+  }
+
   public var contentLayoutRect: NSRect {
     if hasPendingNativeBounds && pendingContentSize.width > 0 && pendingContentSize.height > 0 {
       return NSRect(origin: .zero, size: pendingContentSize)
@@ -784,16 +876,31 @@ open class NSWindow: NSResponder {
         let h = max(1.0, (storedFrame.size.height * scale).rounded(.toNearestOrAwayFromZero)) / scale
         return NSRect(origin: .zero, size: NSSize(width: w, height: h))
       }
-    #endif
-    #if !os(macOS)
+      let insets = currentFrameInsets()
       if let nw = nativeWindow {
         let cs = nw.contentSize
         if cs.width > 0 && cs.height > 0 {
-          return NSRect(x: 0, y: 0, width: CGFloat(cs.width), height: CGFloat(cs.height))
+          return NSRect(
+            x: insets.left,
+            y: insets.bottom,
+            width: CGFloat(cs.width),
+            height: CGFloat(cs.height)
+          )
         }
       }
+      let content = contentRect(forFrameRect: storedFrame)
+      return NSRect(x: insets.left, y: insets.bottom, width: content.width, height: content.height)
+    #else
+      #if !os(macOS)
+        if let nw = nativeWindow {
+          let cs = nw.contentSize
+          if cs.width > 0 && cs.height > 0 {
+            return NSRect(x: 0, y: 0, width: CGFloat(cs.width), height: CGFloat(cs.height))
+          }
+        }
+      #endif
+      return NSRect(origin: .zero, size: storedFrame.size)
     #endif
-    return NSRect(origin: .zero, size: storedFrame.size)
   }
 
   public var screen: NSScreen? {
@@ -810,7 +917,8 @@ open class NSWindow: NSResponder {
     backing backingStoreType: NSBackingStoreType,
     defer flag: Bool
   ) {
-    self.storedFrame = contentRect
+    let initialFrame = Self.frameRect(forContentRect: contentRect, styleMask: style)
+    self.storedFrame = initialFrame
     self.styleMask = style
     Self.nextWindowNumber += 1
     self.windowNumber = Self.nextWindowNumber
@@ -821,7 +929,9 @@ open class NSWindow: NSResponder {
       if let nw = NativeAPI.Window.create() {
         self.nativeWindow = nw
         syncStyleToNative()
-        let top = CrossAppKitCoordinates.rectToNativeTopLeft(contentRect)
+        let actualFrame = self.frameRect(forContentRect: contentRect)
+        self.storedFrame = actualFrame
+        let top = CrossAppKitCoordinates.rectToNativeTopLeft(actualFrame)
         nw.setBounds(NativeAPI.Rectangle(x: top.x, y: top.y, width: top.width, height: top.height))
         nativeListenerId = nw.addListener { [weak self] event in
           nonisolated(unsafe) let boxSelf = self
@@ -995,11 +1105,20 @@ open class NSWindow: NSResponder {
           close()
         }
       case .closed:
+        let wasKey = isKeyWindow
+        let restoreTarget = wasKey ? preferredFocusRestorationTarget() : nil
         isVisible = false
-        isKeyWindow = false
-        let note = Notification(name: Self.willCloseNotification, object: self)
-        NotificationCenter.default.post(note)
-        delegate?.windowWillClose(note)
+        if isKeyWindow { resignKey() }
+        if isMainWindow { resignMain() }
+        if !didNotifyWillClose {
+          didNotifyWillClose = true
+          let note = Notification(name: Self.willCloseNotification, object: self)
+          NotificationCenter.default.post(note)
+          delegate?.windowWillClose(note)
+        }
+        if let target = restoreTarget {
+          target.makeKey()
+        }
       case .occlusionChanged:
         let note = Notification(name: Self.didChangeOcclusionStateNotification, object: self)
         NotificationCenter.default.post(note)
@@ -1254,7 +1373,8 @@ open class NSWindow: NSResponder {
         return
       }
     #endif
-    storedFrame.size = size
+    let frameSize = frameRect(forContentRect: NSRect(origin: .zero, size: size)).size
+    storedFrame.size = frameSize
     #if CROSS_SWIFTUI_HARMONY
       HarmonyWindowBridge.syncFrame(for: self)
     #elseif !os(macOS)
@@ -1277,8 +1397,23 @@ open class NSWindow: NSResponder {
     }
   }
 
+  private var shouldOrderFrontInactively: Bool {
+    if !canBecomeKey || styleMask.contains(.nonactivatingPanel) {
+      return true
+    }
+    if let panel = self as? NSPanel, panel.becomesKeyOnlyIfNeeded {
+      return true
+    }
+    return false
+  }
+
   open func makeKeyAndOrderFront(_ sender: Any?) {
     let wasVisible = isVisible
+    didNotifyWillClose = false
+    isMiniaturized = false
+    if canBecomeKey, let priorKey = NSApplication.shared.keyWindow, priorKey !== self, priorKey.isVisible {
+      previousKeyWindow = priorKey
+    }
     #if os(Windows)
       ensureTransparentEnvelopeBeforeShow()
     #endif
@@ -1287,7 +1422,9 @@ open class NSWindow: NSResponder {
       contentView?.layoutSubtreeIfNeeded()
       onDidOrderFront?()
       HarmonyWindowBridge.openOrShow(self, focus: canBecomeKey)
-      becomeKey()
+      if canBecomeKey {
+        becomeKey()
+      }
     #else
       #if !os(macOS)
         if canBecomeKey {
@@ -1302,7 +1439,11 @@ open class NSWindow: NSResponder {
           #endif
         }
         contentView?.layoutSubtreeIfNeeded()
-        nativeWindow?.show()
+        if canBecomeKey {
+          nativeWindow?.show()
+        } else {
+          nativeWindow?.showInactive()
+        }
         #if os(Windows)
           if !wasVisible {
             contentView?.flushNativeWindowPaint()
@@ -1310,7 +1451,9 @@ open class NSWindow: NSResponder {
         #endif
         if canBecomeKey { nativeWindow?.focus() }
       #endif
-      becomeKey()
+      if canBecomeKey {
+        becomeKey()
+      }
       onDidOrderFront?()
     #endif
     if let name = autosaveName { saveFrame(named: name) }
@@ -1318,6 +1461,9 @@ open class NSWindow: NSResponder {
 
   open func makeKey() {
     guard canBecomeKey else { return }
+    if let priorKey = NSApplication.shared.keyWindow, priorKey !== self, priorKey.isVisible {
+      previousKeyWindow = priorKey
+    }
     #if CROSS_SWIFTUI_HARMONY
       HarmonyWindowBridge.focusWindow(self)
     #elseif !os(macOS)
@@ -1326,8 +1472,14 @@ open class NSWindow: NSResponder {
     becomeKey()
   }
 
+  open func makeMain() {
+    guard canBecomeMain else { return }
+    becomeMain()
+  }
+
   open func orderFront(_ sender: Any?) {
     let wasVisible = isVisible
+    didNotifyWillClose = false
     #if os(Windows)
       ensureTransparentEnvelopeBeforeShow()
     #endif
@@ -1344,7 +1496,7 @@ open class NSWindow: NSResponder {
           }
         #endif
         contentView?.layoutSubtreeIfNeeded()
-        if styleMask.contains(.nonactivatingPanel) {
+        if shouldOrderFrontInactively {
           nativeWindow?.showInactive()
         } else {
           nativeWindow?.show()
@@ -1361,6 +1513,7 @@ open class NSWindow: NSResponder {
 
   open func orderFrontRegardless() {
     let wasVisible = isVisible
+    didNotifyWillClose = false
     #if os(Windows)
       ensureTransparentEnvelopeBeforeShow()
     #endif
@@ -1398,27 +1551,74 @@ open class NSWindow: NSResponder {
     #endif
   }
 
+  internal func preferredFocusRestorationTarget() -> NSWindow? {
+    if let p = parent, p !== self, p.isVisible, p.canBecomeKey {
+      return p
+    }
+    if let prev = previousKeyWindow, prev !== self, prev.isVisible, prev.canBecomeKey {
+      return prev
+    }
+    if let modal = NSApplication.shared.modalWindow, modal !== self, modal.isVisible, modal.canBecomeKey {
+      return modal
+    }
+    if let main = NSApplication.shared.windows.first(where: {
+      $0 !== self && $0.isVisible && $0.isMainWindow && $0.canBecomeKey
+    }) {
+      return main
+    }
+    if NSApplication.shared.isActive,
+      let other = NSApplication.shared.windows.last(where: {
+        $0 !== self && $0.isVisible && $0.canBecomeKey && !$0.styleMask.contains(.nonactivatingPanel)
+      })
+    {
+      return other
+    }
+    return nil
+  }
+
   open func orderOut(_ sender: Any?) {
+    let wasKey = isKeyWindow
+    let wasMain = isMainWindow
+    let restoreTarget = wasKey ? preferredFocusRestorationTarget() : nil
     isVisible = false
+    previousKeyWindow = nil
     #if os(Windows)
       nativeEnvelopeTopLeft = nil
       nativeContentOffset = .zero
-      if let hwnd = nativeWindow?.nativeObject {
-        cak_window_relinquish_focus(hwnd)
-      }
     #endif
-    if isKeyWindow { resignKey() }
+    if wasKey {
+      resignKey()
+    }
+    if wasMain {
+      resignMain()
+    }
+    if wasKey && restoreTarget == nil {
+      #if !os(macOS) && !CROSS_SWIFTUI_HARMONY
+        nativeWindow?.blur()
+      #endif
+      #if os(Windows)
+        if let hwnd = nativeWindow?.nativeObject {
+          cak_window_relinquish_focus(hwnd)
+        }
+      #endif
+    }
     #if CROSS_SWIFTUI_HARMONY
       HarmonyWindowBridge.hideWindow(self)
     #elseif !os(macOS)
       nativeWindow?.hide()
     #endif
+    if let target = restoreTarget {
+      target.makeKey()
+    }
   }
 
   open func close() {
-    let note = Notification(name: Self.willCloseNotification, object: self)
-    NotificationCenter.default.post(note)
-    delegate?.windowWillClose(note)
+    if !didNotifyWillClose {
+      didNotifyWillClose = true
+      let note = Notification(name: Self.willCloseNotification, object: self)
+      NotificationCenter.default.post(note)
+      delegate?.windowWillClose(note)
+    }
     orderOut(nil)
     #if CROSS_SWIFTUI_HARMONY
       HarmonyWindowBridge.destroyWindowIfSecondary(self)
@@ -1455,11 +1655,21 @@ open class NSWindow: NSResponder {
 
   open func becomeKey() {
     guard canBecomeKey, !isKeyWindow else { return }
+    let existingKey = NSApplication.shared.windows.first { $0 !== self && $0.isKeyWindow }
+    if let existingKey, existingKey.isVisible {
+      previousKeyWindow = existingKey
+    } else if previousKeyWindow == nil,
+      let lastKey = NSApplication.shared.lastKeyWindow,
+      lastKey !== self,
+      lastKey.isVisible
+    {
+      previousKeyWindow = lastKey
+    }
     for other in NSApplication.shared.windows where other !== self && other.isKeyWindow {
       other.resignKey()
     }
     isKeyWindow = true
-    if canBecomeMain { isMainWindow = true }
+    if canBecomeMain { becomeMain() }
     let note = Notification(name: Self.didBecomeKeyNotification, object: self)
     NotificationCenter.default.post(note)
     delegate?.windowDidBecomeKey(note)
@@ -1468,9 +1678,33 @@ open class NSWindow: NSResponder {
   open func resignKey() {
     guard isKeyWindow else { return }
     isKeyWindow = false
+    if isVisible {
+      NSApplication.shared.lastKeyWindow = self
+    } else if NSApplication.shared.lastKeyWindow === self {
+      NSApplication.shared.lastKeyWindow = nil
+    }
     let note = Notification(name: Self.didResignKeyNotification, object: self)
     NotificationCenter.default.post(note)
     delegate?.windowDidResignKey(note)
+  }
+
+  open func becomeMain() {
+    guard canBecomeMain, !isMainWindow else { return }
+    for other in NSApplication.shared.windows where other !== self && other.isMainWindow {
+      other.resignMain()
+    }
+    isMainWindow = true
+    let note = Notification(name: Self.didBecomeMainNotification, object: self)
+    NotificationCenter.default.post(note)
+    delegate?.windowDidBecomeMain(note)
+  }
+
+  open func resignMain() {
+    guard isMainWindow else { return }
+    isMainWindow = false
+    let note = Notification(name: Self.didResignMainNotification, object: self)
+    NotificationCenter.default.post(note)
+    delegate?.windowDidResignMain(note)
   }
 
   @discardableResult
@@ -1513,6 +1747,13 @@ open class NSWindow: NSResponder {
   public var _eventReachedBaseSendEvent: Bool = false
   public var _suppressLocalMonitorInSendEvent: Bool = false
 
+  open override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    if contentView?.performKeyEquivalent(with: event) == true {
+      return true
+    }
+    return false
+  }
+
   open func sendEvent(_ event: NSEvent) {
     _eventReachedBaseSendEvent = true
     let routed: NSEvent
@@ -1523,7 +1764,14 @@ open class NSWindow: NSResponder {
       routed = r
     }
     switch routed.type {
-    case .keyDown: firstResponder?.keyDown(with: routed)
+    case .keyDown:
+      if !routed.modifierFlags.isDisjoint(with: [.command, .control])
+        || routed.charactersIgnoringModifiers == "\u{1B}"
+      {
+        if performKeyEquivalent(with: routed) { return }
+        if NSApplication.shared.mainMenu?.performKeyEquivalent(with: routed) == true { return }
+      }
+      firstResponder?.keyDown(with: routed)
     case .keyUp: firstResponder?.keyUp(with: routed)
     case .flagsChanged: firstResponder?.flagsChanged(with: routed)
     case .leftMouseDown: contentView?.mouseDown(with: routed)
@@ -1702,6 +1950,8 @@ open class NSPanel: NSWindow {
   }
   public var becomesKeyOnlyIfNeeded: Bool = false
   public var worksWhenModal: Bool = false
+
+  open override var canBecomeMain: Bool { false }
 }
 
 open class NSWindowController: NSResponder {
