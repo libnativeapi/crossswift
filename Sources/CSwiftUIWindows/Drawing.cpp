@@ -417,6 +417,14 @@ void PositionWindowShadow(Surface *s) {
         s->shadow_layer, root_topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
   }
+  HWND root_owner = GetWindow(s->shadow_root, GW_OWNER);
+  if (root_owner == s->shadow_layer || root_owner == s->shadow_root) {
+    root_owner = nullptr;
+  }
+  if (GetWindow(s->shadow_layer, GW_OWNER) != root_owner) {
+    SetWindowLongPtrW(
+        s->shadow_layer, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(root_owner));
+  }
   RECT rect{};
   if (!GetWindowRect(s->shadow_root, &rect)) return;
   if ((rect.right - rect.left) != s->shadow_width ||
@@ -560,10 +568,12 @@ bool EnsureShadowLayerWindow(Surface *s, HWND root) {
       return RegisterClassW(&wc);
     }();
     (void)cls_atom;
+    HWND root_owner = GetWindow(root, GW_OWNER);
+    if (root_owner == root) root_owner = nullptr;
     s->shadow_layer = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         L"CrossSwiftUIShadowLayer", L"", WS_POPUP,
-        0, 0, 0, 0, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        0, 0, 0, 0, root_owner, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!s->shadow_layer) return false;
     s->shadow_root = root;
     EnsureRootHook(s, root);
@@ -5156,7 +5166,11 @@ void sui_popup_configure(void *popup_ptr, void *owner_ptr,
     SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
   }
 
-  DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
+  // Disable DWM non-client frame rendering so Windows 11 never draws a sharp
+  // rectangular outer border or rectangular DWM shadow around the rounded popup
+  // or popover arrow beak; per-pixel alpha comes from DwmExtendFrameIntoClientArea
+  // and the soft contour shadow comes from CrossSwiftUIShadowLayer.
+  DWMNCRENDERINGPOLICY policy = DWMNCRP_DISABLED;
   DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
   COLORREF none_border = 0xFFFFFFFEu;
   DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */, &none_border, sizeof(none_border));
@@ -5174,6 +5188,8 @@ void sui_popup_configure(void *popup_ptr, void *owner_ptr,
       hwnd, nullptr, 0, 0, 0, 0,
       SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
           SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOCOPYBITS);
+  MARGINS margins{-1, -1, -1, -1};
+  DwmExtendFrameIntoClientArea(hwnd, &margins);
 }
 
 void sui_popup_unconfigure(void *popup_ptr) {

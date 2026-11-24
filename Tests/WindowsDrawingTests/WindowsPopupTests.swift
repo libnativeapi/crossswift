@@ -858,5 +858,74 @@
         &quitMsg, nil, UINT(WM_QUIT), UINT(WM_QUIT), UINT(PM_REMOVE))
       #expect(!receivedQuit, "Dismissing a popup must not post WM_QUIT to the app message loop")
     }
+
+    @Test("Popup disables DWM non-client frame and keeps owned shadow layer directly behind popup")
+    func popupDisablesDwmFrameAndOwnsShadowLayer() throws {
+      final class Model: ObservableObject {
+        @Published var open = false
+      }
+      struct MenuHost: SwiftUIRuntime.View {
+        @ObservedObject var model: Model
+        var body: some SwiftUIRuntime.View {
+          SwiftUIRuntime.Menu("Menu") {
+            SwiftUIRuntime.Button("First Item") {}
+            SwiftUIRuntime.Button("Second Item") {}
+          }
+          .padding(16)
+          .frame(width: 240, height: 140)
+        }
+      }
+
+      WindowsDrawingBackend.prepareApplication()
+      _ = NativeAPI.Application.shared.isRunning()
+      let window = try #require(NativeAPI.Window.create())
+      defer { _ = window.close() }
+      window.setBounds(NativeAPI.Rectangle(x: 260, y: 200, width: 240, height: 140))
+      window.show()
+      pump_pending_win32_messages()
+
+      let backend = try #require(WindowsDrawingBackend(window: window))
+      let model = Model()
+      let renderer = Renderer(
+        backend: backend,
+        root: AnyView(MenuHost(model: model)),
+        size: .init(width: 240, height: 140)
+      )
+      renderer.mount()
+
+      let rootTree = try #require(renderer.tree)
+      let trigger = try #require(findNode(in: rootTree) {
+        $0.kind == .button || $0.kind == .styledButton
+      })
+      backend.activate(trigger.id)
+      pump_pending_win32_messages()
+
+      let popup = try #require(backend.activePopupSnapshots.first)
+      let popupHwnd = HWND(bitPattern: Int(bitPattern: popup.hwnd))
+      let hostRootPtr = try #require(backend.rootHwnd)
+      let hostHwnd = HWND(bitPattern: Int(bitPattern: hostRootPtr))
+
+      // DWM non-client frame rendering must be disabled so Windows 11 never draws a sharp
+      // rectangular border or rectangular DWM shadow around the rounded menu/popover.
+      var ncEnabled = WindowsBool(true)
+      let hr = DwmGetWindowAttribute(
+        popupHwnd, DWORD(DWMWA_NCRENDERING_ENABLED.rawValue),
+        &ncEnabled, DWORD(MemoryLayout<WindowsBool>.size))
+      #expect(hr == S_OK)
+      #expect(!ncEnabled.boolValue, "Popup HWND must have DWM non-client rendering disabled")
+
+      // Custom soft shadow layer must exist directly behind the popup and share the host owner
+      // so Windows Z-order never drops the shadow behind the owner window.
+      let nextHwnd = GetWindow(popupHwnd, UINT(GW_HWNDNEXT))
+      #expect(nextHwnd != nil, "Expected CrossSwiftUIShadowLayer directly behind popup")
+      if let nextHwnd {
+        var classBuf = [WCHAR](repeating: 0, count: 64)
+        let len = GetClassNameW(nextHwnd, &classBuf, 64)
+        let className = String(decoding: classBuf.prefix(Int(len)), as: UTF16.self)
+        #expect(className == "CrossSwiftUIShadowLayer")
+        #expect(IsWindowVisible(nextHwnd))
+        #expect(GetWindow(nextHwnd, UINT(GW_OWNER)) == hostHwnd)
+      }
+    }
   }
 #endif

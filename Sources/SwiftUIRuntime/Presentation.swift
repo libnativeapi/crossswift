@@ -584,19 +584,24 @@ package func makePopoverBubbleElement(
     ? Color(red: 0.165, green: 0.168, blue: 0.185, opacity: 0.98)
     : Color(red: 0.992, green: 0.992, blue: 0.996, opacity: 0.98)
   let borderStroke = isDark ? Color.white.opacity(0.16) : Color.black.opacity(0.14)
+  // Inset by half the stroke width so the centered 1pt border and arrow beak tip
+  // remain fully inside the popup window bounds without edge clipping.
+  let strokeInset = 0.5
   let body = CGRect(
-    x: placement.bodyRectInChrome.minX,
-    y: placement.bodyRectInChrome.minY,
-    width: placement.bodyRectInChrome.width,
-    height: placement.bodyRectInChrome.height
+    x: placement.bodyRectInChrome.minX + strokeInset,
+    y: placement.bodyRectInChrome.minY + strokeInset,
+    width: max(1.0, placement.bodyRectInChrome.width - strokeInset * 2.0),
+    height: max(1.0, placement.bodyRectInChrome.height - strokeInset * 2.0)
   )
+  let insetArrowCenter = max(0.0, placement.arrowCenter - strokeInset)
+  let insetArrowHeight = max(1.0, metrics.arrowHeight - strokeInset)
   var bubbleProps = NodeProps()
   bubbleProps.path = makeMacOSPopoverPath(
     bodyRect: body,
     edge: placement.resolvedEdge,
-    arrowCenter: placement.arrowCenter,
-    cornerRadius: metrics.cornerRadius,
-    arrowHeight: metrics.arrowHeight,
+    arrowCenter: insetArrowCenter,
+    cornerRadius: max(0.0, metrics.cornerRadius - strokeInset),
+    arrowHeight: insetArrowHeight,
     arrowWidth: metrics.arrowWidth
   )
   bubbleProps.background = surfaceFill

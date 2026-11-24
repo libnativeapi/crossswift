@@ -416,6 +416,7 @@
       sui_popup_configure(
         popupHwnd, parentHwnd, nil, isDark ? 1 : 0,
         Self.popupEventTrampoline, Unmanaged.passUnretained(self).toOpaque())
+      popupWindow.setBackgroundColor(NativeAPI.Color(r: 0, g: 0, b: 0, a: 0))
       sui_popup_set_bounds_px(
         popupHwnd, parentHwnd, boundsPx.x, boundsPx.y, boundsPx.w, boundsPx.h, 0, 0)
 
@@ -682,10 +683,9 @@
       let dy = placement.contentRect.minY - contentElement.frame.minY
       var contentCopy = translatedPopupElement(contentElement, dx: dx, dy: dy)
 
-      if !meta.drawsPopoverChrome {
-        // Outer drop shadow is rendered by the popup's window shadow layer so it is never clipped.
-        contentCopy.props.shadows = []
-      }
+      // Strip outer card shadows that would otherwise clip at the popup window edge
+      // and distort the alpha silhouette used by CrossSwiftUIShadowLayer.
+      Self.stripOuterPopupShadows(&contentCopy, targetSize: placement.contentRect.size)
 
       var children: [Element] = []
       if meta.drawsPopoverChrome {
@@ -704,6 +704,25 @@
         children: children,
         frame: Rect(origin: .zero, size: placement.windowRect.size)
       )
+    }
+
+    private static func stripOuterPopupShadows(_ node: inout Element, targetSize: SwiftUIRuntime.Size) {
+      let matchesOuter =
+        abs(node.frame.width - targetSize.width) <= 1.0
+        && abs(node.frame.height - targetSize.height) <= 1.0
+      if matchesOuter {
+        node.props.shadows = []
+      }
+      if node.kind == .fragment || node.kind == .layer || node.kind == .zStack {
+        for i in node.children.indices {
+          let child = node.children[i]
+          if abs(child.frame.width - targetSize.width) <= 1.0
+            && abs(child.frame.height - targetSize.height) <= 1.0
+          {
+            stripOuterPopupShadows(&node.children[i], targetSize: targetSize)
+          }
+        }
+      }
     }
 
     private func handlePopupEvent(event: Int32, otherHwnd: UnsafeMutableRawPointer?) {
