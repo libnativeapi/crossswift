@@ -98,7 +98,7 @@ applications compile against Apple's native SDKs, while `SwiftUIRuntime`,
 | `Slider` | partial | continuous or stepped value dragging; native slider on mobile hosts |
 | `Stepper` | partial | increment/decrement buttons or value binding |
 | `Picker` | partial | `segmented`, `menu`, `inline`, and `radioGroup` styles |
-| `Menu` | partial | anchored dropdown popup (`_menuPopover`) on desktop; native/styled menu on mobile |
+| `Menu` | partial | anchored dropdown popup (`_menuPopover`) in owned native popup windows on Windows and root-layer overlays on Linux/web; native/styled menu on mobile |
 | `ProgressView` | partial | determinate linear bar and indeterminate spinner |
 | `ControlGroup` | partial | grouped horizontal control container |
 | `Form`, `Section` | partial | grouped and columns form layouts with headers and footers |
@@ -141,12 +141,12 @@ applications compile against Apple's native SDKs, while `SwiftUIRuntime`,
 | `.onChange` | partial | `Equatable` value comparison after rendering |
 | `.task` | partial | cancellable main-actor task, restarted by `id` |
 | `.gesture`, `.highPriorityGesture`, `.simultaneousGesture` | partial | `DragGesture`, `TapGesture`, `SpatialTapGesture`, timed `LongPressGesture`, and priority/simultaneous arbitration |
-| `.onKeyPress` | partial | native key routing and ancestor handlers; limited character/layout mapping |
+| `.onKeyPress` | partial | native key routing and ancestor handlers; dead-key-safe `ToUnicodeEx` / `MapVirtualKeyExW` layout mapping on Windows, basic mapping on Linux |
 | `.keyboardShortcut` | partial | scoped key actions; Command shortcuts also accept Control on Windows/Linux |
-| `.popover` | partial | root-layer presentation with beak chrome, 4-edge flipping, outside/Escape dismissal, and `presentationBackgroundInteraction` |
+| `.popover` | partial | owned native popup windows on Windows (clamped/flipped to monitor work area) and root-layer presentation on Linux/web, with beak chrome, 4-edge flipping, outside/Escape dismissal, and `presentationBackgroundInteraction` |
 | `.sheet` | partial | modal card presentation on desktop/web; bottom sheet on mobile hosts |
 | `.confirmationDialog` | partial | modal action sheet with destructive/cancel roles |
-| `.contextMenu` | partial | secondary-click root-layer menu, dismissed on selection |
+| `.contextMenu` | partial | secondary-click menu in owned native popup windows on Windows and root-layer overlay on Linux/web, dismissed on selection |
 | `withAnimation` | partial | marks synchronous state updates for property, color, transition, and layout interpolation |
 | `.transition` | partial | animated insertion and removal transitions (`.opacity`, `.scale`, `.slide`, `.move`, `.push`, `.offset`, `.combined`, `.asymmetric`) |
 | `.accessibilityLabel`, `.accessibilityValue` | partial | native control names, descriptions, and roles (Windows `BUTTON`/`EDIT` + Linux ATK); decorative nodes retain metadata without a full custom accessibility tree |
@@ -186,6 +186,8 @@ applications compile against Apple's native SDKs, while `SwiftUIRuntime`,
 | `UITraitCollection`, `UIColor`, `UIFont`, `UIFontMetrics` | supported | dynamic light/dark trait providers, `.xcassets` `.colorset` lookup, iOS semantic palette, and Dynamic Type scaling |
 | `UIImage`, `UIGraphicsImageRenderer`, `UIBezierPath` | partial | SF Symbols, `.imageset` lookup, tinting, and offscreen vector/text PNG rendering |
 | `UIPasteboard`, `UIScreen`, `UIDevice` | partial | host clipboard read/write, `NativeAPI.DisplayManager` screen metrics, and system telemetry |
+| `JSContext`, `JSValue`, `JSVirtualMachine` | partial | QuickJS-ng backed `JavaScriptCore` engine on Windows/Linux with script evaluation, `sourceURL`, exceptions, Promise microtask draining, and Swift/JS value & closure bridging |
+| `QLThumbnailGenerator` | partial | STA-safe Win32 `IShellItemImageFactory` file/icon thumbnail generation on Windows (`QuickLookThumbnailing`) |
 
 ## Not implemented
 

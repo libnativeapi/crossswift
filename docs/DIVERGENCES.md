@@ -111,8 +111,11 @@ remains incomplete.
 inner `.disabled(false)` can re-enable content. Dragging, timed
 `LongPressGesture` (with duration and maximum-distance cancellation), hovering,
 and `.highPriorityGesture` / `.simultaneousGesture` arbitration are handled in
-the runtime; controls bubble key/focus callbacks to ancestors. Full keyboard
-layout-to-character mapping remains incomplete.
+the runtime; controls bubble key/focus callbacks to ancestors. On Windows,
+`CrossAppKit` and `NSHostingView` use dead-key-safe `ToUnicodeEx` (`0x0004`) and
+`MapVirtualKeyExW` for active keyboard layout translation and AppKit
+key-equivalent matching; full keyboard layout-to-character mapping on Linux
+remains incomplete.
 
 `StateRegistry` is process-wide, while `@State`, `@SceneStorage`, and
 `.onAppear` / `.onDisappear` / `.task` lifecycles are isolated per `Renderer`
@@ -129,11 +132,15 @@ interactive frame rates.
 
 Presentations (`.popover`, `.sheet`, `.confirmationDialog`, `.alert`,
 `.contextMenu`, and `Menu` dropdowns) hoist above scroll clipping on desktop and
-web, flip `.popover` edges within window bounds, and dismiss on backdrop press
-or Escape. On desktop they render inside the window surface rather than spawning
-separate OS windows (except `MenuBarExtra` status items/popovers, declarative
-`Window`/`Settings` scenes, and explicit `CrossAppKit` `NSWindow` / `NSPanel`
-instances).
+web and dismiss on outside click or Escape. On Windows, anchored popups
+(`.popover`, `Menu` dropdowns, and `.contextMenu`) are hosted in borderless
+transparent owned top-level Win32 tool windows so they can extend beyond compact
+host window bounds, clamp and flip against monitor work areas, and support
+nested popup stacks, while modal presentations (`.sheet`, `.alert`, and
+`.confirmationDialog`) stay in-window. On Linux and web, presentations render
+inside the host window surface (except `MenuBarExtra` status items/popovers,
+declarative `Window`/`Settings` scenes, and explicit `CrossAppKit` `NSWindow` /
+`NSPanel` instances).
 
 ## Lifecycle, scenes and compatibility shims
 
@@ -165,4 +172,9 @@ post-composited pixels, while `.blur`, `.brightness`, and `.contrast` operate on
 offscreen composited pixels (desktop) or CSS/platform filters. `Security`
 Keychain APIs persist to Win32 Credential Manager on Windows and a user-only
 (`0600`) XDG keystore on Linux; `ServiceManagement` manages HKCU `Run` entries
-on Windows and XDG `~/.config/autostart` desktop files on Linux.
+on Windows and XDG `~/.config/autostart` desktop files on Linux. `JavaScriptCore`
+runs QuickJS-ng on Windows and Linux with `JSVirtualMachine`, `JSContext`,
+`JSValue`, Promise microtask draining, and Swift/JS value & closure bridging
+(without Apple Objective-C `JSExport` runtime reflection). `QuickLookThumbnailing`
+generates file and icon thumbnails via STA-safe `IShellItemImageFactory` on
+Windows.

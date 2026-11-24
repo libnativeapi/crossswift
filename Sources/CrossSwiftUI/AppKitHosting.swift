@@ -1095,17 +1095,13 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
 
     if event == 6 {
       // KeyDown: value is Win32 VK code
-      let carbonCode = NSEvent.carbonKeyCode(fromWin32VK: value)
-      let ch = Self.keyCharacter(forWin32VK: value)
-      let nsEv = NSEvent(
+      let nsEv = NSEvent.win32KeyEvent(
         type: .keyDown,
-        locationInWindow: appKitLoc,
+        vk: value,
         modifierFlags: flags,
+        location: appKitLoc,
         windowNumber: nsWin.windowNumber,
-        window: nsWin,
-        characters: ch,
-        charactersIgnoringModifiers: ch,
-        keyCode: carbonCode
+        window: nsWin
       )
       guard NSEvent.dispatchLocalMonitors(nsEv) != nil else {
         return true // Swallowed by local monitor (e.g., Paste monitor)!

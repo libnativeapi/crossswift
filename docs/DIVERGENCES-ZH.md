@@ -34,11 +34,11 @@ Windows 下由 DirectWrite 按逻辑点测量和绘制字体，完整支持 100�
 
 布局系统支持尺寸提案、嵌套 Frame/内边距/背景叠加层、堆栈主轴弹性、`Spacer.minLength`、`.layoutPriority(_:)`、`Grid`、滚动内容边界与自定义 `Layout` 协议（含主交叉轴弹性探测）。在 `ScrollView` 内，当 `ForEach` 数据量超过 72 项时，`LazyVStack`、`LazyHStack`、`LazyVGrid` 与 `LazyHGrid` 均会借助尺寸估算缓存执行视口窗口虚拟化；更小规模的集合即时求值以保留整数像素拷贝滚动快路径。跨混合原生控件的精确文本基线对齐尚未完整实现。
 
-`.hidden()` 会隐藏视觉绘制并禁用命中测试，同时保留布局空间；内层 `.disabled(false)` 可重新启用被祖先禁用的子树。拖拽、带时长与最大位移取消的定时 `LongPressGesture`、悬停及 `.highPriorityGesture` / `.simultaneousGesture` 优先级仲裁均由运行时统一处理，原生控件的键盘与焦点回调向祖先节点冒泡。完整的物理键盘布局字符映射仍不完整。
+`.hidden()` 会隐藏视觉绘制并禁用命中测试，同时保留布局空间；内层 `.disabled(false)` 可重新启用被祖先禁用的子树。拖拽、带时长与最大位移取消的定时 `LongPressGesture`、悬停及 `.highPriorityGesture` / `.simultaneousGesture` 优先级仲裁均由运行时统一处理，原生控件的键盘与焦点回调向祖先节点冒泡。在 Windows 上，`CrossAppKit` 与 `NSHostingView` 使用无死键副作用的 `ToUnicodeEx`（`0x0004`）与 `MapVirtualKeyExW` 实现当前键盘布局字符映射与 AppKit 快捷键匹配；Linux 端的完整物理键盘布局字符映射仍不完整。
 
 `StateRegistry` 为进程级单例，但 `@State`、`@SceneStorage` 及 `.onAppear` / `.onDisappear` / `.task` 生命周期均按每个 `Renderer` 根节点独立隔离（从而支持多窗口、`MenuBarExtra` 菜单/弹窗与多个 `NSHostingView` 并存）。`@AppStorage` 持久化至 `UserDefaults`，`@FocusedValue` / `@FocusedObject` 负责焦点值与对象传递。`@Observable`（`@Bindable`）与 `ObservableObject` 模型变更会通知所有观察该模型的渲染器刷新。运行时通过反射注入直接存储的属性包装器，而非完整复刻 Apple SwiftUI 嵌套的 `DynamicProperty` 图。测量与排布缓存会复用未变化子树；`WindowsDrawingBackend` 在验证显示指令安全可平移时直接复用整数像素滚动内部帧缓冲，不满足条件时自动回退至常规脏区重绘。评估交互帧率时请使用 `Release` 构建。
 
-各类弹出展示层（`.popover`、`.sheet`、`.confirmationDialog`、`.alert`、`.contextMenu` 与 `Menu` 下拉菜单）在桌面与 Web 端均会提升至滚动裁剪层之上，`.popover` 在靠近窗口边缘时自动翻转箭头方向，并支持点击遮罩或按 Escape 关闭。在桌面端这些浮层绘制于宿主窗口内部，而非创建独立操作系统窗口（`MenuBarExtra` 托盘项/浮动面板、声明式 `Window`/`Settings` 场景及显式创建的 `CrossAppKit` `NSWindow` / `NSPanel` 除外）。
+各类弹出展示层（`.popover`、`.sheet`、`.confirmationDialog`、`.alert`、`.contextMenu` 与 `Menu` 下拉菜单）在桌面与 Web 端均会提升至滚动裁剪层之上，并支持外部点击或按 Escape 关闭。在 Windows 上，锚定式弹出层（`.popover`、`Menu` 下拉菜单与 `.contextMenu`）承载于无边框透明的所属顶层 Win32 工具窗口中，可突破紧凑宿主窗口边界、按显示器工作区自动钳制与四向翻转并支持嵌套弹出栈；模态展示层（`.sheet`、`.alert` 与 `.confirmationDialog`）保持在宿主窗口内。在 Linux 与 Web 端，弹出层仍在宿主窗口表面内绘制（`MenuBarExtra` 托盘项/浮动面板、声明式 `Window`/`Settings` 场景及显式创建的 `CrossAppKit` `NSWindow` / `NSPanel` 除外）。
 
 ## 生命周期、场景与兼容垫片
 
@@ -48,4 +48,4 @@ Windows 下由 DirectWrite 按逻辑点测量和绘制字体，完整支持 100�
 
 `CrossSwiftUI` 的场景运行器支持声明式 `WindowGroup`（含 ID/值窗口）、`Window`、`Settings`、`OpenWindowAction` / `DismissWindowAction`、接入原生主菜单的 `.commands`（`CommandMenu` / `CommandGroup`）以及支持 `.menu` 与 `.window` 浮动面板的 `MenuBarExtra`（外加基于 `CrossAppKit.NSApplication` 运行的无主窗口菜单栏常驻应用）。`DocumentGroup` 与持久化窗口状态恢复尚未实现。Windows 可执行文件与 WASI 调试构建默认预留 16 MiB 线程栈，以容纳深度嵌套的声明式视图树。
 
-`ViewThatFits` 会即时求值所有候选分支并裁剪未选中的分支。`TimelineView` 基于可取消异步任务驱动而非显示器垂直同步信号，当前支持 `.animation` 调度（间隔限制在 1/240 秒至 1 天之间）。`ScrollViewReader` 直接跳转至显式 ID 位置，不含平滑滚动动画。`.saturation` 与 `.grayscale` 变换显式颜色属性而非合成后像素，而 `.blur`、`.brightness` 与 `.contrast` 作用于离屏合成像素（桌面端）或 CSS/平台滤镜。`Security` Keychain API 在 Windows 上接入 Win32 Credential Manager、在 Linux 上持久化至仅当前用户可读（`0600`）的 XDG 存储；`ServiceManagement` 在 Windows 上管理 HKCU `Run` 注册表项，在 Linux 上管理 `~/.config/autostart` XDG 桌面项。
+`ViewThatFits` 会即时求值所有候选分支并裁剪未选中的分支。`TimelineView` 基于可取消异步任务驱动而非显示器垂直同步信号，当前支持 `.animation` 调度（间隔限制在 1/240 秒至 1 天之间）。`ScrollViewReader` 直接跳转至显式 ID 位置，不含平滑滚动动画。`.saturation` 与 `.grayscale` 变换显式颜色属性而非合成后像素，而 `.blur`、`.brightness` 与 `.contrast` 作用于离屏合成像素（桌面端）或 CSS/平台滤镜。`Security` Keychain API 在 Windows 上接入 Win32 Credential Manager、在 Linux 上持久化至仅当前用户可读（`0600`）的 XDG 存储；`ServiceManagement` 在 Windows 上管理 HKCU `Run` 注册表项，在 Linux 上管理 `~/.config/autostart` XDG 桌面项；`JavaScriptCore` 在 Windows 与 Linux 上由 QuickJS-ng 驱动，提供 `JSVirtualMachine`、`JSContext`、`JSValue`、Promise 微任务刷新及 Swift/JS 值与闭包双向桥接（不含 Objective-C `JSExport` 运行时反射）；`QuickLookThumbnailing` 在 Windows 上通过 STA 安全的 `IShellItemImageFactory` 生成文件与图标缩略图。

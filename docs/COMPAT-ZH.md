@@ -88,7 +88,7 @@ Windows 与 Linux 使用 `SwiftUIRuntime` 配合 `CrossSwiftUI`（DirectWrite/GD
 | `Slider` | partial | 连续或分段步进滑块；移动端映射原生滑块 |
 | `Stepper` | partial | 增减按钮回调或数值绑定步进器 |
 | `Picker` | partial | 支持 `segmented`、`menu`、`inline` 与 `radioGroup` 样式 |
-| `Menu` | partial | 桌面端为锚定弹出下拉层（`_menuPopover`）；移动端映射原生或双风格菜单 |
+| `Menu` | partial | Windows 端承载于原生所属弹出窗口（`_menuPopover`），Linux/Web 端为根层下拉弹出层；移动端映射原生或双风格菜单 |
 | `ProgressView` | partial | 确定性线性进度条与不确定性加载指示器 |
 | `ControlGroup` | partial | 水平组合控件容器 |
 | `Form`, `Section` | partial | 带页眉与页脚的分组/双列设置表单容器 |
@@ -131,12 +131,12 @@ Windows 与 Linux 使用 `SwiftUIRuntime` 配合 `CrossSwiftUI`（DirectWrite/GD
 | `.onChange` | partial | 渲染完成后基于 `Equatable` 的新旧值比较回调 |
 | `.task` | partial | 可取消的 `@MainActor` 异步任务，当 `id` 变化时自动取消重启 |
 | `.gesture`, `.highPriorityGesture`, `.simultaneousGesture` | partial | 支持 `DragGesture`、`TapGesture`、`SpatialTapGesture`、定时 `LongPressGesture` 及高优先级/同时手势仲裁 |
-| `.onKeyPress` | partial | 原生键盘事件路由与向祖先冒泡；字符与键盘布局映射有限 |
+| `.onKeyPress` | partial | 原生键盘事件路由与向祖先冒泡；Windows 端采用无死键副作用的 `ToUnicodeEx` / `MapVirtualKeyExW` 键盘布局映射，Linux 端为基础映射 |
 | `.keyboardShortcut` | partial | 作用域键盘快捷键；Windows/Linux 上 `Command` 快捷键同时兼容 `Control` |
-| `.popover` | partial | 带箭头外框、四向边缘自动翻转、外部点击/Escape 关闭及 `presentationBackgroundInteraction` 的根层气泡 |
+| `.popover` | partial | Windows 端承载于原生所属弹出窗口（按显示器工作区自动钳制与四向翻转），Linux/Web 端为根层气泡，支持箭头外框、外部点击/Escape 关闭及 `presentationBackgroundInteraction` |
 | `.sheet` | partial | 桌面与 Web 端为模态卡片层；移动端为原生/双风格底部弹窗（Bottom Sheet） |
 | `.confirmationDialog` | partial | 支持破坏性与取消角色的操作确认弹窗 |
-| `.contextMenu` | partial | 右键触发的根层上下文菜单，选择菜单项后自动收起 |
+| `.contextMenu` | partial | 右键触发的上下文菜单：Windows 端承载于原生所属弹出窗口，Linux/Web 端为根层覆盖层，选择菜单项后自动收起 |
 | `withAnimation` | partial | 将同步状态更新标记为支持属性、颜色、转场与布局插值的动画事务 |
 | `.transition` | partial | 支持插入与移除过渡动画（`.opacity`、`.scale`、`.slide`、`.move`、`.push`、`.offset`、`.combined`、`.asymmetric`） |
 | `.accessibilityLabel`, `.accessibilityValue` | partial | 映射至原生控件无障碍名称、描述与角色（Windows `BUTTON`/`EDIT` 与 Linux ATK）；纯绘制节点保留元数据 |
@@ -176,6 +176,8 @@ Windows 与 Linux 使用 `SwiftUIRuntime` 配合 `CrossSwiftUI`（DirectWrite/GD
 | `UITraitCollection`, `UIColor`, `UIFont`, `UIFontMetrics` | supported | 深浅色特征动态闭包、`.xcassets` `.colorset` 解析、iOS 语义调色板与 Dynamic Type 字号缩放 |
 | `UIImage`, `UIGraphicsImageRenderer`, `UIBezierPath` | partial | SF Symbols、`.imageset` 查找、着色渲染与离屏矢量/文本 PNG 光栅化 |
 | `UIPasteboard`, `UIScreen`, `UIDevice` | partial | 宿主系统剪贴板读写、`NativeAPI.DisplayManager` 显示器度量与设备系统信息 |
+| `JSContext`, `JSValue`, `JSVirtualMachine` | partial | Windows 与 Linux 上基于 QuickJS-ng 的 `JavaScriptCore` 引擎，支持脚本求值、`sourceURL` 堆栈、异常、Promise 微任务刷新以及 Swift/JS 值与闭包双向桥接 |
+| `QLThumbnailGenerator` | partial | Windows 上基于 STA 安全 `IShellItemImageFactory` 的文件与图标缩略图生成（`QuickLookThumbnailing`） |
 
 ## 尚未实现
 
