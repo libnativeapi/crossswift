@@ -4795,6 +4795,22 @@ void sui_window_set_dark_mode(void *window, int dark) {
 namespace {
 constexpr UINT_PTR kPopupSubclassId = 0x53555001u;
 constexpr UINT_PTR kPopupOwnerSubclassId = 0x53555002u;
+constexpr UINT_PTR kPopupNoQuitSubclassId = 0x53555003u;
+
+LRESULT CALLBACK PopupNoQuitSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclass_id, DWORD_PTR
+) {
+  if (msg == WM_DESTROY) {
+    // Transient popup windows use NativeAPIWindow whose base WindowProc calls
+    // PostQuitMessage(0) on WM_DESTROY; swallow it so dismissing a popup never
+    // terminates the host application's message loop.
+    return 0;
+  }
+  if (msg == WM_NCDESTROY) {
+    RemoveWindowSubclass(hwnd, PopupNoQuitSubclassProc, subclass_id);
+  }
+  return DefSubclassProc(hwnd, msg, wp, lp);
+}
 
 struct PopupHookData {
   HWND owner_hwnd = nullptr;
@@ -5093,6 +5109,8 @@ void sui_popup_configure(void *popup_ptr, void *owner_ptr,
   HWND hwnd = static_cast<HWND>(popup_ptr);
   HWND owner = static_cast<HWND>(owner_ptr);
   if (!hwnd || !IsWindow(hwnd)) return;
+
+  SetWindowSubclass(hwnd, PopupNoQuitSubclassProc, kPopupNoQuitSubclassId, 0);
 
   PopupHookData *data = nullptr;
   auto it = g_popup_hooks.find(hwnd);

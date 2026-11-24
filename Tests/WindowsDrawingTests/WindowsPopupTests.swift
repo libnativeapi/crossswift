@@ -4,6 +4,7 @@
   import Foundation
   import NativeAPI
   import Testing
+  import WinSDK
 
   @testable import CrossSwiftUI
   @testable import SwiftUIRuntime
@@ -799,6 +800,63 @@
       let promoted = try #require(snapshots.first)
       #expect(promoted.isVisible)
       #expect(promoted.ownerHwnd == backend.rootHwnd)
+    }
+
+    @Test("Dismissing a popup window does not post WM_QUIT to the host message loop")
+    func dismissingPopupDoesNotPostQuitMessage() throws {
+      final class Model: ObservableObject {
+        @Published var open = false
+      }
+      struct MenuHost: SwiftUIRuntime.View {
+        @ObservedObject var model: Model
+        var body: some SwiftUIRuntime.View {
+          SwiftUIRuntime.Button("Menu") { model.open = true }
+            .frame(width: 90, height: 28)
+            ._menuPopover(isPresented: $model.open, arrowEdge: .bottom) {
+              SwiftUIRuntime.Button("Item") {}
+                .frame(width: 140, height: 28)
+            }
+            .padding(16)
+            .frame(width: 220, height: 120)
+        }
+      }
+
+      WindowsDrawingBackend.prepareApplication()
+      _ = NativeAPI.Application.shared.isRunning()
+      let window = try #require(NativeAPI.Window.create())
+      defer { _ = window.close() }
+      window.setBounds(NativeAPI.Rectangle(x: 240, y: 200, width: 220, height: 120))
+      window.show()
+      pump_pending_win32_messages()
+
+      // Drain any stale WM_QUIT left by earlier test teardowns before checking ours.
+      var staleQuit = MSG()
+      while PeekMessageW(&staleQuit, nil, UINT(WM_QUIT), UINT(WM_QUIT), UINT(PM_REMOVE)) {}
+
+      let backend = try #require(WindowsDrawingBackend(window: window))
+      let model = Model()
+      let renderer = Renderer(
+        backend: backend,
+        root: AnyView(MenuHost(model: model)),
+        size: .init(width: 220, height: 120)
+      )
+      renderer.mount()
+
+      model.open = true
+      renderer.renderIfNeeded()
+      pump_pending_win32_messages()
+      #expect(backend.activePopupSnapshots.count == 1)
+
+      // Dismissing the popup destroys its transient HWND; it must NEVER post WM_QUIT.
+      model.open = false
+      renderer.renderIfNeeded()
+      pump_pending_win32_messages()
+      #expect(backend.activePopupSnapshots.isEmpty)
+
+      var quitMsg = MSG()
+      let receivedQuit = PeekMessageW(
+        &quitMsg, nil, UINT(WM_QUIT), UINT(WM_QUIT), UINT(PM_REMOVE))
+      #expect(!receivedQuit, "Dismissing a popup must not post WM_QUIT to the app message loop")
     }
   }
 #endif
