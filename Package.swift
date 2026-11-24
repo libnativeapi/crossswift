@@ -283,7 +283,29 @@ if buildDesktopNative {
     .target(name: "Network", path: "Sources/AppleShims/Network"),
     .target(name: "SystemConfiguration", dependencies: ["CoreFoundation"], path: "Sources/AppleShims/SystemConfiguration"),
     .target(name: "AuthenticationServices", dependencies: ["CrossAppKit"], path: "Sources/AppleShims/AuthenticationServices"),
-    .target(name: "JavaScriptCore", path: "Sources/AppleShims/JavaScriptCore"),
+    .target(
+      name: "CQuickJS",
+      path: "Sources/CQuickJS",
+      exclude: ["LICENSE"],
+      publicHeadersPath: "include",
+      cSettings: [
+        .define("QUICKJS_NG_BUILD"),
+        .define("_GNU_SOURCE"),
+        .define("_CRT_SECURE_NO_WARNINGS", .when(platforms: [.windows])),
+        .define("_CRT_NONSTDC_NO_DEPRECATE", .when(platforms: [.windows])),
+        .define("WIN32_LEAN_AND_MEAN", .when(platforms: [.windows])),
+        .define("_WIN32_WINNT", to: "0x0601", .when(platforms: [.windows])),
+      ],
+      linkerSettings: [
+        .linkedLibrary("m", .when(platforms: [.linux])),
+        .linkedLibrary("pthread", .when(platforms: [.linux])),
+      ]
+    ),
+    .target(
+      name: "JavaScriptCore",
+      dependencies: ["CQuickJS"],
+      path: "Sources/AppleShims/JavaScriptCore"
+    ),
     .target(name: "IOKit", path: "Sources/AppleShims/IOKit", publicHeadersPath: "include"),
     .target(name: "Compression", path: "Sources/AppleShims/Compression"),
     .target(name: "System", path: "Sources/AppleShims/System"),
@@ -321,6 +343,8 @@ if buildDesktopNative {
       dependencies: [
         "Combine",
         "CrossFoundation",
+        "JavaScriptCore",
+        "QuickLookThumbnailing",
         "Security",
         "ServiceManagement",
         "SwiftUIRuntime",
