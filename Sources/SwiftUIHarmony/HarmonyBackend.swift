@@ -11,10 +11,132 @@ private func harmonyMeasureText(
 ) -> Bool
 
 public enum HarmonyHost {
+  public struct SurfaceConfig {
+    public var isTransparent: Bool = false
+    public var fixedContentSize: Size? = nil
+    public var shadowBleed: Double = 0
+  }
+
+  @MainActor public private(set) static var resourcesDirectory: String?
+  @MainActor public static var keyEventHandler: ((_ surfaceId: Int, _ keyCode: Int) -> Bool)?
+
+  @MainActor private static var surfaceConfigs: [Int: SurfaceConfig] = [:]
+  @MainActor private static var pendingRootViews: [Int: AnyView] = [:]
+  @MainActor private static var mountHandlers: [Int: (AnyView) -> Void] = [:]
+  @MainActor private static var sizeHandlers: [Int: (Size) -> Void] = [:]
+
+  @MainActor public static var pendingRootView: AnyView? {
+    get { pendingRootViews[0] }
+    set {
+      if let newValue { pendingRootViews[0] = newValue } else { pendingRootViews.removeValue(forKey: 0) }
+    }
+  }
+  @MainActor public static var activeHostMountHandler: ((AnyView) -> Void)? {
+    get { mountHandlers[0] }
+    set { setMountHandler(forSurface: 0, newValue) }
+  }
+  @MainActor public static var onFixedContentSizeChanged: ((Size) -> Void)? {
+    get { sizeHandlers[0] }
+    set { setSizeHandler(forSurface: 0, newValue) }
+  }
+  @MainActor public static var isWindowTransparent: Bool { surfaceConfigs[0]?.isTransparent ?? false }
+  @MainActor public static var fixedContentSize: Size? { surfaceConfigs[0]?.fixedContentSize }
+  @MainActor public static var windowShadowBleed: Double { surfaceConfigs[0]?.shadowBleed ?? 0 }
+
+  @MainActor
+  public static func surfaceConfig(for surfaceId: Int) -> SurfaceConfig {
+    surfaceConfigs[surfaceId] ?? SurfaceConfig()
+  }
+
+  @MainActor
+  public static func configureWindowSurface(
+    forSurface surfaceId: Int = 0,
+    isTransparent: Bool,
+    contentSize: Size?,
+    shadowBleed: Double
+  ) {
+    surfaceConfigs[surfaceId] = SurfaceConfig(
+      isTransparent: isTransparent,
+      fixedContentSize: contentSize,
+      shadowBleed: max(0, shadowBleed)
+    )
+    if let contentSize, contentSize.width > 0, contentSize.height > 0 {
+      sizeHandlers[surfaceId]?(contentSize)
+    }
+  }
+
+  @MainActor
+  public static func mountRootView(_ view: AnyView, forSurface surfaceId: Int = 0) {
+    pendingRootViews[surfaceId] = view
+    mountHandlers[surfaceId]?(view)
+  }
+
+  @MainActor
+  public static func pendingRootView(forSurface surfaceId: Int) -> AnyView? {
+    pendingRootViews[surfaceId]
+  }
+
+  @MainActor
+  public static func setMountHandler(forSurface surfaceId: Int, _ handler: ((AnyView) -> Void)?) {
+    if let handler {
+      mountHandlers[surfaceId] = handler
+    } else {
+      mountHandlers.removeValue(forKey: surfaceId)
+    }
+  }
+
+  @MainActor
+  public static func setSizeHandler(forSurface surfaceId: Int, _ handler: ((Size) -> Void)?) {
+    if let handler {
+      sizeHandlers[surfaceId] = handler
+    } else {
+      sizeHandlers.removeValue(forKey: surfaceId)
+    }
+  }
+
+  @MainActor
+  public static func clearSurface(_ surfaceId: Int) {
+    mountHandlers.removeValue(forKey: surfaceId)
+    sizeHandlers.removeValue(forKey: surfaceId)
+  }
+
+  @MainActor
+  public static func resetMountedRoot() {
+    pendingRootViews.removeAll()
+    mountHandlers.removeAll()
+    sizeHandlers.removeAll()
+    surfaceConfigs.removeAll()
+  }
+
+  public static func measureText(_ text: String, _ font: Font) -> Size {
+    var width = 0.0
+    var height = 0.0
+    let family: String
+    switch font.family {
+    case "Segoe UI", "-apple-system", "system-ui": family = ""
+    case "Consolas": family = "monospace"
+    case "Georgia": family = "serif"
+    default: family = font.family
+    }
+    let weightValue = font.weight.value.isFinite
+      ? Int((min(900, max(100, font.weight.value)) / 100).rounded()) * 100
+      : 400
+    let measured = text.withCString { string in
+      family.withCString { fam in
+        harmonyMeasureText(string, fam, font.size, Int32(weightValue / 100 - 1), &width, &height)
+      }
+    }
+    if measured {
+      return Size(width: width.rounded(.up) + 3, height: height.rounded(.up))
+    }
+    return Size(width: Double(text.count) * font.size * 0.6 + 3, height: font.size)
+  }
+
   /// Installs extracted HarmonyOS app resources (`*.xcstrings` catalogs and `*.xcassets` imagesets)
   /// and preferred device language before mounting the root SwiftUI view tree.
   @MainActor
   public static func configureResources(directory: String, preferredLanguage: String? = nil) {
+    resourcesDirectory = directory
     if let preferredLanguage, !preferredLanguage.isEmpty {
       XCStringsCatalog.shared.preferredLanguage = preferredLanguage
     }
@@ -106,6 +228,7 @@ public final class HarmonyBackend: RenderBackend {
   public var environment = EnvironmentValues()
   public var needsRenderCommands: Bool { false }
 
+  public let surfaceId: Int
   private let context: UnsafeMutableRawPointer
   private let update: HarmonyUpdate
   private let pixelsPerPoint: Double
@@ -118,7 +241,13 @@ public final class HarmonyBackend: RenderBackend {
   }
   private var textSizes: [TextKey: Size] = [:]
 
-  public init(context: UnsafeMutableRawPointer, update: @escaping HarmonyUpdate, pixelsPerPoint: Double) {
+  public init(
+    context: UnsafeMutableRawPointer,
+    update: @escaping HarmonyUpdate,
+    pixelsPerPoint: Double,
+    surfaceId: Int = 0
+  ) {
+    self.surfaceId = surfaceId
     self.context = context
     self.update = update
     self.pixelsPerPoint = pixelsPerPoint
@@ -196,8 +325,26 @@ public final class HarmonyBackend: RenderBackend {
 
   public func perform(_ commands: [RenderCommand]) {}
 
+  private func hasClipPathDescendant(_ element: Element) -> Bool {
+    if element.clipPathBuilder != nil { return true }
+    return element.children.contains(where: hasClipPathDescendant)
+  }
+
   public func didRender(_ root: Element) {
-    let tree = snapshot(root)
+    var tree = snapshot(root)
+    tree.isDark = environment.colorScheme == .dark
+    let cfg = MainActor.assumeIsolated { HarmonyHost.surfaceConfig(for: surfaceId) }
+    if cfg.isTransparent {
+      tree.windowTransparent = true
+      if cfg.shadowBleed > 0 { tree.windowBleed = cfg.shadowBleed }
+      let maxR = min(root.frame.width, root.frame.height) / 2
+      let corner = root.shadowCornerRadius
+      if root.frame.height >= 72, corner > 0, maxR > 0 {
+        tree.windowCornerRadius = min(corner, maxR)
+      } else if root.frame.height >= 72, maxR > 0, hasClipPathDescendant(root) {
+        tree.windowCornerRadius = min(14, maxR)
+      }
+    }
     guard let data = try? JSONEncoder().encode(tree) else { return }
     String(decoding: data, as: UTF8.self).withCString { update(context, $0) }
     if root.hasLayoutAnimation {
@@ -222,7 +369,9 @@ public final class HarmonyBackend: RenderBackend {
     var placeholder: String
     var secure: Bool
     var multiline: Bool
+    var plainTextField: Bool?
     var image: String
+    var imageTemplate: Bool?
     var fontSize: Double
     var fontWeight: Int
     var fontFamily: String
@@ -242,6 +391,16 @@ public final class HarmonyBackend: RenderBackend {
     var radius: Double
     var opacity: Double
     var blurRadius: Double
+    var backdropBlurRadius: Double?
+    var grayscale: Double?
+    var isDark: Bool?
+    var shadowColor: UInt32?
+    var shadowRadius: Double?
+    var shadowX: Double?
+    var shadowY: Double?
+    var windowTransparent: Bool?
+    var windowBleed: Double?
+    var windowCornerRadius: Double?
     var clip: Bool
     var scrollIndicators: Bool
     var scrollDirection: String
@@ -251,6 +410,7 @@ public final class HarmonyBackend: RenderBackend {
     var enabled: Bool
     var hitTesting: Bool
     var gradientKind: String?
+    var gradientAngle: Double?
     var gradientColors: [UInt32]?
     var boolValue: Bool
     var doubleValue: Double
@@ -288,17 +448,22 @@ public final class HarmonyBackend: RenderBackend {
       }
     }
     let sem = props.semanticControl
+    #if CROSS_SWIFTUI_HARMONY_DESKTOP
+    let nativeSemanticKinds: Set<String> = ["progressCircular"]
+    #else
     let nativeSemanticKinds: Set<String> = [
       "switch", "checkbox", "slider", "segmented", "stepper",
       "progressLinear", "progressCircular", "button",
       "navBar", "tabBar", "alert", "menu", "divider",
     ]
+    #endif
     var kind: String
     var path = ""
     var resolvedBorder = color(props.borderColor)
     var resolvedBorderWidth = number(props.borderWidth)
     var resolvedBg = color(props.background)
     var resolvedGradientKind: String? = nil
+    var resolvedGradientAngle: Double? = nil
     var resolvedGradient: [UInt32]? = nil
     var includeChildren = true
 
@@ -317,7 +482,15 @@ public final class HarmonyBackend: RenderBackend {
         kind = "gradient"
         if let grad = props.gradient {
           switch grad.kind {
-          case .linear: resolvedGradientKind = "linear"
+          case .linear:
+            resolvedGradientKind = "linear"
+            let dx = Double(grad.end.x - grad.start.x)
+            let dy = Double(grad.end.y - grad.start.y)
+            if abs(dx) > 1e-6 || abs(dy) > 1e-6 {
+              var deg = atan2(dx, -dy) * 180.0 / .pi
+              if deg < 0 { deg += 360.0 }
+              resolvedGradientAngle = deg
+            }
           case .radial: resolvedGradientKind = "radial"
           case .angular: resolvedGradientKind = "angular"
           }
@@ -364,6 +537,8 @@ public final class HarmonyBackend: RenderBackend {
       }
       if kind == "group" && element.acceptsPointerInput { kind = "button" }
     }
+    let effectiveCorner =
+      props.shadows.isEmpty ? props.cornerRadius : max(props.cornerRadius, element.shadowCornerRadius)
     return Node(
       id: element.id.rawValue, kind: kind,
       x: number(frame.minX), y: number(frame.minY), width: number(frame.width), height: number(frame.height),
@@ -372,7 +547,9 @@ public final class HarmonyBackend: RenderBackend {
       placeholder: props.placeholder,
       secure: props.secure,
       multiline: props.multiline,
+      plainTextField: props.plainTextField ? true : nil,
       image: props.imagePath,
+      imageTemplate: props.imageTemplate ? true : nil,
       fontSize: number(font.size), fontWeight: fontWeight(font), fontFamily: fontFamily(font),
       textAlignment: props.textAlignment == .center ? "center" : props.textAlignment == .trailing ? "end" : "start",
       lineSpacing: number(props.lineSpacing), tracking: number(props.tracking), underline: props.underline,
@@ -383,8 +560,19 @@ public final class HarmonyBackend: RenderBackend {
       foreground: color(props.foreground),
       background: resolvedBg, border: resolvedBorder,
       borderWidth: resolvedBorderWidth,
-      radius: number(min(props.cornerRadius, frame.width / 2, frame.height / 2)),
-      opacity: number(props.opacity), blurRadius: number(props.blurRadius), clip: props.clipped,
+      radius: number(max(0, min(effectiveCorner, frame.width / 2, frame.height / 2))),
+      opacity: number(props.opacity), blurRadius: number(props.blurRadius),
+      backdropBlurRadius: props.backdropBlurRadius > 0 ? number(props.backdropBlurRadius) : nil,
+      grayscale: props.saturation < 0.99 ? number(max(0, min(1, 1.0 - props.saturation))) : nil,
+      isDark: nil,
+      shadowColor: props.shadows.first.flatMap { $0.radius > 0 ? color($0.color) : nil },
+      shadowRadius: props.shadows.first.flatMap { $0.radius > 0 ? number($0.radius * pixelsPerPoint) : nil },
+      shadowX: props.shadows.first.flatMap { $0.radius > 0 ? number($0.x * pixelsPerPoint) : nil },
+      shadowY: props.shadows.first.flatMap { $0.radius > 0 ? number($0.y * pixelsPerPoint) : nil },
+      windowTransparent: nil,
+      windowBleed: nil,
+      windowCornerRadius: nil,
+      clip: props.clipped,
       scrollIndicators: props.showsScrollIndicators,
       scrollDirection: props.scrollAxes.contains(.horizontal)
         ? (props.scrollAxes.contains(.vertical) ? "both" : "horizontal") : "vertical",
@@ -393,6 +581,7 @@ public final class HarmonyBackend: RenderBackend {
       selected: AccessibilityTraits(rawValue: props.accessibilityTraits).contains(.isSelected),
       enabled: props.enabled, hitTesting: props.hitTesting,
       gradientKind: resolvedGradientKind,
+      gradientAngle: resolvedGradientAngle,
       gradientColors: resolvedGradient,
       boolValue: sem?.boolValue ?? false,
       doubleValue: number(sem?.doubleValue ?? 0),

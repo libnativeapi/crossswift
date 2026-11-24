@@ -6,6 +6,362 @@ import Foundation
   import CAppKitWindows
 #endif
 
+#if CROSS_SWIFTUI_HARMONY
+  @_silgen_name("harmony_host_open_window")
+  private func harmony_host_open_window(
+    _ surfaceId: Int32,
+    _ title: UnsafePointer<CChar>,
+    _ x: Double,
+    _ y: Double,
+    _ width: Double,
+    _ height: Double,
+    _ isTransparent: Int32,
+    _ isTitled: Int32,
+    _ isResizable: Int32,
+    _ isFloating: Int32,
+    _ focus: Int32
+  )
+
+  @_silgen_name("harmony_host_update_bounds")
+  private func harmony_host_update_bounds(
+    _ surfaceId: Int32,
+    _ x: Double,
+    _ y: Double,
+    _ width: Double,
+    _ height: Double
+  )
+
+  @_silgen_name("harmony_host_hide_window")
+  private func harmony_host_hide_window(_ surfaceId: Int32)
+
+  @_silgen_name("harmony_host_focus_window")
+  private func harmony_host_focus_window(_ surfaceId: Int32)
+
+  @_silgen_name("harmony_host_destroy_window")
+  private func harmony_host_destroy_window(_ surfaceId: Int32)
+
+  @MainActor
+  internal enum HarmonyWindowBridge {
+    private struct WeakNSWindow {
+      weak var window: NSWindow?
+    }
+
+    static let transparentBleed: Double = 24.0
+    private static var nextSecondaryId: Int = 1
+    private static var windowsBySurface: [Int: WeakNSWindow] = [:]
+    private static var nativeWindows: [Int: NativeAPI.Window] = [:]
+    private static var listenerIds: [Int: ListenerId] = [:]
+    private static var lastBounds: [Int: NativeAPI.Rectangle] = [:]
+    private static var lastPresentUptime: [Int: TimeInterval] = [:]
+    private static var hideGeneration: UInt64 = 0
+
+    static func surfaceId(for window: NSWindow) -> Int {
+      if let existing = window._harmonyAssignedSurfaceId {
+        windowsBySurface[existing] = WeakNSWindow(window: window)
+        return existing
+      }
+      let id: Int
+      if windowsBySurface[0]?.window == nil && window.parent == nil {
+        id = 0
+      } else {
+        id = nextSecondaryId
+        nextSecondaryId += 1
+      }
+      window._harmonyAssignedSurfaceId = id
+      windowsBySurface[id] = WeakNSWindow(window: window)
+      return id
+    }
+
+    static func window(forSurface id: Int) -> NSWindow? {
+      windowsBySurface[id]?.window
+    }
+
+    static func isTransparentFrameless(_ window: NSWindow) -> Bool {
+      guard !window.styleMask.contains(.titled) else { return false }
+      let bg = window.backgroundColor.resolved(for: window.effectiveAppearance)
+      return !window.isOpaque || bg.a < 0.05
+    }
+
+    private static func targetGeometry(for window: NSWindow) -> (
+      rect: NativeAPI.Rectangle,
+      isTransparent: Bool,
+      bleed: Double,
+      contentW: Double,
+      contentH: Double
+    ) {
+      let isTransparent = isTransparentFrameless(window)
+      let bleed = isTransparent ? transparentBleed : 0.0
+      let contentW = Double(max(1, window.storedFrame.width))
+      let contentH = Double(max(1, window.storedFrame.height))
+      let top = CrossAppKitCoordinates.rectToNativeTopLeft(window.storedFrame)
+      let minW = isTransparent ? 48.0 : 120.0
+      let minH = isTransparent ? 48.0 : 80.0
+      let rect = NativeAPI.Rectangle(
+        x: max(0, top.x - bleed),
+        y: max(0, top.y - bleed),
+        width: max(minW, top.width + bleed * 2),
+        height: max(minH, top.height + bleed * 2)
+      )
+      return (rect, isTransparent, bleed, contentW, contentH)
+    }
+
+    static func ensurePrimaryWindowAttachedIfNeeded() {
+      guard nativeWindows[0] == nil else { return }
+      guard let primary = NativeAPI.Application.shared.getPrimaryWindow()
+        ?? NativeAPI.WindowManager.shared.getAll().first
+      else {
+        return
+      }
+      attachNativeWindow(primary, forSurface: 0)
+    }
+
+    static func attachNativeWindow(_ nativeWin: NativeAPI.Window, forSurface id: Int) {
+      if nativeWindows[id]?.id == nativeWin.id { return }
+      detachNativeWindow(forSurface: id)
+      nativeWindows[id] = nativeWin
+      listenerIds[id] = nativeWin.addListener { event in
+        nonisolated(unsafe) let boxEvent = event
+        _performOnMainActor {
+          handleNativeEvent(boxEvent, forSurface: id)
+        }
+      }
+    }
+
+    static func detachNativeWindow(forSurface id: Int) {
+      if let listenerId = listenerIds.removeValue(forKey: id), let nw = nativeWindows[id] {
+        _ = nw.removeListener(listenerId)
+      }
+      nativeWindows.removeValue(forKey: id)
+    }
+
+    private static func handleNativeEvent(_ event: NativeAPI.WindowEvent, forSurface id: Int) {
+      switch event {
+      case .focused:
+        if let win = windowsBySurface[id]?.window, win.isVisible {
+          win.becomeKey()
+        }
+      case .blurred:
+        let presentTime = lastPresentUptime[id] ?? 0
+        guard ProcessInfo.processInfo.systemUptime - presentTime > 0.35 else { return }
+        guard let win = windowsBySurface[id]?.window, win.isVisible, win.isKeyWindow,
+          NSWindow._suppressResignKeyCount == 0
+        else { return }
+        if win.parent != nil {
+          // Allow a sibling/parent window's .focused callback to arrive before resigning key.
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak win] in
+            guard let win, win.isVisible, win.isKeyWindow, NSWindow._suppressResignKeyCount == 0
+            else { return }
+            win.resignKey()
+          }
+        } else {
+          win.resignKey()
+        }
+      case .moved(_, let newPos):
+        guard let win = windowsBySurface[id]?.window, win.isVisible else { return }
+        let bleed = isTransparentFrameless(win) ? transparentBleed : 0.0
+        win.storedFrame = CrossAppKitCoordinates.rectFromNativeTopLeft(
+          x: newPos.x + bleed,
+          y: newPos.y + bleed,
+          width: Double(win.storedFrame.width),
+          height: Double(win.storedFrame.height)
+        )
+        let note = Notification(name: NSWindow.didMoveNotification, object: win)
+        NotificationCenter.default.post(note)
+        win.delegate?.windowDidMove(note)
+      case .resized(_, let newSize):
+        guard let win = windowsBySurface[id]?.window, win.isVisible else { return }
+        guard !isTransparentFrameless(win) else { return }
+        win.storedFrame.size = NSSize(width: CGFloat(newSize.width), height: CGFloat(newSize.height))
+        let note = Notification(name: NSWindow.didResizeNotification, object: win)
+        NotificationCenter.default.post(note)
+        win.delegate?.windowDidResize(note)
+      case .closeRequested(_, let req):
+        if let win = windowsBySurface[id]?.window {
+          if let should = win.delegate?.windowShouldClose(win), !should {
+            _ = req?.cancel()
+            return
+          }
+          _ = req?.cancel()
+          win.close()
+        } else if NSApplication.shared.delegate?.applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared) == false {
+          _ = req?.cancel()
+          _ = NativeAPI.Application.shared.hide()
+        }
+      default:
+        break
+      }
+    }
+
+    static func openOrShow(_ window: NSWindow, focus: Bool) {
+      hideGeneration &+= 1
+      let id = surfaceId(for: window)
+      windowsBySurface[id] = WeakNSWindow(window: window)
+      lastPresentUptime[id] = ProcessInfo.processInfo.systemUptime
+      if id == 0 {
+        ensurePrimaryWindowAttachedIfNeeded()
+      }
+
+      let geo = targetGeometry(for: window)
+      NSWindow._harmonyWindowSurfaceHandler?(
+        id,
+        geo.isTransparent,
+        geo.isTransparent ? geo.contentW : 0,
+        geo.isTransparent ? geo.contentH : 0,
+        geo.bleed
+      )
+      lastBounds[id] = geo.rect
+      _ = NativeAPI.Application.shared.show()
+
+      let isTitled: Int32 = window.styleMask.contains(.titled) ? 1 : 0
+      let isResizable: Int32 = window.styleMask.contains(.resizable) ? 1 : 0
+      let isFloating: Int32 = window.level.rawValue >= NSWindow.Level.floating.rawValue ? 1 : 0
+      let isTrans: Int32 = geo.isTransparent ? 1 : 0
+      window.title.withCString { cTitle in
+        harmony_host_open_window(
+          Int32(id),
+          cTitle,
+          geo.rect.x,
+          geo.rect.y,
+          geo.rect.width,
+          geo.rect.height,
+          isTrans,
+          isTitled,
+          isResizable,
+          isFloating,
+          focus ? 1 : 0
+        )
+      }
+    }
+
+    static func syncFrame(for window: NSWindow) {
+      guard let id = window._harmonyAssignedSurfaceId else { return }
+      guard window.isVisible || id == 0 else { return }
+      guard window.storedFrame.width > 1 && window.storedFrame.height > 1 else { return }
+      let geo = targetGeometry(for: window)
+      NSWindow._harmonyWindowSurfaceHandler?(
+        id,
+        geo.isTransparent,
+        geo.isTransparent ? geo.contentW : 0,
+        geo.isTransparent ? geo.contentH : 0,
+        geo.bleed
+      )
+      if let prev = lastBounds[id],
+        abs(prev.x - geo.rect.x) < 0.5,
+        abs(prev.y - geo.rect.y) < 0.5,
+        abs(prev.width - geo.rect.width) < 0.5,
+        abs(prev.height - geo.rect.height) < 0.5
+      {
+        return
+      }
+      lastBounds[id] = geo.rect
+      harmony_host_update_bounds(
+        Int32(id),
+        geo.rect.x,
+        geo.rect.y,
+        geo.rect.width,
+        geo.rect.height
+      )
+    }
+
+    static func focusWindow(_ window: NSWindow) {
+      guard let id = window._harmonyAssignedSurfaceId, window.isVisible else { return }
+      lastPresentUptime[id] = ProcessInfo.processInfo.systemUptime
+      harmony_host_focus_window(Int32(id))
+    }
+
+    static func hideWindow(_ window: NSWindow) {
+      guard let id = window._harmonyAssignedSurfaceId else { return }
+      hideGeneration &+= 1
+      let token = hideGeneration
+      lastBounds.removeValue(forKey: id)
+      harmony_host_hide_window(Int32(id))
+      if id != 0 {
+        detachNativeWindow(forSurface: id)
+      }
+      DispatchQueue.main.async {
+        guard token == hideGeneration else { return }
+        let hasVisible = NSApplication.shared.windows.contains { $0.isVisible }
+        guard !hasVisible else { return }
+        _ = NativeAPI.Application.shared.hide()
+      }
+    }
+
+    static func destroyWindowIfSecondary(_ window: NSWindow) {
+      guard let id = window._harmonyAssignedSurfaceId, id != 0 else { return }
+      lastBounds.removeValue(forKey: id)
+      detachNativeWindow(forSurface: id)
+      windowsBySurface.removeValue(forKey: id)
+      harmony_host_destroy_window(Int32(id))
+    }
+
+    static func presentMainWindow() {
+      hideGeneration &+= 1
+      _ = NativeAPI.Application.shared.show()
+      if let primaryWin = windowsBySurface[0]?.window, primaryWin.isVisible {
+        lastPresentUptime[0] = ProcessInfo.processInfo.systemUptime
+        harmony_host_focus_window(0)
+      }
+    }
+
+    static func handleKeyEvent(surfaceId: Int, keyCode: Int) -> Bool {
+      guard let win = windowsBySurface[surfaceId]?.window, win.isVisible else { return false }
+      let carbonCode: UInt16
+      let chars: String
+      switch keyCode {
+      case 27:
+        carbonCode = 53
+        chars = "\u{1B}"
+      case 38:
+        carbonCode = 126
+        chars = "\u{F700}"
+      case 40:
+        carbonCode = 125
+        chars = "\u{F701}"
+      case 9:
+        carbonCode = 48
+        chars = "\t"
+      case 13:
+        carbonCode = 36
+        chars = "\r"
+      default:
+        return false
+      }
+      let ev = NSEvent(
+        type: .keyDown,
+        modifierFlags: [],
+        windowNumber: win.windowNumber,
+        window: win,
+        characters: chars,
+        charactersIgnoringModifiers: chars,
+        keyCode: carbonCode
+      )
+      win._eventReachedBaseSendEvent = false
+      win.sendEvent(ev)
+      return !win._eventReachedBaseSendEvent
+    }
+  }
+
+  @MainActor @_cdecl("swift_harmony_window_attached")
+  public func swiftHarmonyWindowAttached(_ surfaceId: Int32, _ windowId: UInt32) {
+    let id = Int(surfaceId)
+    if let nativeWin = NativeAPI.WindowManager.shared.get(WindowId(windowId)) {
+      HarmonyWindowBridge.attachNativeWindow(nativeWin, forSurface: id)
+    } else if id == 0 {
+      HarmonyWindowBridge.ensurePrimaryWindowAttachedIfNeeded()
+    }
+  }
+
+  @MainActor
+  public func _harmonyHandleKeyEvent(surfaceId: Int, keyCode: Int) -> Bool {
+    HarmonyWindowBridge.handleKeyEvent(surfaceId: surfaceId, keyCode: keyCode)
+  }
+
+  @MainActor
+  internal func _harmonyPresentMainWindow() {
+    HarmonyWindowBridge.presentMainWindow()
+  }
+#endif
+
 @MainActor
 public protocol NSWindowDelegate: AnyObject {
   func windowDidBecomeKey(_ notification: Notification)
@@ -337,7 +693,7 @@ open class NSWindow: NSResponder {
     _ = responder.resignFirstResponder()
   }
 
-  private var storedFrame: NSRect
+  fileprivate var storedFrame: NSRect
   private var suppressMoveCallbacks = false
   private var hasPendingNativeBounds = false
   private var isCommittingNativeBounds = false
@@ -362,6 +718,16 @@ open class NSWindow: NSResponder {
 
   /// Hook invoked whenever `contentView` is assigned or resized so `NSHostingView` attaches cleanly.
   public var onContentViewChanged: ((NSView?) -> Void)?
+  /// Hook invoked when the window orders to the front (used by surface-hosted backends like HarmonyOS).
+  public var onDidOrderFront: (() -> Void)?
+  #if CROSS_SWIFTUI_HARMONY
+    internal var _harmonyAssignedSurfaceId: Int?
+    public var harmonySurfaceId: Int {
+      HarmonyWindowBridge.surfaceId(for: self)
+    }
+    /// Hook notifying SwiftUIHarmony of active window transparency, fixed content dimensions, and shadow bleed.
+    public static var _harmonyWindowSurfaceHandler: ((_ surfaceId: Int, _ isTransparent: Bool, _ width: Double, _ height: Double, _ bleed: Double) -> Void)?
+  #endif
 
   public var contentView: NSView? {
     didSet {
@@ -450,7 +816,7 @@ open class NSWindow: NSResponder {
     self.windowNumber = Self.nextWindowNumber
     super.init()
 
-    #if !os(macOS)
+    #if !os(macOS) && !CROSS_SWIFTUI_HARMONY
       _ = NativeAPI.Application.shared.isRunning()
       if let nw = NativeAPI.Window.create() {
         self.nativeWindow = nw
@@ -855,7 +1221,9 @@ open class NSWindow: NSResponder {
     #endif
     suppressMoveCallbacks = true
     defer { suppressMoveCallbacks = false }
-    #if !os(macOS)
+    #if CROSS_SWIFTUI_HARMONY
+      HarmonyWindowBridge.syncFrame(for: self)
+    #elseif !os(macOS)
       if let nw = nativeWindow {
         let top = CrossAppKitCoordinates.rectToNativeTopLeft(frameRect)
         let r = NativeAPI.Rectangle(x: top.x, y: top.y, width: max(1, top.width), height: max(1, top.height))
@@ -887,7 +1255,9 @@ open class NSWindow: NSResponder {
       }
     #endif
     storedFrame.size = size
-    #if !os(macOS)
+    #if CROSS_SWIFTUI_HARMONY
+      HarmonyWindowBridge.syncFrame(for: self)
+    #elseif !os(macOS)
       nativeWindow?.setContentSize(NativeAPI.Size(width: Double(max(1, size.width)), height: Double(max(1, size.height))))
     #endif
     contentView?.frame = NSRect(origin: .zero, size: size)
@@ -913,34 +1283,44 @@ open class NSWindow: NSResponder {
       ensureTransparentEnvelopeBeforeShow()
     #endif
     isVisible = true
-    #if !os(macOS)
-      if canBecomeKey {
-        nativeWindow?.setNonActivating(false)
+    #if CROSS_SWIFTUI_HARMONY
+      contentView?.layoutSubtreeIfNeeded()
+      onDidOrderFront?()
+      HarmonyWindowBridge.openOrShow(self, focus: canBecomeKey)
+      becomeKey()
+    #else
+      #if !os(macOS)
+        if canBecomeKey {
+          nativeWindow?.setNonActivating(false)
+          #if os(Windows)
+            if let hwnd = nativeWindow?.nativeObject {
+              let isFrameless = !styleMask.contains(.titled)
+              let hideFromTaskbar = isFrameless || styleMask.contains(.nonactivatingPanel)
+              cak_window_apply_frameless(hwnd, isFrameless ? 1 : 0)
+              cak_window_set_tool_style(hwnd, hideFromTaskbar ? 1 : 0, 0)
+            }
+          #endif
+        }
+        contentView?.layoutSubtreeIfNeeded()
+        nativeWindow?.show()
         #if os(Windows)
-          if let hwnd = nativeWindow?.nativeObject {
-            let isFrameless = !styleMask.contains(.titled)
-            let hideFromTaskbar = isFrameless || styleMask.contains(.nonactivatingPanel)
-            cak_window_apply_frameless(hwnd, isFrameless ? 1 : 0)
-            cak_window_set_tool_style(hwnd, hideFromTaskbar ? 1 : 0, 0)
+          if !wasVisible {
+            contentView?.flushNativeWindowPaint()
           }
         #endif
-      }
-      contentView?.layoutSubtreeIfNeeded()
-      nativeWindow?.show()
-      #if os(Windows)
-        if !wasVisible {
-          contentView?.flushNativeWindowPaint()
-        }
+        if canBecomeKey { nativeWindow?.focus() }
       #endif
-      if canBecomeKey { nativeWindow?.focus() }
+      becomeKey()
+      onDidOrderFront?()
     #endif
-    becomeKey()
     if let name = autosaveName { saveFrame(named: name) }
   }
 
   open func makeKey() {
     guard canBecomeKey else { return }
-    #if !os(macOS)
+    #if CROSS_SWIFTUI_HARMONY
+      HarmonyWindowBridge.focusWindow(self)
+    #elseif !os(macOS)
       nativeWindow?.focus()
     #endif
     becomeKey()
@@ -952,23 +1332,30 @@ open class NSWindow: NSResponder {
       ensureTransparentEnvelopeBeforeShow()
     #endif
     isVisible = true
-    #if !os(macOS)
-      #if os(Windows)
-        if let hwnd = nativeWindow?.nativeObject, !styleMask.contains(.titled) {
-          cak_window_apply_frameless(hwnd, 1)
-        }
-      #endif
+    #if CROSS_SWIFTUI_HARMONY
       contentView?.layoutSubtreeIfNeeded()
-      if styleMask.contains(.nonactivatingPanel) {
-        nativeWindow?.showInactive()
-      } else {
-        nativeWindow?.show()
-      }
-      #if os(Windows)
-        if !wasVisible {
-          contentView?.flushNativeWindowPaint()
+      onDidOrderFront?()
+      HarmonyWindowBridge.openOrShow(self, focus: false)
+    #else
+      #if !os(macOS)
+        #if os(Windows)
+          if let hwnd = nativeWindow?.nativeObject, !styleMask.contains(.titled) {
+            cak_window_apply_frameless(hwnd, 1)
+          }
+        #endif
+        contentView?.layoutSubtreeIfNeeded()
+        if styleMask.contains(.nonactivatingPanel) {
+          nativeWindow?.showInactive()
+        } else {
+          nativeWindow?.show()
         }
+        #if os(Windows)
+          if !wasVisible {
+            contentView?.flushNativeWindowPaint()
+          }
+        #endif
       #endif
+      onDidOrderFront?()
     #endif
   }
 
@@ -978,23 +1365,36 @@ open class NSWindow: NSResponder {
       ensureTransparentEnvelopeBeforeShow()
     #endif
     isVisible = true
-    #if !os(macOS)
-      #if os(Windows)
-        if let hwnd = nativeWindow?.nativeObject, !styleMask.contains(.titled) {
-          cak_window_apply_frameless(hwnd, 1)
-        }
-      #endif
-      contentView?.layoutSubtreeIfNeeded()
-      if canBecomeKey && isKeyWindow {
-        nativeWindow?.show()
+    #if CROSS_SWIFTUI_HARMONY
+      onDidOrderFront?()
+      if !wasVisible {
+        HarmonyWindowBridge.openOrShow(self, focus: canBecomeKey && isKeyWindow)
       } else {
-        nativeWindow?.showInactive()
-      }
-      #if os(Windows)
-        if !wasVisible {
-          contentView?.flushNativeWindowPaint()
+        HarmonyWindowBridge.syncFrame(for: self)
+        if canBecomeKey && isKeyWindow {
+          HarmonyWindowBridge.focusWindow(self)
         }
+      }
+    #else
+      #if !os(macOS)
+        #if os(Windows)
+          if let hwnd = nativeWindow?.nativeObject, !styleMask.contains(.titled) {
+            cak_window_apply_frameless(hwnd, 1)
+          }
+        #endif
+        contentView?.layoutSubtreeIfNeeded()
+        if canBecomeKey && isKeyWindow {
+          nativeWindow?.show()
+        } else {
+          nativeWindow?.showInactive()
+        }
+        #if os(Windows)
+          if !wasVisible {
+            contentView?.flushNativeWindowPaint()
+          }
+        #endif
       #endif
+      onDidOrderFront?()
     #endif
   }
 
@@ -1008,7 +1408,9 @@ open class NSWindow: NSResponder {
       }
     #endif
     if isKeyWindow { resignKey() }
-    #if !os(macOS)
+    #if CROSS_SWIFTUI_HARMONY
+      HarmonyWindowBridge.hideWindow(self)
+    #elseif !os(macOS)
       nativeWindow?.hide()
     #endif
   }
@@ -1018,6 +1420,9 @@ open class NSWindow: NSResponder {
     NotificationCenter.default.post(note)
     delegate?.windowWillClose(note)
     orderOut(nil)
+    #if CROSS_SWIFTUI_HARMONY
+      HarmonyWindowBridge.destroyWindowIfSecondary(self)
+    #endif
     if isReleasedWhenClosed {
       #if !os(macOS)
         _ = nativeWindow?.close()

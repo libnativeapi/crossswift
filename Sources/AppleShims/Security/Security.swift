@@ -2,8 +2,10 @@ import Foundation
 @_exported import CoreFoundation
 #if os(Windows)
   import CAppKitWindows
-#elseif os(Linux)
+#elseif canImport(Glibc)
   import Glibc
+#elseif canImport(Musl)
+  import Musl
 #endif
 
 #if !os(macOS)

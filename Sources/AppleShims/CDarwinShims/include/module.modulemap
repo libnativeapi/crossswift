@@ -1,0 +1,4 @@
+module CDarwinShims {
+  header "CDarwinShims.h"
+  export *
+}

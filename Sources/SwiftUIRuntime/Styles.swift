@@ -315,6 +315,7 @@ extension View {
   public func saturation(_ amount: Double) -> some View {
     TransformView(content: self) {
       func apply(_ element: inout Element) {
+        element.props.saturation *= amount
         element.props.foreground = element.props.foreground?.saturating(amount)
         element.props.background = element.props.background?.saturating(amount)
         element.props.borderColor = element.props.borderColor.saturating(amount)

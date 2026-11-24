@@ -2,6 +2,13 @@ public struct ButtonStyleConfiguration {
   public typealias Label = AnyView
   public let label: Label
   public let isPressed: Bool
+  public let role: ButtonRole?
+
+  public init(label: Label, isPressed: Bool, role: ButtonRole? = nil) {
+    self.label = label
+    self.isPressed = isPressed
+    self.role = role
+  }
 }
 @MainActor @preconcurrency public protocol ButtonStyle {
   associatedtype Body: View
@@ -21,7 +28,7 @@ struct StyledButton<Label: View, Style: ButtonStyle>: View, _PrimitiveView {
   func _makeElement(path: ViewPath) -> Element {
     let isEnabled = EnvironmentValues.current.isEnabled
     let config = ButtonStyleConfiguration(
-      label: AnyView(button.label), isPressed: isEnabled && pressed)
+      label: AnyView(button.label), isPressed: isEnabled && pressed, role: button.role)
     let content: Style.Body
     if let graph = EvaluationGraph.active {
       content = graph.trackObservation { style.makeBody(configuration: config) }

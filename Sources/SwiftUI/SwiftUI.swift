@@ -10,6 +10,18 @@
   @_exported import SwiftUIAndroid
 #elseif CROSS_SWIFTUI_HARMONY
   @_exported import SwiftUIHarmony
+  #if CROSS_SWIFTUI_HARMONY_DESKTOP
+    @_exported import CrossSwiftUI
+    @_exported import CrossAppKit
+    @_exported import CrossUIKit
+    @_exported import CrossFoundation
+    @_exported import CoreGraphics
+    @_exported import Combine
+
+    extension SwiftUIRuntime.Path {
+      public var cgPath: CGPath { CGPath(commands: self.commands) }
+    }
+  #endif
 #else
   @_exported import CrossSwiftUI
   #if !os(macOS)

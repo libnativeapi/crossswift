@@ -109,17 +109,24 @@ open class NSMenuItem: NSObject {
       let kind: NativeAPI.MenuItemType = isSeparator ? .separator : .normal
       if let item = NativeAPI.MenuItem.createWithLabelAndType(title, type: kind) {
         self.nativeItem = item
-        if !keyEquivalent.isEmpty {
-          var mods: NativeAPI.ModifierKey = []
-          if keyEquivalentModifierMask.contains(.command) { mods.insert(.ctrl) }
-          if keyEquivalentModifierMask.contains(.control) { mods.insert(.ctrl) }
-          if keyEquivalentModifierMask.contains(.shift) { mods.insert(.shift) }
-          if keyEquivalentModifierMask.contains(.option) { mods.insert(.alt) }
-          item.setAccelerator(NativeAPI.KeyboardAccelerator(modifiers: mods, key: keyEquivalent.uppercased()))
-        }
+        #if !CROSS_SWIFTUI_HARMONY
+          if !keyEquivalent.isEmpty {
+            var mods: NativeAPI.ModifierKey = []
+            if keyEquivalentModifierMask.contains(.command) { mods.insert(.ctrl) }
+            if keyEquivalentModifierMask.contains(.control) { mods.insert(.ctrl) }
+            if keyEquivalentModifierMask.contains(.shift) { mods.insert(.shift) }
+            if keyEquivalentModifierMask.contains(.option) { mods.insert(.alt) }
+            item.setAccelerator(NativeAPI.KeyboardAccelerator(modifiers: mods, key: keyEquivalent.uppercased()))
+          }
+        #endif
         listenerId = item.addListener { [weak self] event in
           if case .itemClicked = event {
-            #if os(Linux)
+            #if CROSS_SWIFTUI_HARMONY
+              let boxSelf = self
+              _performOnMainActor {
+                boxSelf?.invoke()
+              }
+            #elseif os(Linux)
               MainActor.assumeIsolated {
                 self?.invoke()
               }
@@ -334,9 +341,18 @@ open class NSStatusItem: NSObject {
   #if !os(macOS)
     public private(set) var nativeTrayIcon: NativeAPI.TrayIcon?
     private var listenerId: ListenerId?
+    private weak var lastAppliedImage: NSImage?
+    private var lastAppliedTemplate: Bool = false
+    private var lastAppliedTooltip: String?
 
     private func syncContextMenuTrigger() {
-      #if os(Linux)
+      #if CROSS_SWIFTUI_HARMONY
+        if menu != nil {
+          nativeTrayIcon?.setContextMenuTrigger(.rightClicked)
+        } else {
+          nativeTrayIcon?.setContextMenuTrigger(.none)
+        }
+      #elseif os(Linux)
         if menu == nil {
           nativeTrayIcon?.setContextMenuTrigger(.none)
         } else if onLeftClick != nil {
@@ -363,8 +379,11 @@ open class NSStatusItem: NSObject {
           ?? ProcessInfo.processInfo.processName
         if !defaultTooltip.isEmpty {
           tray.setTooltip(defaultTooltip)
+          self.lastAppliedTooltip = defaultTooltip
         }
-        _ = tray.setVisible(true)
+        #if !CROSS_SWIFTUI_HARMONY
+          _ = tray.setVisible(true)
+        #endif
         listenerId = tray.addListener { [weak self] event in
           let boxSelf = self
           nonisolated(unsafe) let boxEvent = event
@@ -375,9 +394,16 @@ open class NSStatusItem: NSObject {
               if let onLeftClick = self.onLeftClick {
                 onLeftClick()
               } else if let menu = self.menu {
-                menu.delegate?.menuNeedsUpdate(menu)
-                #if !os(Linux)
-                  _ = self.nativeTrayIcon?.openContextMenu()
+                #if CROSS_SWIFTUI_HARMONY
+                  _harmonyPresentMainWindow()
+                  let hasVisibleWindows = NSApplication.shared.windows.contains { $0.isVisible }
+                  _ = NSApplication.shared.delegate?.applicationShouldHandleReopen(
+                    NSApplication.shared, hasVisibleWindows: hasVisibleWindows)
+                #else
+                  menu.delegate?.menuNeedsUpdate(menu)
+                  #if !os(Linux)
+                    _ = self.nativeTrayIcon?.openContextMenu()
+                  #endif
                 #endif
               } else {
                 _ = self.button?.sendAction(self.button?.action, to: self.button?.target)
@@ -400,15 +426,32 @@ open class NSStatusItem: NSObject {
 
   public func syncButtonAppearance() {
     #if !os(macOS)
-      if let nsImg = button?.image, let img = nsImg.toNativeImage() {
-        nativeTrayIcon?.setIconTemplate(nsImg.isTemplate)
-        nativeTrayIcon?.setIcon(img)
-      }
       if let tip = button?.toolTip, !tip.isEmpty {
-        nativeTrayIcon?.setTooltip(tip)
+        if tip != lastAppliedTooltip {
+          nativeTrayIcon?.setTooltip(tip)
+          lastAppliedTooltip = tip
+        }
       } else if let title = button?.title, !title.isEmpty {
         nativeTrayIcon?.setTitle(title)
-        nativeTrayIcon?.setTooltip(title)
+        if title != lastAppliedTooltip {
+          nativeTrayIcon?.setTooltip(title)
+          lastAppliedTooltip = title
+        }
+      }
+      if let nsImg = button?.image {
+        if nsImg !== lastAppliedImage || nsImg.isTemplate != lastAppliedTemplate {
+          if let img = nsImg.toNativeImage() {
+            nativeTrayIcon?.setIconTemplate(nsImg.isTemplate)
+            nativeTrayIcon?.setIcon(img)
+            lastAppliedImage = nsImg
+            lastAppliedTemplate = nsImg.isTemplate
+          }
+        }
+        #if CROSS_SWIFTUI_HARMONY
+          if isVisible, lastAppliedImage != nil, nativeTrayIcon?.isVisible() == false {
+            _ = nativeTrayIcon?.setVisible(true)
+          }
+        #endif
       }
     #endif
   }

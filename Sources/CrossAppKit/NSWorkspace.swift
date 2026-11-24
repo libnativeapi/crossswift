@@ -5,8 +5,10 @@ import Foundation
 #endif
 #if os(Windows)
   import CAppKitWindows
-#elseif os(Linux)
+#elseif canImport(Glibc)
   import Glibc
+#elseif canImport(Musl)
+  import Musl
 #endif
 
 open class NSRunningApplication: NSObject, @unchecked Sendable {

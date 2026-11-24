@@ -5,8 +5,10 @@ import NativeAPI
 import Observation
 import SwiftUIRuntime
 
-#if os(Linux)
+#if os(Linux) && !CROSS_SWIFTUI_HARMONY
   import CGTK3
+#elseif CROSS_SWIFTUI_HARMONY
+  import SwiftUIHarmony
 #endif
 
 /// Collects leaf scenes recursively from `@SceneBuilder` trees (`TupleScene`, custom `Scene`s).
@@ -85,8 +87,15 @@ private func populateMenu(_ menu: NSMenu, from content: AnyView) {
   guard let tree = evaluateDetachedTree(content) else { return }
   func walk(_ node: Element) {
     if node.kind == .button || node.kind == .styledButton {
+      #if CROSS_SWIFTUI_HARMONY
+        guard node.props.enabled else { return }
+      #endif
       let title = !node.props.text.isEmpty ? node.props.text : findFirstText(in: node)
-      let keyEq = node.props.keyboardShortcut.map { String($0.key.character) } ?? ""
+      #if CROSS_SWIFTUI_HARMONY
+        let keyEq = ""
+      #else
+        let keyEq = node.props.keyboardShortcut.map { String($0.key.character) } ?? ""
+      #endif
       let mi = NSMenuItem(title: title, action: nil, keyEquivalent: keyEq)
       mi.isEnabled = node.props.enabled
       if let act = node.action {
@@ -224,7 +233,7 @@ private final class DesktopSceneCoordinator {
         env.dismissWindow = dismissAction
       }
       let layout = LayoutEngine(textMeasurer: WindowsDrawingBackend.measureText)
-    #elseif os(Linux)
+    #elseif os(Linux) && !CROSS_SWIFTUI_HARMONY
       guard let backend = LinuxDrawingBackend(window: window) else {
         fatalError("Could not attach the Linux drawing backend")
       }
@@ -249,7 +258,7 @@ private final class DesktopSceneCoordinator {
     backend.onResize = { [weak renderer] size in
       renderer?.resize(to: size)
     }
-    #if os(Windows) || os(Linux)
+    #if os(Windows) || (os(Linux) && !CROSS_SWIFTUI_HARMONY)
       #if os(Linux)
         let usesCanvasPressState = true
       #else
@@ -285,7 +294,7 @@ private final class DesktopSceneCoordinator {
     }
 
     window.show()
-    #if os(Windows) || os(Linux)
+    #if os(Windows) || (os(Linux) && !CROSS_SWIFTUI_HARMONY)
       backend.focusInitialControl()
     #endif
 
@@ -425,27 +434,6 @@ private final class MenuBarExtraHost<A: App>: NSMenuDelegate {
       statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     }
     guard let item = statusItem else { return }
-    item.isVisible = true
-
-    // Evaluate label view to extract icon or text
-    let labelTree = evaluateDetachedTree(extra._makeLabelView())
-    if let imgPath = findFirstImagePath(in: labelTree), !imgPath.isEmpty {
-      if imgPath.hasPrefix("sf://") {
-        let sym = String(imgPath.dropFirst(5))
-        if let nsImg = NSImage(systemSymbolName: sym, accessibilityDescription: nil) {
-          item.button?.image = nsImg
-        }
-      } else if let nsImg = NSImage(contentsOfFile: imgPath) {
-        item.button?.image = nsImg
-      }
-    }
-    let labelText = findFirstText(in: labelTree)
-    if !labelText.isEmpty {
-      item.button?.title = labelText
-    } else if !extra._title.isEmpty {
-      item.button?.toolTip = extra._title
-    }
-    item.syncButtonAppearance()
 
     if extra._style == .window {
       item.menu = nil
@@ -460,14 +448,61 @@ private final class MenuBarExtraHost<A: App>: NSMenuDelegate {
       populateMenu(menu, from: extra._makeContentView())
       item.menu = menu
     }
+
+    // Evaluate label view to extract icon or text
+    let labelTree = evaluateDetachedTree(extra._makeLabelView())
+    let labelText = findFirstText(in: labelTree)
+    if !labelText.isEmpty {
+      item.button?.title = labelText
+    } else if !extra._title.isEmpty {
+      item.button?.toolTip = extra._title
+    }
+    if let imgPath = findFirstImagePath(in: labelTree), !imgPath.isEmpty {
+      if imgPath.hasPrefix("sf://") {
+        let sym = String(imgPath.dropFirst(5))
+        if let nsImg = NSImage(systemSymbolName: sym, accessibilityDescription: nil) {
+          item.button?.image = nsImg
+        }
+      } else if let nsImg = NSImage(contentsOfFile: imgPath) {
+        item.button?.image = nsImg
+      }
+    }
+    item.isVisible = true
+    item.syncButtonAppearance()
   }
 }
+
+#if CROSS_SWIFTUI_HARMONY
+  @MainActor private var retainedHarmonyApps: [Any] = []
+#endif
 
 @MainActor
 public func runApp<A: App>(_ app: A) {
   installAssetResolversOnce()
   NSApplication.shared.ensureSingleInstance()
 
+  #if CROSS_SWIFTUI_HARMONY
+    retainedHarmonyApps.append(app)
+    for child in Mirror(reflecting: app).children {
+      if let provider = child.value as? any _ApplicationDelegateProvider {
+        provider._installDelegate()
+      }
+    }
+    let rootScene = app.body
+    let scenes = flattenScenes(rootScene)
+    let allWindowScenes = scenes.compactMap { $0 as? any _WindowScene }
+    let primaryWindowScene = allWindowScenes.first(where: { $0._opensAtLaunch }) ?? allWindowScenes.first
+    NSApplication.shared.finishLaunching()
+    UIApplication.shared._notifyFinishLaunchingFromSwiftUI()
+    let menuExtras = scenes.compactMap { $0 as? any _MenuBarExtraScene }
+    for idx in menuExtras.indices {
+      retainedHarmonyApps.append(MenuBarExtraHost(app: app, index: idx))
+    }
+    if let windowScene = primaryWindowScene, windowScene._opensAtLaunch {
+      HarmonyHost.mountRootView(windowScene._makeRootView())
+    }
+    return
+  #else
   let rootScene = app.body
   let scenes = flattenScenes(rootScene)
   let allWindowScenes = scenes.compactMap { $0 as? any _WindowScene }
@@ -480,7 +515,7 @@ public func runApp<A: App>(_ app: A) {
 
   let application = NativeAPI.Application.shared
   _ = application.isRunning()
-  #if os(Linux)
+  #if os(Linux) && !CROSS_SWIFTUI_HARMONY
     if let gtkApplication = g_application_get_default() {
       if let identifier = primaryWindowScene?._applicationIdentifier {
         precondition(g_application_id_is_valid(identifier) != 0, "Invalid application identifier")
@@ -562,6 +597,7 @@ public func runApp<A: App>(_ app: A) {
     NSApplication.shared.run()
   }
   UIApplication.shared._notifyWillTerminate()
+  #endif
 }
 
 private func startSmokeTimer() {

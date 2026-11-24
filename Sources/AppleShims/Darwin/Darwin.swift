@@ -6,6 +6,8 @@ import CoreFoundation
   import CAppKitWindows
 #elseif canImport(Glibc)
   @_exported import Glibc
+#elseif canImport(Musl)
+  @_exported import Musl
 #endif
 
 #if os(Linux)
@@ -22,48 +24,86 @@ import CoreFoundation
   public let SF_RESTRICTED: Int32 = 0x00080000
   public let SF_FIRMLINK: Int32 = 0x00800000
   public let XATTR_NOFOLLOW: Int32 = 0x0001
-  public let POSIX_SPAWN_SETSID: Int32 = 0x0400
-  public let FNM_CASEFOLD: Int32 = 0x10
+  #if canImport(Glibc)
+    public let POSIX_SPAWN_SETSID: Int32 = 0x0400
+    public let FNM_CASEFOLD: Int32 = 0x10
 
-  // Linux Glibc exposes SOCK_STREAM as `__socket_type` and IFF_* as `Int`,
-  // whereas Darwin exposes them as `Int32`.
-  public let SOCK_STREAM: Int32 = Int32(Glibc.SOCK_STREAM.rawValue)
-  public let IFF_UP: Int32 = 0x1
-  public let IFF_LOOPBACK: Int32 = 0x8
-  public let IFF_RUNNING: Int32 = 0x40
+    // Linux Glibc exposes SOCK_STREAM as `__socket_type` and IFF_* as `Int`,
+    // whereas Darwin and Musl expose them as `Int32`.
+    public let SOCK_STREAM: Int32 = Int32(Glibc.SOCK_STREAM.rawValue)
+    public let IFF_UP: Int32 = 0x1
+    public let IFF_LOOPBACK: Int32 = 0x8
+    public let IFF_RUNNING: Int32 = 0x40
+  #endif
 
-  extension Glibc.sockaddr {
-    public var sa_len: UInt8 {
-      sa_family == UInt16(AF_INET6)
-        ? UInt8(MemoryLayout<sockaddr_in6>.size)
-        : UInt8(MemoryLayout<sockaddr_in>.size)
+  #if canImport(Glibc)
+    extension Glibc.sockaddr {
+      public var sa_len: UInt8 {
+        sa_family == UInt16(AF_INET6)
+          ? UInt8(MemoryLayout<sockaddr_in6>.size)
+          : UInt8(MemoryLayout<sockaddr_in>.size)
+      }
     }
-  }
 
-  extension Glibc.timeval {
-    public init(tv_sec: Int, tv_usec: Int32) {
-      self.init(tv_sec: tv_sec, tv_usec: Int(tv_usec))
+    extension Glibc.timeval {
+      public init(tv_sec: Int, tv_usec: Int32) {
+        self.init(tv_sec: tv_sec, tv_usec: Int(tv_usec))
+      }
     }
-  }
 
-  public func getloadavg(_ loadavg: UnsafeMutablePointer<Double>?, _ nelem: Int32) -> Int32 {
-    guard let loadavg else { return -1 }
-    return Glibc.getloadavg(loadavg, nelem)
-  }
+    public func getloadavg(_ loadavg: UnsafeMutablePointer<Double>?, _ nelem: Int32) -> Int32 {
+      guard let loadavg else { return -1 }
+      return Glibc.getloadavg(loadavg, nelem)
+    }
 
-  extension Glibc.stat {
-    public var st_flags: UInt32 { 0 }
-    public var st_mtimespec: Glibc.timespec { st_mtim }
-    public var st_atimespec: Glibc.timespec { st_atim }
-    public var st_ctimespec: Glibc.timespec { st_ctim }
-    public var st_birthtimespec: Glibc.timespec { st_ctim }
-  }
+    extension Glibc.stat {
+      public var st_flags: UInt32 { 0 }
+      public var st_mtimespec: Glibc.timespec { st_mtim }
+      public var st_atimespec: Glibc.timespec { st_atim }
+      public var st_ctimespec: Glibc.timespec { st_ctim }
+      public var st_birthtimespec: Glibc.timespec { st_ctim }
+    }
 
-  public func mach_absolute_time() -> UInt64 {
-    var ts = Glibc.timespec()
-    Glibc.clock_gettime(CLOCK_MONOTONIC, &ts)
-    return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
-  }
+    public func mach_absolute_time() -> UInt64 {
+      var ts = Glibc.timespec()
+      Glibc.clock_gettime(CLOCK_MONOTONIC, &ts)
+      return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
+    }
+  #elseif canImport(Musl)
+    extension Musl.sockaddr {
+      public var sa_len: UInt8 {
+        sa_family == UInt16(AF_INET6)
+          ? UInt8(MemoryLayout<sockaddr_in6>.size)
+          : UInt8(MemoryLayout<sockaddr_in>.size)
+      }
+    }
+
+    extension Musl.timeval {
+      public init(tv_sec: Int, tv_usec: Int32) {
+        self.init(tv_sec: tv_sec, tv_usec: Int(tv_usec))
+      }
+    }
+
+    public func getloadavg(_ loadavg: UnsafeMutablePointer<Double>?, _ nelem: Int32) -> Int32 {
+      guard let loadavg, nelem > 0 else { return -1 }
+      for i in 0..<Int(nelem) { loadavg[i] = 0 }
+      return nelem
+    }
+
+    extension Musl.stat {
+      public var st_flags: UInt32 { 0 }
+      public var st_mtimespec: Musl.timespec { st_mtim }
+      public var st_atimespec: Musl.timespec { st_atim }
+      public var st_ctimespec: Musl.timespec { st_ctim }
+      public var st_birthtimespec: Musl.timespec { st_ctim }
+    }
+
+    public func mach_absolute_time() -> UInt64 {
+      var ts = Musl.timespec()
+      Musl.clock_gettime(CLOCK_MONOTONIC, &ts)
+      return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
+    }
+  #endif
 
   public func sysctlbyname(
     _ name: UnsafePointer<CChar>,
@@ -91,11 +131,15 @@ import CoreFoundation
   ) -> Int32 { -1 }
 
   // Darwin declares posix_spawnattr_t / posix_spawn_file_actions_t as opaque pointers
-  // (so Swift code holds `posix_spawnattr_t?`), while Linux Glibc declares them as C structs.
+  // (so Swift code holds `posix_spawnattr_t?`), while Linux Glibc/Musl declare them as C structs.
   @discardableResult
   public func posix_spawnattr_init(_ attr: UnsafeMutablePointer<posix_spawnattr_t?>) -> Int32 {
     var raw = posix_spawnattr_t()
-    let rc = Glibc.posix_spawnattr_init(&raw)
+    #if canImport(Glibc)
+      let rc = Glibc.posix_spawnattr_init(&raw)
+    #else
+      let rc = Musl.posix_spawnattr_init(&raw)
+    #endif
     attr.pointee = raw
     return rc
   }
@@ -103,7 +147,11 @@ import CoreFoundation
   @discardableResult
   public func posix_spawnattr_destroy(_ attr: UnsafeMutablePointer<posix_spawnattr_t?>) -> Int32 {
     guard var raw = attr.pointee else { return 0 }
-    let rc = Glibc.posix_spawnattr_destroy(&raw)
+    #if canImport(Glibc)
+      let rc = Glibc.posix_spawnattr_destroy(&raw)
+    #else
+      let rc = Musl.posix_spawnattr_destroy(&raw)
+    #endif
     attr.pointee = nil
     return rc
   }
@@ -111,7 +159,11 @@ import CoreFoundation
   @discardableResult
   public func posix_spawnattr_setflags(_ attr: UnsafeMutablePointer<posix_spawnattr_t?>, _ flags: Int16) -> Int32 {
     guard var raw = attr.pointee else { return -1 }
-    let rc = Glibc.posix_spawnattr_setflags(&raw, flags)
+    #if canImport(Glibc)
+      let rc = Glibc.posix_spawnattr_setflags(&raw, flags)
+    #else
+      let rc = Musl.posix_spawnattr_setflags(&raw, flags)
+    #endif
     attr.pointee = raw
     return rc
   }
@@ -119,7 +171,11 @@ import CoreFoundation
   @discardableResult
   public func posix_spawn_file_actions_init(_ actions: UnsafeMutablePointer<posix_spawn_file_actions_t?>) -> Int32 {
     var raw = posix_spawn_file_actions_t()
-    let rc = Glibc.posix_spawn_file_actions_init(&raw)
+    #if canImport(Glibc)
+      let rc = Glibc.posix_spawn_file_actions_init(&raw)
+    #else
+      let rc = Musl.posix_spawn_file_actions_init(&raw)
+    #endif
     actions.pointee = raw
     return rc
   }
@@ -127,7 +183,11 @@ import CoreFoundation
   @discardableResult
   public func posix_spawn_file_actions_destroy(_ actions: UnsafeMutablePointer<posix_spawn_file_actions_t?>) -> Int32 {
     guard var raw = actions.pointee else { return 0 }
-    let rc = Glibc.posix_spawn_file_actions_destroy(&raw)
+    #if canImport(Glibc)
+      let rc = Glibc.posix_spawn_file_actions_destroy(&raw)
+    #else
+      let rc = Musl.posix_spawn_file_actions_destroy(&raw)
+    #endif
     actions.pointee = nil
     return rc
   }
@@ -137,10 +197,14 @@ import CoreFoundation
     _ actions: UnsafeMutablePointer<posix_spawn_file_actions_t?>,
     _ path: UnsafePointer<CChar>?
   ) -> Int32 {
-    guard var raw = actions.pointee, let path else { return 0 }
-    let rc = Glibc.posix_spawn_file_actions_addchdir_np(&raw, path)
-    actions.pointee = raw
-    return rc
+    #if canImport(Glibc)
+      guard var raw = actions.pointee, let path else { return 0 }
+      let rc = Glibc.posix_spawn_file_actions_addchdir_np(&raw, path)
+      actions.pointee = raw
+      return rc
+    #else
+      return ENOTSUP
+    #endif
   }
 
   @discardableResult
@@ -150,7 +214,11 @@ import CoreFoundation
     _ newfildes: Int32
   ) -> Int32 {
     guard var raw = actions.pointee else { return -1 }
-    let rc = Glibc.posix_spawn_file_actions_adddup2(&raw, fildes, newfildes)
+    #if canImport(Glibc)
+      let rc = Glibc.posix_spawn_file_actions_adddup2(&raw, fildes, newfildes)
+    #else
+      let rc = Musl.posix_spawn_file_actions_adddup2(&raw, fildes, newfildes)
+    #endif
     actions.pointee = raw
     return rc
   }
@@ -161,7 +229,11 @@ import CoreFoundation
     _ fildes: Int32
   ) -> Int32 {
     guard var raw = actions.pointee else { return -1 }
-    let rc = Glibc.posix_spawn_file_actions_addclose(&raw, fildes)
+    #if canImport(Glibc)
+      let rc = Glibc.posix_spawn_file_actions_addclose(&raw, fildes)
+    #else
+      let rc = Musl.posix_spawn_file_actions_addclose(&raw, fildes)
+    #endif
     actions.pointee = raw
     return rc
   }
@@ -177,23 +249,43 @@ import CoreFoundation
     guard let path, let argv else { return -1 }
     var fa = file_actions?.pointee
     var at = attrp?.pointee
-    if fa != nil && at != nil {
-      return withUnsafePointer(to: &fa!) { faPtr in
-        withUnsafePointer(to: &at!) { atPtr in
-          Glibc.posix_spawn(pid, path, faPtr, atPtr, argv, envp)
+    #if canImport(Glibc)
+      if fa != nil && at != nil {
+        return withUnsafePointer(to: &fa!) { faPtr in
+          withUnsafePointer(to: &at!) { atPtr in
+            Glibc.posix_spawn(pid, path, faPtr, atPtr, argv, envp)
+          }
         }
+      } else if fa != nil {
+        return withUnsafePointer(to: &fa!) { faPtr in
+          Glibc.posix_spawn(pid, path, faPtr, nil, argv, envp)
+        }
+      } else if at != nil {
+        return withUnsafePointer(to: &at!) { atPtr in
+          Glibc.posix_spawn(pid, path, nil, atPtr, argv, envp)
+        }
+      } else {
+        return Glibc.posix_spawn(pid, path, nil, nil, argv, envp)
       }
-    } else if fa != nil {
-      return withUnsafePointer(to: &fa!) { faPtr in
-        Glibc.posix_spawn(pid, path, faPtr, nil, argv, envp)
+    #else
+      if fa != nil && at != nil {
+        return withUnsafePointer(to: &fa!) { faPtr in
+          withUnsafePointer(to: &at!) { atPtr in
+            Musl.posix_spawn(pid, path, faPtr, atPtr, argv, envp)
+          }
+        }
+      } else if fa != nil {
+        return withUnsafePointer(to: &fa!) { faPtr in
+          Musl.posix_spawn(pid, path, faPtr, nil, argv, envp)
+        }
+      } else if at != nil {
+        return withUnsafePointer(to: &at!) { atPtr in
+          Musl.posix_spawn(pid, path, nil, atPtr, argv, envp)
+        }
+      } else {
+        return Musl.posix_spawn(pid, path, nil, nil, argv, envp)
       }
-    } else if at != nil {
-      return withUnsafePointer(to: &at!) { atPtr in
-        Glibc.posix_spawn(pid, path, nil, atPtr, argv, envp)
-      }
-    } else {
-      return Glibc.posix_spawn(pid, path, nil, nil, argv, envp)
-    }
+    #endif
   }
 
   public let IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: Int32 = 3

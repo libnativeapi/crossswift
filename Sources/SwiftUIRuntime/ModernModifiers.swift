@@ -648,6 +648,13 @@ public struct Namespace: _StateProperty {
 }
 
 extension View {
+  func _backdropBlur(radius: CGFloat) -> some View {
+    TransformView(content: self) { el in
+      el.props.backdropBlurRadius = max(el.props.backdropBlurRadius, max(0, Double(radius)))
+      el.props.clipped = true
+    }
+  }
+
   public func glassEffect<S: Shape>(
     _ glass: Glass = .regular,
     in shape: S = Capsule(),
@@ -656,24 +663,82 @@ extension View {
     guard isEnabled, glass.variant != .identity else {
       return AnyView(self)
     }
-    let fill = Color { scheme in
-      if let tint = glass.tintColor {
-        let r = tint.resolved(in: scheme)
-        return (r.red, r.green, r.blue, max(0.18, r.opacity * 0.35))
+    #if CROSS_SWIFTUI_HARMONY_DESKTOP
+      let fill = Color { scheme in
+        if let tint = glass.tintColor {
+          let r = tint.resolved(in: scheme)
+          return (r.red, r.green, r.blue, max(0.20, r.opacity * 0.40))
+        }
+        if glass.variant == .clear {
+          return scheme == .dark ? (1.0, 1.0, 1.0, 0.08) : (1.0, 1.0, 1.0, 0.40)
+        }
+        return scheme == .dark ? (0.12, 0.12, 0.15, 0.62) : (0.97, 0.97, 0.99, 0.68)
       }
-      if glass.variant == .clear {
-        return scheme == .dark ? (1.0, 1.0, 1.0, 0.05) : (1.0, 1.0, 1.0, 0.35)
+      let border = Color { scheme in
+        scheme == .dark ? (1.0, 1.0, 1.0, 0.18) : (0.0, 0.0, 0.0, 0.11)
       }
-      return scheme == .dark ? (0.15, 0.15, 0.17, 0.94) : (0.96, 0.96, 0.98, 0.95)
-    }
-    let border = Color { scheme in
-      scheme == .dark ? (1.0, 1.0, 1.0, 0.14) : (0.0, 0.0, 0.0, 0.10)
-    }
-    return AnyView(
-      self
-        .background(fill, in: shape)
-        .overlay { shape.strokeBorder(border, lineWidth: 1) }
-    )
+      let blurRadius: CGFloat = glass.variant == .clear ? 18 : 30
+      if shape.cornerRadius > 0 {
+        let shadowColor = Color { scheme in
+          scheme == .dark ? (0.0, 0.0, 0.0, 0.42) : (0.0, 0.0, 0.0, 0.14)
+        }
+        return AnyView(
+          self
+            .background {
+              shape.fill(fill)
+                ._backdropBlur(radius: blurRadius)
+            }
+            .overlay { shape.strokeBorder(border, lineWidth: 1) }
+            .shadow(color: shadowColor, radius: 14, x: 0, y: 4)
+        )
+      }
+      return AnyView(
+        self
+          .background {
+            shape.fill(fill)
+              ._backdropBlur(radius: blurRadius)
+          }
+          .overlay { shape.strokeBorder(border, lineWidth: 1) }
+      )
+    #else
+      let fill = Color { scheme in
+        if let tint = glass.tintColor {
+          let r = tint.resolved(in: scheme)
+          return (r.red, r.green, r.blue, max(0.18, r.opacity * 0.35))
+        }
+        if glass.variant == .clear {
+          return scheme == .dark ? (1.0, 1.0, 1.0, 0.05) : (1.0, 1.0, 1.0, 0.35)
+        }
+        return scheme == .dark ? (0.15, 0.15, 0.17, 0.94) : (0.96, 0.96, 0.98, 0.95)
+      }
+      let border = Color { scheme in
+        scheme == .dark ? (1.0, 1.0, 1.0, 0.14) : (0.0, 0.0, 0.0, 0.10)
+      }
+      #if CROSS_SWIFTUI_HARMONY
+        if shape.cornerRadius > 0 {
+          let shadowColor = Color { scheme in
+            scheme == .dark ? (0.0, 0.0, 0.0, 0.42) : (0.0, 0.0, 0.0, 0.14)
+          }
+          return AnyView(
+            self
+              .background(fill, in: shape)
+              .overlay { shape.strokeBorder(border, lineWidth: 1) }
+              .shadow(color: shadowColor, radius: 14, x: 0, y: 4)
+          )
+        }
+        return AnyView(
+          self
+            .background(fill, in: shape)
+            .overlay { shape.strokeBorder(border, lineWidth: 1) }
+        )
+      #else
+        return AnyView(
+          self
+            .background(fill, in: shape)
+            .overlay { shape.strokeBorder(border, lineWidth: 1) }
+        )
+      #endif
+    #endif
   }
 
   public func glassEffectID(_ id: (some Hashable)?, in namespace: Namespace.ID) -> some View {
@@ -1536,9 +1601,7 @@ private struct MaskView<Content: View, Mask: View>: View, _PrimitiveView {
     guard node.props.visible, effOpacity > 0.01 else { return }
     let sx = node.props.scaleX
     let sy = node.props.scaleY
-    let ox = node.props.offsetX
-    let oy = node.props.offsetY
-    let hasTransform = sx != 1.0 || sy != 1.0 || ox != 0.0 || oy != 0.0
+    let hasTransform = sx != 1.0 || sy != 1.0
 
     var local = Path()
     let r = CGRect(x: node.frame.minX, y: node.frame.minY, width: node.frame.width, height: node.frame.height)
@@ -1576,7 +1639,7 @@ private struct MaskView<Content: View, Mask: View>: View, _PrimitiveView {
     if hasTransform {
       let cx = node.frame.minX + node.frame.width * 0.5
       let cy = node.frame.minY + node.frame.height * 0.5
-      out.addPath(local.transformed(x: cx - cx * sx + ox, y: cy - cy * sy + oy, sx: sx, sy: sy))
+      out.addPath(local.transformed(x: cx - cx * sx, y: cy - cy * sy, sx: sx, sy: sy))
     } else {
       out.addPath(local)
     }

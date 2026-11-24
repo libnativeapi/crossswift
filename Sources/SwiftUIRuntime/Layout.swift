@@ -470,10 +470,14 @@ public struct LayoutEngine {
     case .textField:
       size = textSize(p.text.isEmpty ? " " : p.text, p.font)
       size.width = offer.width.map { Double($0) } ?? max(80, size.width)
-      #if os(Android) || CROSS_SWIFTUI_HARMONY
+      #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
       size.height = max(size.height + 28, 56)
       #else
-      if textMeasurer == nil { size.height = max(size.height, 20) }
+      if textMeasurer == nil {
+        size.height = max(size.height, p.plainTextField ? 18 : 24)
+      } else if !p.plainTextField {
+        size.height = max(size.height + 8, 24)
+      }
       #endif
       if p.multiline { size.height *= 3 }
     case .image:

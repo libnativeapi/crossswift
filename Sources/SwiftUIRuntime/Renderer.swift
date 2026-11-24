@@ -785,6 +785,13 @@ import Foundation
         _ = ancestry(focus, in: tree, into: &chain)
       }
       for node in chain { if node.keyAction?(press) == .handled { return true } }
+      if chain.isEmpty, let tree {
+        func dispatchKeyToTree(_ node: Element) -> Bool {
+          if node.keyAction?(press) == .handled { return true }
+          return node.children.contains(where: dispatchKeyToTree)
+        }
+        if dispatchKeyToTree(tree) { return true }
+      }
       if key == .return, let node = chain.first(where: { $0.submitAction != nil }) {
         node.submitAction?()
         return true

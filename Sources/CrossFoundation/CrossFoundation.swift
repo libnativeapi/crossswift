@@ -207,7 +207,7 @@ import Carbon
     }
   }
 
-  #if os(Windows)
+  #if os(Windows) || CROSS_SWIFTUI_HARMONY
     public final class _CrossDispatchSourceTimer: @unchecked Sendable {
       private let raw: any Dispatch.DispatchSourceTimer
       public init(_ raw: any Dispatch.DispatchSourceTimer) { self.raw = raw }
@@ -469,7 +469,7 @@ import Carbon
     ) {}
   }
 
-  #if os(Windows)
+  #if os(Windows) || CROSS_SWIFTUI_HARMONY
     open class NSCache<KeyType: AnyObject, ObjectType: AnyObject>: NSObject {
       private let backing = Foundation.NSCache<KeyType, ObjectType>()
 
@@ -533,7 +533,13 @@ import Carbon
           }
         }
       #endif
-      return Locale.preferredLanguages
+      var languages = Locale.preferredLanguages
+      if let hostLang = XCStringsCatalog.shared.preferredLanguage, !hostLang.isEmpty {
+        if !languages.contains(hostLang) {
+          languages.insert(hostLang, at: 0)
+        }
+      }
+      return languages
     }
   }
 

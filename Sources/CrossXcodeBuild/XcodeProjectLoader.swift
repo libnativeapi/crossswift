@@ -791,7 +791,20 @@ public final class XcodeProjectLoader {
     let copyright = infoPlistKeys["NSHumanReadableCopyright"]
     let categoryType = infoPlistKeys["LSApplicationCategoryType"]
     let rawLSUI = infoPlistKeys["LSUIElement"]?.lowercased()
-    let isAccessoryApp = rawLSUI == "yes" || rawLSUI == "true" || rawLSUI == "1"
+    var isAccessoryApp = rawLSUI == "yes" || rawLSUI == "true" || rawLSUI == "1"
+    if !isAccessoryApp, let infoPlistFile,
+      let data = try? Data(contentsOf: infoPlistFile),
+      let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+    {
+      if let flag = plist["LSUIElement"] as? Bool {
+        isAccessoryApp = flag
+      } else if let str = plist["LSUIElement"] as? String {
+        let lower = str.lowercased()
+        isAccessoryApp = lower == "yes" || lower == "true" || lower == "1"
+      } else if let num = plist["LSUIElement"] as? NSNumber {
+        isAccessoryApp = num.boolValue
+      }
+    }
     let genSymbolsSetting = settings["ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS"]?
       .uppercased()
     let generateAssetSymbols = genSymbolsSetting != "NO" && genSymbolsSetting != "FALSE"

@@ -210,6 +210,14 @@ extension Button: _PrimitiveView {
     let resolvedTitle = title.isEmpty ? text(renderedLabel) : title
     // Native push buttons only render plain text titles. Icon or composite
     // labels (e.g. Image(systemName: "chevron.up")) render through DefaultButtonStyle.
+    #if CROSS_SWIFTUI_HARMONY_DESKTOP
+    var styled = _render(
+      StyledButton(button: self, style: DefaultButtonStyle()),
+      path: path.appending(index: 1)
+    )
+    if role == .cancel { styled.props.keyboardShortcut = .cancelAction }
+    return styled
+    #else
     if !hasOnlyText(renderedLabel) || resolvedTitle.isEmpty {
       var styled = _render(
         StyledButton(button: self, style: DefaultButtonStyle()),
@@ -225,6 +233,7 @@ extension Button: _PrimitiveView {
     }
     props.text = resolvedTitle
     return Element(kind: .button, props: props, action: action)
+    #endif
   }
 }
 public struct Spacer: View {

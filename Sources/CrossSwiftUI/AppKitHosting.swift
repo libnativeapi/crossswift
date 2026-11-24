@@ -9,6 +9,30 @@ import SwiftUIRuntime
 #endif
 #if os(Windows)
   import CSwiftUIWindows
+#elseif CROSS_SWIFTUI_HARMONY
+  import SwiftUIHarmony
+
+  @_silgen_name("harmony_offscreen_create")
+  private func harmony_offscreen_create(_ width: Int32, _ height: Int32) -> UnsafeMutableRawPointer?
+
+  @_silgen_name("harmony_offscreen_path")
+  private func harmony_offscreen_path(
+    _ canvas: UnsafeMutableRawPointer?,
+    _ cmds: UnsafePointer<Double>?,
+    _ count: Int32,
+    _ fillARGB: UInt32,
+    _ strokeARGB: UInt32,
+    _ strokeWidth: Double
+  )
+
+  @_silgen_name("harmony_offscreen_finish_png")
+  private func harmony_offscreen_finish_png(
+    _ canvas: UnsafeMutableRawPointer?,
+    _ outLen: UnsafeMutablePointer<Int32>?
+  ) -> UnsafeMutablePointer<UInt8>?
+
+  @_silgen_name("harmony_free_bytes")
+  private func harmony_free_bytes(_ ptr: UnsafeMutablePointer<UInt8>?)
 #endif
 
 // MARK: - Hosted NSView / UIView Bridge Protocols
@@ -504,7 +528,7 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
     private var pendingWindowBoundsCommit: (() -> Void)?
     private var surfaceContentOffset: NSPoint = .zero
     private var usesEnvelopeSizing = false
-  #elseif os(Linux)
+  #elseif os(Linux) && !CROSS_SWIFTUI_HARMONY
     private var backend: LinuxDrawingBackend?
   #else
     private var backend: NativeViewBackend?
@@ -532,15 +556,18 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
       )
       return NSSize(width: CGFloat(measured.width), height: CGFloat(measured.height))
     }
-    return measureDetached(proposal: ProposedViewSize(width: frame.width > 0 ? frame.width : nil, height: nil))
+    let proposedWidth: CGFloat? = (sizingOptions == [.intrinsicContentSize] || frame.width <= 0) ? nil : frame.width
+    return measureDetached(proposal: ProposedViewSize(width: proposedWidth, height: nil))
   }
 
   private func measureDetached(proposal: ProposedViewSize) -> NSSize {
     #if os(Windows)
       let engine = LayoutEngine(textMeasurer: WindowsDrawingBackend.measureText)
-    #elseif os(Linux)
+    #elseif os(Linux) && !CROSS_SWIFTUI_HARMONY
       let pango = LinuxDrawing()
       let engine = LayoutEngine(textMeasurer: pango.measure)
+    #elseif CROSS_SWIFTUI_HARMONY
+      let engine = LayoutEngine(textMeasurer: HarmonyHost.measureText)
     #else
       let engine = LayoutEngine()
     #endif
@@ -726,7 +753,7 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
           red: Double(bg.r), green: Double(bg.g), blue: Double(bg.b), opacity: Double(bg.a)
         ))
       }
-    #elseif os(Linux)
+    #elseif os(Linux) && !CROSS_SWIFTUI_HARMONY
       backend?.environmentTransform = { env in
         env.colorScheme = isDark ? SwiftUIRuntime.ColorScheme.dark : SwiftUIRuntime.ColorScheme.light
       }
@@ -734,6 +761,21 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
   }
 
   private func attachIfPossible() {
+    #if CROSS_SWIFTUI_HARMONY
+      guard let win = window else { return }
+      let publishToHarmony: @MainActor () -> Void = { [weak self, weak win] in
+        guard let self, let win else { return }
+        HarmonyHost.mountRootView(
+          AnyView(HostingScopeView(host: self, content: self.rootView)),
+          forSurface: win.harmonySurfaceId
+        )
+      }
+      win.onDidOrderFront = publishToHarmony
+      if win.isVisible {
+        publishToHarmony()
+      }
+      return
+    #else
     guard renderer == nil, let win = window, let nativeWin = win.nativeWindow else { return }
     let targetView: NativeAPI.View
     let isWindowRootHost = (win.contentView === self)
@@ -873,7 +915,7 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
       }
       createdRenderer.mount()
       ActiveHostingContext.currentHostingView = nil
-    #elseif os(Linux)
+    #elseif os(Linux) && !CROSS_SWIFTUI_HARMONY
       guard let createdBackend = LinuxDrawingBackend(window: nativeWin) else { return }
       self.backend = createdBackend
       let layout = LayoutEngine(textMeasurer: createdBackend.measureText)
@@ -898,9 +940,23 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
       }
       createdRenderer.mount()
     #endif
+    #endif
   }
 
   private func rebuildOrUpdateRenderer(forceRemount: Bool) {
+    #if CROSS_SWIFTUI_HARMONY
+      if let win = window {
+        if win.isVisible {
+          HarmonyHost.mountRootView(
+            AnyView(HostingScopeView(host: self, content: self.rootView)),
+            forSurface: win.harmonySurfaceId
+          )
+        } else {
+          attachIfPossible()
+        }
+      }
+      return
+    #endif
     guard renderer != nil else {
       attachIfPossible()
       return
@@ -1146,8 +1202,10 @@ internal func installAssetResolversOnce() {
     bootstrapAppResources()
   #endif
   _ = VectorImage.hasSymbol("circle")
+  let previousAssetResolver = SwiftUIRuntime.Image.assetPathResolver
   SwiftUIRuntime.Image.assetPathResolver = { name, bundle in
     CrossAppKit.NSImage.resolveAssetPath(named: name, in: bundle)
+      ?? previousAssetResolver?(name, bundle)
   }
   CrossAppKit.NSImage.symbolLookupHandler = { symbolName in
     VectorImage.hasSymbol(symbolName)
@@ -1291,6 +1349,75 @@ internal func installAssetResolversOnce() {
       sui_free_bytes(ptr)
       return data
     }
+  #elseif CROSS_SWIFTUI_HARMONY
+    MainActor.assumeIsolated {
+      CrossAppKit.NSWindow._harmonyWindowSurfaceHandler = { surfaceId, isTransparent, width, height, bleed in
+        let fixedSize: SwiftUIRuntime.Size? =
+          (isTransparent && width > 0 && height > 0)
+          ? SwiftUIRuntime.Size(width: width, height: height)
+          : nil
+        MainActor.assumeIsolated {
+          HarmonyHost.configureWindowSurface(
+            forSurface: surfaceId,
+            isTransparent: isTransparent,
+            contentSize: fixedSize,
+            shadowBleed: bleed
+          )
+        }
+      }
+      HarmonyHost.keyEventHandler = { surfaceId, keyCode in
+        CrossAppKit._harmonyHandleKeyEvent(surfaceId: surfaceId, keyCode: keyCode)
+      }
+    }
+    CrossAppKit.NSImage.vectorRasterizer = { spec, size in
+      guard let vec = VectorImage.load(spec), vec.bounds.width > 0, vec.bounds.height > 0 else {
+        return nil
+      }
+      // HarmonyOS PC statusBarManager recommends 24vp (48px @2x) and enforces a PixelMap size cap.
+      let pxSide = Int32(max(32, min(48, Int(ceil(Double(max(size.width, size.height)) * 1.5)))))
+      guard let canvas = harmony_offscreen_create(pxSide, pxSide) else { return nil }
+      let box = Double(pxSide)
+      let pad = box * 0.08
+      let avail = max(1.0, box - pad * 2.0)
+      let s = min(avail / vec.bounds.width, avail / vec.bounds.height)
+      let tx = pad + (avail - vec.bounds.width * s) * 0.5 - vec.bounds.minX * s
+      let ty = pad + (avail - vec.bounds.height * s) * 0.5 - vec.bounds.minY * s
+      func packARGB(_ c: SwiftUIRuntime.Color) -> UInt32 {
+        func byte(_ v: Double) -> UInt32 { UInt32(max(0, min(255, (v * 255).rounded()))) }
+        return (byte(c.opacity) << 24) | (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
+      }
+      for layer in vec.layers {
+        let tp = layer.path.transformed(x: tx, y: ty, sx: s, sy: s)
+        let fillARGB: UInt32
+        if let f = layer.fill, f.opacity > 0 {
+          fillARGB = packARGB(f)
+        } else if layer.stroke == nil && vec.strokeWidth == 0 {
+          fillARGB = 0xFF000000
+        } else {
+          fillARGB = 0
+        }
+        let strokeARGB: UInt32
+        let strokeW: Double
+        if let st = layer.stroke, st.opacity > 0 {
+          strokeARGB = packARGB(st)
+          strokeW = max(1.5, layer.strokeWidth * s)
+        } else if vec.strokeWidth > 0 && fillARGB == 0 {
+          strokeARGB = 0xFF000000
+          strokeW = max(1.5, vec.strokeWidth * s)
+        } else {
+          strokeARGB = 0
+          strokeW = 0
+        }
+        tp.commands.withUnsafeBufferPointer { buf in
+          harmony_offscreen_path(canvas, buf.baseAddress, Int32(buf.count), fillARGB, strokeARGB, strokeW)
+        }
+      }
+      var outLen: Int32 = 0
+      guard let ptr = harmony_offscreen_finish_png(canvas, &outLen), outLen > 0 else { return nil }
+      let data = Data(bytes: ptr, count: Int(outLen))
+      harmony_free_bytes(ptr)
+      return data
+    }
   #endif
 }
 
@@ -1300,6 +1427,11 @@ internal func installAssetResolversOnce() {
     let exeDir = URL(fileURLWithPath: CommandLine.arguments.first ?? ".").deletingLastPathComponent()
     let cwd = URL(fileURLWithPath: fm.currentDirectoryPath)
     var candidates: [URL] = [exeDir, cwd]
+    #if CROSS_SWIFTUI_HARMONY
+      if let resDir = MainActor.assumeIsolated({ HarmonyHost.resourcesDirectory }), !resDir.isEmpty {
+        candidates.insert(URL(fileURLWithPath: resDir), at: 0)
+      }
+    #endif
     var cursor = exeDir
     for _ in 0..<5 {
       cursor = cursor.deletingLastPathComponent()
@@ -1348,8 +1480,12 @@ internal func installAssetResolversOnce() {
           }
         }
         if !didConfigureAppIcon {
-          let pngURL = base.appendingPathComponent("Resources/AppIcon.png")
-          let icoURL = base.appendingPathComponent("Resources/AppIcon.ico")
+          let pngURL = fm.fileExists(atPath: base.appendingPathComponent("Resources/AppIcon.png").path)
+            ? base.appendingPathComponent("Resources/AppIcon.png")
+            : base.appendingPathComponent("AppIcon.png")
+          let icoURL = fm.fileExists(atPath: base.appendingPathComponent("Resources/AppIcon.ico").path)
+            ? base.appendingPathComponent("Resources/AppIcon.ico")
+            : base.appendingPathComponent("AppIcon.ico")
           if fm.fileExists(atPath: pngURL.path), let nsImg = CrossAppKit.NSImage(contentsOf: pngURL) {
             didConfigureAppIcon = true
             if Thread.isMainThread {

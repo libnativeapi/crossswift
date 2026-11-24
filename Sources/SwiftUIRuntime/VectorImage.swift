@@ -55,8 +55,8 @@ public struct VectorImage {
 
   private static func strippedSymbolVariant(_ name: String) -> String {
     name
-      .replacingOccurrences(of: ".fill", with: "")
       .replacingOccurrences(of: ".filled", with: "")
+      .replacingOccurrences(of: ".fill", with: "")
       .replacingOccurrences(of: ".inverse", with: "")
   }
 

@@ -1050,6 +1050,183 @@ final class CrossXcodeBuildTests: XCTestCase {
     XCTAssertTrue(abilityEts.contains("onConfigurationUpdate"))
   }
 
+  func testHarmonyDesktopShimsHostRenderingAndCMakeStaging() throws {
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory.appendingPathComponent("CrossXcodeBuildHarmonyDesktop-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: tmp) }
+
+    let runtimeSrc = tmp.appendingPathComponent("runtimeSrc")
+    let resSrc = tmp.appendingPathComponent("resSrc")
+    let destDir = tmp.appendingPathComponent("staged")
+    try fm.createDirectory(at: runtimeSrc, withIntermediateDirectories: true)
+    try fm.createDirectory(at: resSrc, withIntermediateDirectories: true)
+    try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+
+    let hostSwift = HarmonyBuilder.renderHarmonyAppHostSwift(
+      appTypeName: "CustomLauncher",
+      usesDesktopShims: true
+    )
+    XCTAssertFalse(hostSwift.contains("extension App {"))
+    XCTAssertTrue(hostSwift.contains("HarmonyHost.setMountHandler"))
+    XCTAssertTrue(hostSwift.contains("swift_mount_surface"))
+    XCTAssertTrue(hostSwift.contains("HarmonyHost.keyEventHandler"))
+    XCTAssertTrue(hostSwift.contains("CustomLauncher.main()"))
+
+    let target = ResolvedTarget(
+      name: "DesktopApp",
+      productName: "DesktopApp",
+      executableName: "DesktopApp",
+      bundleIdentifier: "dev.example.desktop",
+      marketingVersion: "1.0.0",
+      buildVersion: "1",
+      productType: "com.apple.product-type.application",
+      swiftVersion: "6.0",
+      defaultActorIsolation: nil,
+      activeCompilationConditions: [],
+      preprocessorDefinitions: [],
+      infoPlistFile: nil,
+      infoPlistKeys: [:],
+      copyright: nil,
+      categoryType: nil,
+      isAccessoryApp: false,
+      generateAssetSymbols: false,
+      appIconName: "AppIcon",
+      swiftSources: [],
+      cSources: [],
+      assetCatalogs: [],
+      stringCatalogs: [],
+      otherResources: [],
+      buildSettings: ["PRODUCT_NAME": "DesktopApp"],
+      importedModules: ["SwiftUI", "AppKit", "SQLite3"]
+    )
+    let project = ResolvedXcodeProject(
+      projectURL: tmp.appendingPathComponent("DesktopApp.xcodeproj"),
+      projectRootURL: tmp,
+      projectName: "DesktopApp",
+      configuration: .release,
+      mainTarget: target,
+      internalTargets: [],
+      remotePackages: [],
+      localPackages: [],
+      productDependencies: [],
+      inferredCrossSwiftModules: ["SwiftUI", "AppKit", "SQLite3"],
+      skippedDarwinOnlyProducts: []
+    )
+    XCTAssertTrue(HarmonyBuilder.usesDesktopShims(project: project))
+
+    let artifacts = HarmonyBuildArtifacts(
+      runtimeDirectory: runtimeSrc,
+      appObjectURL: runtimeSrc.appendingPathComponent("DesktopApp.o"),
+      internalObjectNames: ["CrossFoundation.o", "CrossAppKit.o", "AppKit.o", "CrossSwiftUI.o"],
+      staticLinuxSDKURL: tmp,
+      nativeAPISwiftRoot: tmp,
+      usesDesktopShims: true
+    )
+    let compiledAssets = CompiledAssets(
+      resourcesDirectory: resSrc,
+      infoPlistURL: resSrc.appendingPathComponent("Info.plist"),
+      windowsIconURL: nil,
+      windowsResourceScriptURL: nil,
+      windowsManifestURL: nil,
+      linuxIconVariants: [],
+      generatedSymbolsSwiftURL: nil,
+      usesSQLite3: true
+    )
+    _ = try HarmonyBuilder.stageProject(
+      project: project,
+      harmonyArtifacts: artifacts,
+      compiledAssets: compiledAssets,
+      crossSwiftRoot: repositoryRoot,
+      destinationDir: destDir
+    )
+
+    let cmake = try String(contentsOf: destDir.appendingPathComponent("entry/src/main/cpp/CMakeLists.txt"), encoding: .utf8)
+    XCTAssertTrue(cmake.contains("LANGUAGES C CXX"))
+    XCTAssertTrue(cmake.contains("cshims/Carbon/Carbon.c"))
+    XCTAssertTrue(cmake.contains("cshims/SQLite3/SQLite3.c"))
+    XCTAssertTrue(cmake.contains("libFoundationNetworking.a"))
+    XCTAssertTrue(fm.fileExists(atPath: destDir.appendingPathComponent("entry/src/main/cpp/cshims/SQLite3/SQLite3.c").path))
+    let appHostCpp = try String(contentsOf: destDir.appendingPathComponent("entry/src/main/cpp/app_host.cpp"), encoding: .utf8)
+    XCTAssertTrue(appHostCpp.contains("harmony_offscreen_create"))
+    XCTAssertTrue(appHostCpp.contains("harmony_offscreen_path"))
+    XCTAssertTrue(appHostCpp.contains("harmony_offscreen_finish_png"))
+    XCTAssertTrue(appHostCpp.contains("harmony_free_bytes"))
+    let moduleJson = try String(contentsOf: destDir.appendingPathComponent("entry/src/main/module.json5"), encoding: .utf8)
+    XCTAssertTrue(moduleJson.contains("\"deviceTypes\": [\"2in1\"]"))
+    XCTAssertTrue(moduleJson.contains("ohos.permission.SET_WINDOW_TRANSPARENT"))
+    XCTAssertTrue(moduleJson.contains("\"launchType\": \"singleton\""))
+    XCTAssertTrue(appHostCpp.contains("attachFloatingWindow"))
+    XCTAssertFalse(fm.fileExists(atPath: destDir.appendingPathComponent("entry/src/main/ets/pages/HostAnchor.ets").path))
+
+    let accessoryTarget = ResolvedTarget(
+      name: "AccessoryApp",
+      productName: "AccessoryApp",
+      executableName: "AccessoryApp",
+      bundleIdentifier: "dev.example.accessory",
+      marketingVersion: "1.0.0",
+      buildVersion: "1",
+      productType: "com.apple.product-type.application",
+      swiftVersion: "6.0",
+      defaultActorIsolation: nil,
+      activeCompilationConditions: [],
+      preprocessorDefinitions: [],
+      infoPlistFile: nil,
+      infoPlistKeys: ["LSUIElement": "YES"],
+      copyright: nil,
+      categoryType: nil,
+      isAccessoryApp: true,
+      generateAssetSymbols: false,
+      appIconName: "AppIcon",
+      swiftSources: [],
+      cSources: [],
+      assetCatalogs: [],
+      stringCatalogs: [],
+      otherResources: [],
+      buildSettings: ["PRODUCT_NAME": "AccessoryApp"],
+      importedModules: ["SwiftUI", "AppKit"]
+    )
+    let accessoryProject = ResolvedXcodeProject(
+      projectURL: tmp.appendingPathComponent("AccessoryApp.xcodeproj"),
+      projectRootURL: tmp,
+      projectName: "AccessoryApp",
+      configuration: .release,
+      mainTarget: accessoryTarget,
+      internalTargets: [],
+      remotePackages: [],
+      localPackages: [],
+      productDependencies: [],
+      inferredCrossSwiftModules: ["SwiftUI", "AppKit"],
+      skippedDarwinOnlyProducts: []
+    )
+    let accessoryDest = tmp.appendingPathComponent("staged-accessory")
+    try fm.createDirectory(at: accessoryDest, withIntermediateDirectories: true)
+    _ = try HarmonyBuilder.stageProject(
+      project: accessoryProject,
+      harmonyArtifacts: artifacts,
+      compiledAssets: compiledAssets,
+      crossSwiftRoot: repositoryRoot,
+      destinationDir: accessoryDest
+    )
+    XCTAssertTrue(fm.fileExists(atPath: accessoryDest.appendingPathComponent("entry/src/main/ets/pages/HostAnchor.ets").path))
+    let accessoryPages = try String(contentsOf: accessoryDest.appendingPathComponent("entry/src/main/resources/base/profile/main_pages.json"), encoding: .utf8)
+    XCTAssertTrue(accessoryPages.contains("pages/HostAnchor"))
+    let accessoryEntry = try String(contentsOf: accessoryDest.appendingPathComponent("entry/src/main/ets/entryability/EntryAbility.ets"), encoding: .utf8)
+    XCTAssertTrue(accessoryEntry.contains("CrossSwiftFloating"))
+    XCTAssertTrue(accessoryEntry.contains("attachFloatingWindow"))
+    XCTAssertTrue(accessoryEntry.contains("HarmonyWindowHost"))
+    XCTAssertTrue(accessoryEntry.contains("registerWindowHost"))
+    XCTAssertTrue(accessoryEntry.contains("attachSurfaceWindow"))
+    let accessoryAppHost = try String(contentsOf: accessoryDest.appendingPathComponent("entry/src/main/cpp/app_host.cpp"), encoding: .utf8)
+    XCTAssertTrue(accessoryAppHost.contains("harmony_host_open_window"))
+    XCTAssertTrue(accessoryAppHost.contains("swift_harmony_window_attached"))
+    XCTAssertTrue(accessoryAppHost.contains("mountSurface"))
+    let accessoryIndex = try String(contentsOf: accessoryDest.appendingPathComponent("entry/src/main/ets/pages/Index.ets"), encoding: .utf8)
+    XCTAssertTrue(accessoryIndex.contains("crossSwiftSurfaceId"))
+    XCTAssertTrue(accessoryIndex.contains("nativeApp.mountSurface"))
+    XCTAssertTrue(accessoryIndex.contains("nativeApp.surfaceEvent"))
+    XCTAssertTrue(accessoryIndex.contains("windowCornerRadius"))
+  }
+
   func testLoadsUIKitDemoProjectAndGeneratesUIKitAssetSymbolsAndMainAttribute() throws {
     let uikitDemoProject = repositoryRoot.appendingPathComponent("Examples/UIKitDemo/UIKitDemo.xcodeproj")
     let loader = XcodeProjectLoader()

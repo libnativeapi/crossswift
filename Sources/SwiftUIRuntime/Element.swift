@@ -224,8 +224,10 @@ public struct NodeProps: Equatable {
   public var borderWidth: Double = 0
   public var opacity: Double = 1
   public var blurRadius: Double = 0
+  public var backdropBlurRadius: Double = 0
   public var brightness: Double = 0
   public var contrast: Double = 1
+  public var saturation: Double = 1
   public var compositingGroup: Bool = false
   public var layoutPriority: Double = 0
   public var shadows: [Shadow] = []

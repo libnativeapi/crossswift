@@ -221,24 +221,38 @@ public struct BorderedButtonStyle: ButtonStyle {
   private struct BodyView: View {
     let configuration: Configuration
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
     @State private var hovered = false
 
     var body: some View {
       let enabled = isEnabled
       let isHovered = hovered
       let isPressed = enabled && configuration.isPressed
-      #if os(Android) || CROSS_SWIFTUI_HARMONY
+      #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
       let hPad: CGFloat = 18
       let vPad: CGFloat = 10
       let minHeight: CGFloat = 38
       let labelFont: Font = .body.weight(.medium)
       #else
-      let hPad: CGFloat = 12
-      let vPad: CGFloat = 5
-      let minHeight: CGFloat = 24
-      let labelFont: Font = .callout
+      let hPad: CGFloat
+      let vPad: CGFloat
+      let minHeight: CGFloat
+      let labelFont: Font
+      switch controlSize {
+      case .mini:
+        hPad = 7; vPad = 2; minHeight = 18; labelFont = .caption
+      case .small:
+        hPad = 8; vPad = 3; minHeight = 20; labelFont = .callout
+      case .large, .extraLarge:
+        hPad = 14; vPad = 6; minHeight = 28; labelFont = .body.weight(.medium)
+      default:
+        hPad = 11; vPad = 4; minHeight = 24; labelFont = .callout
+      }
       #endif
-      return configuration.label
+      let destructiveInk = Color { scheme in
+        scheme == .dark ? (0.98, 0.45, 0.45, 1.0) : (0.80, 0.14, 0.14, 1.0)
+      }
+      let styled = configuration.label
         .font(labelFont)
         .opacity(enabled ? 1.0 : 0.42)
         .padding(.horizontal, hPad)
@@ -250,12 +264,16 @@ public struct BorderedButtonStyle: ButtonStyle {
               return scheme == .dark ? (1, 1, 1, 0.04) : (0, 0, 0, 0.03)
             }
             if isPressed {
-              return scheme == .dark ? (1, 1, 1, 0.20) : (0, 0, 0, 0.14)
+              return scheme == .dark ? (1, 1, 1, 0.20) : (0, 0, 0, 0.12)
             }
             if isHovered {
-              return scheme == .dark ? (1, 1, 1, 0.14) : (0, 0, 0, 0.09)
+              return scheme == .dark ? (1, 1, 1, 0.14) : (0, 0, 0, 0.07)
             }
+            #if CROSS_SWIFTUI_HARMONY_DESKTOP
+            return scheme == .dark ? (1, 1, 1, 0.11) : (1, 1, 1, 0.96)
+            #else
             return scheme == .dark ? (1, 1, 1, 0.08) : (0, 0, 0, 0.055)
+            #endif
           },
           in: RoundedRectangle(cornerRadius: 6)
         )
@@ -263,13 +281,17 @@ public struct BorderedButtonStyle: ButtonStyle {
           RoundedRectangle(cornerRadius: 6)
             .strokeBorder(
               Color { scheme in
-                let alpha = !enabled ? 0.07 : (scheme == .dark ? 0.14 : 0.12)
+                let alpha = !enabled ? 0.07 : (scheme == .dark ? 0.15 : 0.13)
                 return scheme == .dark ? (1, 1, 1, alpha) : (0, 0, 0, alpha)
               },
               lineWidth: 1
             )
         }
         .onHover { hovered = $0 }
+      if configuration.role == .destructive {
+        return AnyView(styled.foregroundStyle(destructiveInk))
+      }
+      return AnyView(styled)
     }
   }
   public func makeBody(configuration: Configuration) -> some View {
@@ -282,15 +304,29 @@ public struct BorderedProminentButtonStyle: ButtonStyle {
   public func makeBody(configuration: Configuration) -> some View {
     let isEnabled = EnvironmentValues.current.isEnabled
     let isPressed = isEnabled && configuration.isPressed
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    let controlSize = EnvironmentValues.current.controlSize
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     let hPad: CGFloat = 20
     let vPad: CGFloat = 10
     let labelFont: Font = .body.weight(.semibold)
     #else
-    let hPad: CGFloat = 12
-    let vPad: CGFloat = 5
-    let labelFont: Font = .callout.weight(.medium)
+    let hPad: CGFloat
+    let vPad: CGFloat
+    let labelFont: Font
+    switch controlSize {
+    case .mini:
+      hPad = 8; vPad = 2; labelFont = .caption.weight(.medium)
+    case .small:
+      hPad = 10; vPad = 3; labelFont = .callout.weight(.medium)
+    case .large, .extraLarge:
+      hPad = 16; vPad = 6; labelFont = .body.weight(.semibold)
+    default:
+      hPad = 12; vPad = 4; labelFont = .callout.weight(.medium)
+    }
     #endif
+    let activeBg: Color = configuration.role == .destructive
+      ? Color(red: 0.86, green: 0.22, blue: 0.20)
+      : Color.accentColor
     return configuration.label
       .font(labelFont)
       .foregroundStyle(
@@ -302,7 +338,7 @@ public struct BorderedProminentButtonStyle: ButtonStyle {
       .padding(.vertical, vPad)
       .background(
         isEnabled
-          ? Color.accentColor.opacity(isPressed ? 0.80 : 1.0)
+          ? activeBg.opacity(isPressed ? 0.80 : 1.0)
           : Color { scheme in scheme == .dark ? (1, 1, 1, 0.14) : (0, 0, 0, 0.10) },
         in: RoundedRectangle(cornerRadius: 6)
       )
@@ -314,7 +350,7 @@ public struct BorderlessButtonStyle: ButtonStyle {
   public func makeBody(configuration: Configuration) -> some View {
     let isEnabled = EnvironmentValues.current.isEnabled
     let alpha = !isEnabled ? 0.40 : (configuration.isPressed ? 0.65 : 1.0)
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     return configuration.label
       .font(.body.weight(.medium))
       .padding(.horizontal, 16)
@@ -478,7 +514,7 @@ public struct SwitchToggleStyle: ToggleStyle {
 
   public func makeBody(configuration: Configuration) -> some View {
     @Environment(\.labelsHidden) var labelsHidden
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     let trackWidth: CGFloat = 64
     let trackHeight: CGFloat = 34
     let thumbSize: CGFloat = 24
@@ -541,7 +577,7 @@ public struct CheckboxToggleStyle: ToggleStyle {
   public init() {}
   public func makeBody(configuration: Configuration) -> some View {
     @Environment(\.labelsHidden) var labelsHidden
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     let boxSize: CGFloat = 28
     #else
     let boxSize: CGFloat = 16
@@ -603,7 +639,7 @@ public struct CheckboxToggleStyle: ToggleStyle {
 public struct ButtonToggleStyle: ToggleStyle {
   public init() {}
   public func makeBody(configuration: Configuration) -> some View {
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     if configuration.isOn {
       Button {
         configuration.isOn.toggle()
@@ -816,7 +852,7 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
       case .segmented:
         let selectedIdx = options.firstIndex(where: { $0.tag == currentKey }) ?? 0
         let ctrlSize = EnvironmentValues.current.controlSize
-        #if os(Android) || CROSS_SWIFTUI_HARMONY
+        #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
         let segMinHeight: CGFloat = 40
         let segHPad: CGFloat = 10
         let segVPad: CGFloat = 4
@@ -850,7 +886,7 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
                   selection.wrappedValue = typed
                 }
               } label: {
-                #if os(Android) || CROSS_SWIFTUI_HARMONY
+                #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
                 Text(verbatim: opt.title)
                   .font(.callout.weight(isSelected ? .medium : .regular))
                   .lineLimit(1)
@@ -938,7 +974,7 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
 
       case .menu:
         let selectedIdx = options.firstIndex(where: { $0.tag == currentKey }) ?? 0
-        #if os(Android) || CROSS_SWIFTUI_HARMONY
+        #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
         let menuMinHeight: CGFloat = 38
         #else
         let menuMinHeight: CGFloat = 24
@@ -958,21 +994,21 @@ public struct Picker<Label: View, SelectionValue: Hashable, Content: View>: View
               Text(verbatim: selectedTitle)
                 .font(.callout)
                 .lineLimit(1)
-              Image(systemName: "chevron.down")
+              Image(systemName: "chevron.up.chevron.down")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
             .frame(minHeight: menuMinHeight)
             .background(
-              Color { s in s == .dark ? (1, 1, 1, 0.08) : (0, 0, 0, 0.06) },
+              Color { s in s == .dark ? (1, 1, 1, 0.11) : (1, 1, 1, 0.96) },
               in: RoundedRectangle(cornerRadius: 6)
             )
             .overlay {
               RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(
-                  Color { s in s == .dark ? (1, 1, 1, 0.14) : (0, 0, 0, 0.12) },
+                  Color { s in s == .dark ? (1, 1, 1, 0.16) : (0, 0, 0, 0.14) },
                   lineWidth: 1
                 )
             }
@@ -1102,7 +1138,7 @@ public struct Slider<Label: View, ValueLabel: View>: View {
   public var body: some View {
     let span = max(1e-9, bounds.upperBound - bounds.lowerBound)
     let fraction = min(1, max(0, (value.wrappedValue - bounds.lowerBound) / span))
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     let sliderHeight: CGFloat = 40
     #else
     let sliderHeight: CGFloat = 20
@@ -1223,7 +1259,7 @@ public struct Stepper<Label: View>: View {
   }
 
   public var body: some View {
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     let stepW: CGFloat = 100
     let stepH: CGFloat = 36
     #else
@@ -1235,15 +1271,17 @@ public struct Stepper<Label: View>: View {
         kind: "stepper",
         tint: EnvironmentValues.current.tint
       ),
-      content: HStack(spacing: 2) {
+      content: HStack(spacing: 3) {
         Button { onDecrement?() } label: {
-          Image(systemName: "minus").font(.system(size: 11, weight: .semibold)).frame(width: 22, height: 22)
+          Image(systemName: "minus").font(.system(size: 11, weight: .semibold)).frame(width: 14, height: 14)
         }
         .buttonStyle(.bordered)
+        .controlSize(.small)
         Button { onIncrement?() } label: {
-          Image(systemName: "plus").font(.system(size: 11, weight: .semibold)).frame(width: 22, height: 22)
+          Image(systemName: "plus").font(.system(size: 11, weight: .semibold)).frame(width: 14, height: 14)
         }
         .buttonStyle(.bordered)
+        .controlSize(.small)
       }
       .frame(minWidth: stepW, minHeight: stepH),
       incrementAction: onIncrement,
@@ -1450,24 +1488,87 @@ extension View {
 }
 
 public struct ControlGroupStyle: Sendable {
-  public static let automatic = ControlGroupStyle()
-  public static let navigation = ControlGroupStyle()
+  enum Kind: Sendable { case automatic, navigation }
+  let kind: Kind
+  public static let automatic = ControlGroupStyle(kind: .automatic)
+  public static let navigation = ControlGroupStyle(kind: .navigation)
+}
+
+private enum ControlGroupStyleKey: EnvironmentKey {
+  static let defaultValue: ControlGroupStyle = .automatic
+}
+
+extension EnvironmentValues {
+  fileprivate var controlGroupStyle: ControlGroupStyle {
+    get { self[ControlGroupStyleKey.self] }
+    set { self[ControlGroupStyleKey.self] = newValue }
+  }
+}
+
+private struct _NavigationToolbarButtonStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    BodyView(configuration: configuration)
+  }
+
+  private struct BodyView: View {
+    @Environment(\.isEnabled) private var isEnabled
+    let configuration: ButtonStyleConfiguration
+    @State private var hovered = false
+
+    var body: some View {
+      let enabled = isEnabled
+      let pressed = configuration.isPressed
+      let isHovered = hovered
+      return configuration.label
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(enabled ? Color.primary : Color.secondary)
+        .frame(width: 26, height: 26)
+        .background(
+          Color { scheme in
+            if !enabled { return (0, 0, 0, 0) }
+            if pressed {
+              return scheme == .dark ? (1, 1, 1, 0.16) : (0, 0, 0, 0.11)
+            }
+            if isHovered {
+              return scheme == .dark ? (1, 1, 1, 0.09) : (0, 0, 0, 0.06)
+            }
+            return (0, 0, 0, 0)
+          },
+          in: RoundedRectangle(cornerRadius: 6)
+        )
+        .opacity(enabled ? 1.0 : 0.35)
+        .onHover { hovered = $0 }
+    }
+  }
 }
 
 public struct ControlGroup<Content: View>: View {
   let content: Content
+  @Environment(\.controlGroupStyle) private var style
+
   public init(@ViewBuilder content: () -> Content) {
     self.content = content()
   }
+
   public var body: some View {
-    HStack(spacing: 4) {
-      content
+    if style.kind == .navigation {
+      HStack(spacing: 2) {
+        content
+      }
+      .labelStyle(.iconOnly)
+      .buttonStyle(_NavigationToolbarButtonStyle())
+    } else {
+      HStack(spacing: 4) {
+        content
+      }
     }
   }
 }
 
 extension View {
-  public func controlGroupStyle(_ style: ControlGroupStyle) -> some View { self }
+  public func controlGroupStyle(_ style: ControlGroupStyle) -> some View {
+    environment(\.controlGroupStyle, style)
+  }
 }
 
 // MARK: - Form & Section
@@ -1525,12 +1626,14 @@ private struct GroupedSectionRows<Content: View>: View, _PrimitiveView {
   func _makeElement(path: ViewPath) -> Element {
     let raw = flattenChildren(_render(content, path: path))
     guard !raw.isEmpty else { return Element(kind: .empty) }
-    let sepColor = SeparatorShapeStyle()._resolvePrimaryColor(in: EnvironmentValues.current)
+    let sepColor = Color { scheme in
+      scheme == .dark ? (1, 1, 1, 0.08) : (0, 0, 0, 0.07)
+    }._resolvePrimaryColor(in: EnvironmentValues.current)
     var interspersed: [Element] = []
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     let rowInsets = EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16)
     #else
-    let rowInsets = EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12)
+    let rowInsets = EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14)
     #endif
     for (idx, item) in raw.enumerated() {
       if idx > 0 {
@@ -1540,13 +1643,16 @@ private struct GroupedSectionRows<Content: View>: View, _PrimitiveView {
         sp.fillWidth = true
         sp.semanticControl = SemanticControl(kind: "divider")
         let sepLine = Element(kind: .shape, props: sp)
-        #if os(Android) || CROSS_SWIFTUI_HARMONY
+        #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
         var sepWrap = NodeProps()
         sepWrap.padding = EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 0)
         sepWrap.fillWidth = true
         interspersed.append(Element(kind: .padding, props: sepWrap, children: [sepLine]))
         #else
-        interspersed.append(sepLine)
+        var sepWrap = NodeProps()
+        sepWrap.padding = EdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 14)
+        sepWrap.fillWidth = true
+        interspersed.append(Element(kind: .padding, props: sepWrap, children: [sepLine]))
         #endif
       }
       var rowWrap = NodeProps()
@@ -1582,7 +1688,7 @@ public struct Section<Parent: View, Content: View, Footer: View>: View {
 
   public var body: some View {
     if inGroupedForm {
-      #if os(Android) || CROSS_SWIFTUI_HARMONY
+      #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
       VStack(alignment: .leading, spacing: 8) {
         if Parent.self != EmptyView.self {
           header
@@ -1607,18 +1713,19 @@ public struct Section<Parent: View, Content: View, Footer: View>: View {
       VStack(alignment: .leading, spacing: 6) {
         if Parent.self != EmptyView.self {
           header
-            .font(.headline)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.primary)
             .padding(.horizontal, 4)
         }
         GroupedSectionRows(content: content)
           .background(
-            Color { s in s == .dark ? (1, 1, 1, 0.05) : (0, 0, 0, 0.04) },
+            Color { s in s == .dark ? (1, 1, 1, 0.055) : (1, 1, 1, 1.0) },
             in: RoundedRectangle(cornerRadius: 10)
           )
           .overlay {
             RoundedRectangle(cornerRadius: 10)
               .strokeBorder(
-                Color { s in s == .dark ? (1, 1, 1, 0.10) : (0, 0, 0, 0.10) },
+                Color { s in s == .dark ? (1, 1, 1, 0.09) : (0, 0, 0, 0.07) },
                 lineWidth: 1
               )
           }
@@ -1632,13 +1739,14 @@ public struct Section<Parent: View, Content: View, Footer: View>: View {
       .frame(maxWidth: .infinity, alignment: .leading)
       #endif
     } else {
-      VStack(alignment: .leading, spacing: 4) {
+      VStack(alignment: .leading, spacing: 2) {
         if Parent.self != EmptyView.self {
           header
-            .font(.subheadline.weight(.semibold))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8)
-            .padding(.top, 6)
+            .padding(.top, 10)
+            .padding(.bottom, 2)
         }
         content
         if Footer.self != EmptyView.self {
@@ -1728,12 +1836,12 @@ private struct SelectableListBody<SelectionValue: Hashable, Content: View>: View
         let isSel = (tag == selectedTag)
         let selBind = selection
         var rowProps = NodeProps()
-        rowProps.padding = EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8)
+        rowProps.padding = EdgeInsets(top: 5, leading: 8, bottom: 5, trailing: 8)
         rowProps.cornerRadius = 7
         rowProps.fillWidth = true
         rowProps.alignment = .leading
         rowProps.background = isSel
-          ? Color { s in s == .dark ? (1, 1, 1, 0.12) : (0, 0, 0, 0.09) }
+          ? Color { s in s == .dark ? (1, 1, 1, 0.13) : (0, 0, 0, 0.085) }
           : .clear
         el = Element(
           kind: .styledButton,
@@ -1754,7 +1862,7 @@ private struct SelectableListBody<SelectionValue: Hashable, Content: View>: View
     }
     decorate(&root)
     var vp = NodeProps()
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     vp.spacing = 20
     #else
     vp.spacing = 2
@@ -1799,7 +1907,7 @@ public struct List<SelectionValue: Hashable, Content: View>: View {
   }
 
   public var body: some View {
-    #if os(Android) || CROSS_SWIFTUI_HARMONY
+    #if os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP)
     ScrollView(.vertical) {
       SelectableListBody(selection: selection, content: content)
         .padding(.horizontal, 16)
@@ -1841,11 +1949,38 @@ private struct SidebarColumnWidthPreferenceKey: PreferenceKey {
   }
 }
 
+private struct _ToolbarContentBox {
+  let view: AnyView
+}
+
+private enum _NavigationTitleOverrideKey: EnvironmentKey {
+  static let defaultValue: String? = nil
+}
+
+private enum _NavigationToolbarContentKey: EnvironmentKey {
+  static let defaultValue: _ToolbarContentBox? = nil
+}
+
+extension EnvironmentValues {
+  fileprivate var _navigationTitleOverride: String? {
+    get { self[_NavigationTitleOverrideKey.self] }
+    set { self[_NavigationTitleOverrideKey.self] = newValue }
+  }
+
+  fileprivate var _navigationToolbarContent: _ToolbarContentBox? {
+    get { self[_NavigationToolbarContentKey.self] }
+    set { self[_NavigationToolbarContentKey.self] = newValue }
+  }
+}
+
 public struct NavigationSplitView<Sidebar: View, Content: View, Detail: View>: View {
   let sidebar: Sidebar
   let content: Content
   let detail: Detail
   @State private var sidebarWidth: CGFloat = 232
+  @State private var detailPrefTitle: String? = nil
+  @Environment(\._navigationTitleOverride) private var envTitle
+  @Environment(\._navigationToolbarContent) private var envToolbar
 
   public init(
     columnVisibility: Binding<NavigationSplitViewVisibility> = .constant(.all),
@@ -1869,24 +2004,55 @@ public struct NavigationSplitView<Sidebar: View, Content: View, Detail: View>: V
   }
 
   public var body: some View {
-    HStack(spacing: 0) {
+    let activeTitle = (detailPrefTitle?.isEmpty == false ? detailPrefTitle : nil) ?? envTitle
+    let hasHeaderBar = envToolbar != nil || (activeTitle != nil && !(activeTitle ?? "").isEmpty)
+    return HStack(spacing: 0) {
       sidebar
+        .environment(\._navigationToolbarContent, nil)
+        .environment(\._navigationTitleOverride, nil)
         .frame(width: sidebarWidth)
         .frame(maxHeight: .infinity)
-        .background(Color { s in s == .dark ? (0.12, 0.12, 0.14, 1.0) : (0.94, 0.94, 0.96, 1.0) })
+        .background(Color { s in s == .dark ? (0.13, 0.13, 0.145, 1.0) : (0.945, 0.945, 0.96, 1.0) })
         .onPreferenceChange(SidebarColumnWidthPreferenceKey.self) { w in
           if let w, w > 0 { sidebarWidth = w }
         }
       Divider()
       if Content.self != EmptyView.self {
         content
+          .environment(\._navigationToolbarContent, nil)
+          .environment(\._navigationTitleOverride, nil)
           .frame(maxHeight: .infinity)
-          .background(Color { s in s == .dark ? (0.10, 0.10, 0.12, 1.0) : (1.0, 1.0, 1.0, 1.0) })
+          .background(Color { s in s == .dark ? (0.105, 0.105, 0.12, 1.0) : (0.965, 0.965, 0.973, 1.0) })
         Divider()
       }
-      detail
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color { s in s == .dark ? (0.10, 0.10, 0.12, 1.0) : (1.0, 1.0, 1.0, 1.0) })
+      VStack(spacing: 0) {
+        if hasHeaderBar {
+          HStack(spacing: 10) {
+            if let toolbar = envToolbar {
+              toolbar.view
+            }
+            if let title = activeTitle, !title.isEmpty {
+              Text(verbatim: title)
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1)
+            }
+            Spacer()
+          }
+          .padding(.horizontal, 16)
+          .frame(height: 44)
+          .background(Color { s in s == .dark ? (0.12, 0.12, 0.135, 1.0) : (0.975, 0.975, 0.982, 1.0) })
+          Divider()
+        }
+        detail
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .onPreferenceChange(_NavigationTitlePreferenceKey.self) { title in
+            if let title, !title.isEmpty { detailPrefTitle = title }
+          }
+      }
+      .environment(\._navigationToolbarContent, nil)
+      .environment(\._navigationTitleOverride, nil)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Color { s in s == .dark ? (0.105, 0.105, 0.12, 1.0) : (0.965, 0.965, 0.973, 1.0) })
     }
   }
 }
@@ -2111,7 +2277,7 @@ public struct NavigationStack<Data, Root: View>: View {
             .background(Color { s in s == .dark ? (0.11, 0.11, 0.12, 1) : (0.97, 0.97, 0.98, 1) }),
             backAction: { actions.pop?() }
           )
-          #if !(os(Android) || CROSS_SWIFTUI_HARMONY)
+          #if !(os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP))
           Divider()
           #endif
         }
@@ -2331,22 +2497,26 @@ extension View {
   }
 
   public func navigationTitle(_ titleKey: LocalizedStringKey) -> some View {
-    preference(key: _NavigationTitlePreferenceKey.self, value: titleKey.resolved())
+    let resolved = titleKey.resolved()
+    return preference(key: _NavigationTitlePreferenceKey.self, value: resolved)
+      .environment(\._navigationTitleOverride, resolved)
   }
   @_disfavoredOverload
   public func navigationTitle<S: StringProtocol>(_ title: S) -> some View {
-    preference(key: _NavigationTitlePreferenceKey.self, value: String(title))
+    let resolved = String(title)
+    return preference(key: _NavigationTitlePreferenceKey.self, value: resolved)
+      .environment(\._navigationTitleOverride, resolved)
   }
   public func navigationTitle(_ title: Text) -> some View {
     preference(key: _NavigationTitlePreferenceKey.self, value: title.content)
+      .environment(\._navigationTitleOverride, title.content)
   }
   public func navigationSubtitle(_ subtitleKey: LocalizedStringKey) -> some View { self }
   @_disfavoredOverload
   public func navigationSubtitle<S: StringProtocol>(_ subtitle: S) -> some View { self }
 
   public func toolbar<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-    let _ = content()
-    return self
+    environment(\._navigationToolbarContent, _ToolbarContentBox(view: AnyView(content())))
   }
 
   public func toolbar(removing: ToolbarRemoving?) -> some View { self }
@@ -2418,13 +2588,21 @@ extension View {
       }
       .padding(.horizontal, 8)
       .padding(.vertical, 5)
+      .frame(minHeight: 28)
       .background(
-        Color { s in s == .dark ? (1, 1, 1, 0.07) : (0, 0, 0, 0.05) },
+        Color { s in s == .dark ? (1, 1, 1, 0.08) : (0, 0, 0, 0.05) },
         in: RoundedRectangle(cornerRadius: 7)
       )
+      .overlay {
+        RoundedRectangle(cornerRadius: 7)
+          .strokeBorder(
+            Color { s in s == .dark ? (1, 1, 1, 0.10) : (0, 0, 0, 0.08) },
+            lineWidth: 1
+          )
+      }
       .padding(.horizontal, 10)
       .padding(.top, 10)
-      .padding(.bottom, 4)
+      .padding(.bottom, 6)
 
       self
     }
@@ -2936,7 +3114,7 @@ public struct TabView<SelectionValue: Hashable, Content: View>: View {
       .frame(maxWidth: .infinity, maxHeight: .infinity)
 
       if !tabs.isEmpty {
-        #if !(os(Android) || CROSS_SWIFTUI_HARMONY)
+        #if !(os(Android) || (CROSS_SWIFTUI_HARMONY && !CROSS_SWIFTUI_HARMONY_DESKTOP))
         Divider()
         #endif
         SemanticControlWrapper(

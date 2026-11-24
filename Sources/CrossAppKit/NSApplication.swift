@@ -260,7 +260,14 @@ open class NSApplication: NSResponder, @unchecked Sendable {
         }
       }
     #endif
-    return Locale.preferredLanguages
+    var languages = Locale.preferredLanguages
+    if let envLang = ProcessInfo.processInfo.environment["CROSSSWIFT_PREFERRED_LANGUAGE"],
+       !envLang.isEmpty,
+       !languages.contains(envLang)
+    {
+      languages.insert(envLang, at: 0)
+    }
+    return languages
   }
 
   nonisolated internal static func _parseOpenURLs<S: Sequence>(from rawArgs: S) -> [URL]

@@ -6,6 +6,8 @@ import Observation
 import SwiftUIRuntime
 #if os(Windows)
   import CSwiftUIWindows
+#elseif CROSS_SWIFTUI_HARMONY
+  import SwiftUIHarmony
 #endif
 
 /// Ensures CrossSwiftUI's SF Symbol catalog, `.xcassets` search paths, and offscreen
@@ -741,7 +743,7 @@ open class _UIHostingView<Content: SwiftUIRuntime.View>: UIView {
   #if os(Windows)
     private var backend: WindowsDrawingBackend?
     private var keyWindowObserver: NSObjectProtocol?
-  #elseif os(Linux)
+  #elseif os(Linux) && !CROSS_SWIFTUI_HARMONY
     private var backend: LinuxDrawingBackend?
   #else
     private var backend: NativeViewBackend?
@@ -856,6 +858,11 @@ open class _UIHostingView<Content: SwiftUIRuntime.View>: UIView {
   }
 
   private func attachIfPossible() {
+    #if CROSS_SWIFTUI_HARMONY
+      guard window != nil else { return }
+      HarmonyHost.mountRootView(AnyView(UIHostingScopeView(host: self, content: rootView)))
+      return
+    #else
     guard renderer == nil, let win = window, let nativeWin = win.nativeWindow else { return }
     let targetView: NativeAPI.View
     let isWindowRootHost = (win.rootViewController?.viewIfLoaded === self)
@@ -947,7 +954,7 @@ open class _UIHostingView<Content: SwiftUIRuntime.View>: UIView {
       }
       createdRenderer.mount()
       ActiveUIHostingContext.currentHostingView = nil
-    #elseif os(Linux)
+    #elseif os(Linux) && !CROSS_SWIFTUI_HARMONY
       guard let createdBackend = LinuxDrawingBackend(window: nativeWin) else { return }
       self.backend = createdBackend
       let layout = LayoutEngine(textMeasurer: createdBackend.measureText)
@@ -974,6 +981,7 @@ open class _UIHostingView<Content: SwiftUIRuntime.View>: UIView {
       }
       createdRenderer.mount()
       ActiveUIHostingContext.currentHostingView = nil
+    #endif
     #endif
   }
 

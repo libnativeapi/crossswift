@@ -20,7 +20,9 @@ interface GalleryNode {
   placeholder: string;
   secure?: boolean;
   multiline?: boolean;
+  plainTextField?: boolean;
   image: string;
+  imageTemplate?: boolean;
   fontSize: number;
   fontWeight: number;
   fontFamily: string;
@@ -42,6 +44,16 @@ interface GalleryNode {
   radius: number;
   opacity: number;
   blurRadius?: number;
+  backdropBlurRadius?: number;
+  grayscale?: number;
+  isDark?: boolean;
+  shadowColor?: number;
+  shadowRadius?: number;
+  shadowX?: number;
+  shadowY?: number;
+  windowTransparent?: boolean;
+  windowBleed?: number;
+  windowCornerRadius?: number;
   clip: boolean;
   scrollIndicators: boolean;
   scrollDirection: string;
@@ -49,6 +61,7 @@ interface GalleryNode {
   enabled: boolean;
   hitTesting: boolean;
   gradientKind?: string;
+  gradientAngle?: number;
   gradientColors?: number[];
   boolValue?: boolean;
   doubleValue?: number;
@@ -100,6 +113,9 @@ struct GalleryElement {
   @Prop parentY: number = 0;
   @Prop parentOpacity: number = 1;
   @Consume('uiStyle') uiStyle: string;
+  @Consume('isDesktop') isDesktop: boolean;
+  @Consume('surfaceId') surfaceId: number;
+  @Consume('effectiveDark') isDark: boolean;
 
   private scroller: Scroller = new Scroller();
 
@@ -107,13 +123,40 @@ struct GalleryElement {
     return this.uiStyle === 'ios';
   }
 
+  private imageSource(path: string): string {
+    if (path.startsWith('/')) return 'file://' + path;
+    if (path.includes('://')) return path;
+    return 'resource://RAWFILE/' + path;
+  }
+
+  private resolvedTextAlignment(): Alignment {
+    const snap = this.model.snapshot;
+    const singleLine = snap.lineLimit === 1 || (!snap.text.includes('\n') && snap.height <= snap.fontSize * 2.2);
+    if (singleLine) {
+      if (snap.textAlignment === 'center') return Alignment.Center;
+      if (snap.textAlignment === 'end') return Alignment.End;
+      return Alignment.Start;
+    }
+    if (snap.textAlignment === 'center') return Alignment.Top;
+    if (snap.textAlignment === 'end') return Alignment.TopEnd;
+    return Alignment.TopStart;
+  }
+
   private color(value: number | undefined, fallback: string): string {
     return value === undefined ? fallback : '#' + value.toString(16).padStart(8, '0');
   }
 
+  private emitEvent(id: number, event: number, text: string): void {
+    if (this.surfaceId === 0) {
+      nativeApp.appEvent(id, event, text);
+    } else {
+      nativeApp.surfaceEvent(this.surfaceId, id, event, text);
+    }
+  }
+
   private action(event: number): void {
     if (this.model.snapshot.enabled && this.model.snapshot.hitTesting) {
-      nativeApp.appEvent(this.model.snapshot.id, event, '');
+      this.emitEvent(this.model.snapshot.id, event, '');
     }
   }
 
@@ -131,7 +174,7 @@ struct GalleryElement {
 
   private resolvedRadius(): number {
     const snap = this.model.snapshot;
-    if (!this.isIOS() && snap.background === 0xffffffff && snap.radius >= 22) {
+    if (!this.isDesktop && !this.isIOS() && snap.background === 0xffffffff && snap.radius >= 22) {
       return 16;
     }
     return snap.radius;
@@ -166,7 +209,7 @@ struct GalleryElement {
             .backgroundColor('#e8ffffff')
             .border({ width: 0.8, color: '#ccffffff' })
             .shadow({ radius: 10, color: '#22000000', offsetY: 3 })
-            .onClick(() => nativeApp.appEvent(this.model.snapshot.id, 14, ''))
+            .onClick(() => this.emitEvent(this.model.snapshot.id, 14, ''))
           }
           .width('100%')
           .justifyContent(FlexAlign.Start)
@@ -215,7 +258,7 @@ struct GalleryElement {
           .width(38)
           .height(38)
           .backgroundColor('#0d000000')
-          .onClick(() => nativeApp.appEvent(this.model.snapshot.id, 14, ''))
+          .onClick(() => this.emitEvent(this.model.snapshot.id, 14, ''))
         }
         Text(this.model.snapshot.title ?? '')
           .fontSize(20)
@@ -266,7 +309,7 @@ struct GalleryElement {
         .onClick(() => {
           if (this.model.snapshot.enabled) {
             const next = !(this.model.snapshot.boolValue ?? false);
-            nativeApp.appEvent(this.model.snapshot.id, 10, next ? '1' : '0');
+            this.emitEvent(this.model.snapshot.id, 10, next ? '1' : '0');
           }
         })
       }
@@ -282,7 +325,7 @@ struct GalleryElement {
           .enabled(this.model.snapshot.enabled)
           .onChange((isOn: boolean) => {
             if (isOn !== (this.model.snapshot.boolValue ?? false)) {
-              nativeApp.appEvent(this.model.snapshot.id, 10, isOn ? '1' : '0');
+              this.emitEvent(this.model.snapshot.id, 10, isOn ? '1' : '0');
             }
           })
       }
@@ -333,7 +376,7 @@ struct GalleryElement {
           const minV = this.model.snapshot.minValue ?? 0;
           const maxV = this.model.snapshot.maxValue ?? 1;
           const val = minV + frac * (maxV - minV);
-          nativeApp.appEvent(this.model.snapshot.id, 11, String(val));
+          this.emitEvent(this.model.snapshot.id, 11, String(val));
         }
       })
     } else {
@@ -349,7 +392,7 @@ struct GalleryElement {
         .width('100%')
         .onChange((value: number, mode: SliderChangeMode) => {
           if (mode === SliderChangeMode.Moving || mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
-            nativeApp.appEvent(this.model.snapshot.id, 11, String(value));
+            this.emitEvent(this.model.snapshot.id, 11, String(value));
           }
         })
     }
@@ -376,7 +419,7 @@ struct GalleryElement {
           .shadow(idx === (this.model.snapshot.intValue ?? 0) ? { radius: 4, color: '#1c000000', offsetY: 1 } : undefined)
           .onClick(() => {
             if (this.model.snapshot.enabled) {
-              nativeApp.appEvent(this.model.snapshot.id, 12, String(idx));
+              this.emitEvent(this.model.snapshot.id, 12, String(idx));
             }
           })
       }, (item: string, idx: number) => `${idx}_${item}`)
@@ -400,7 +443,7 @@ struct GalleryElement {
             .layoutWeight(1)
             .height('100%')
             .onClick(() => {
-              if (this.model.snapshot.enabled) nativeApp.appEvent(this.model.snapshot.id, 13, '-1');
+              if (this.model.snapshot.enabled) this.emitEvent(this.model.snapshot.id, 13, '-1');
             })
           Divider().vertical(true).height(18).color('#24000000')
           Text('+')
@@ -410,7 +453,7 @@ struct GalleryElement {
             .layoutWeight(1)
             .height('100%')
             .onClick(() => {
-              if (this.model.snapshot.enabled) nativeApp.appEvent(this.model.snapshot.id, 13, '1');
+              if (this.model.snapshot.enabled) this.emitEvent(this.model.snapshot.id, 13, '1');
             })
         }
         .width(96)
@@ -432,7 +475,7 @@ struct GalleryElement {
           .fontColor('#ff0a59f7')
           .backgroundColor('#180a59f7')
           .enabled(this.model.snapshot.enabled)
-          .onClick(() => nativeApp.appEvent(this.model.snapshot.id, 13, '-1'))
+          .onClick(() => this.emitEvent(this.model.snapshot.id, 13, '-1'))
         Button('+', { type: ButtonType.Capsule })
           .width(42)
           .height(32)
@@ -440,7 +483,7 @@ struct GalleryElement {
           .fontColor('#ff0a59f7')
           .backgroundColor('#180a59f7')
           .enabled(this.model.snapshot.enabled)
-          .onClick(() => nativeApp.appEvent(this.model.snapshot.id, 13, '1'))
+          .onClick(() => this.emitEvent(this.model.snapshot.id, 13, '1'))
       }
       .width('100%')
       .height('100%')
@@ -505,7 +548,7 @@ struct GalleryElement {
           .justifyContent(FlexAlign.Center)
           .borderRadius(999)
           .backgroundColor(idx === (this.model.snapshot.intValue ?? 0) && this.isIOS() ? '#18007aff' : '#00000000')
-          .onClick(() => nativeApp.appEvent(this.model.snapshot.id, 12, String(idx)))
+          .onClick(() => this.emitEvent(this.model.snapshot.id, 12, String(idx)))
         }, (label: string, idx: number) => `${idx}_${label}`)
       }
       .width('100%')
@@ -550,7 +593,7 @@ struct GalleryElement {
               : (this.isIOS() ? '#ff000000' : '#ff0a59f7'))
             .backgroundColor(this.isIOS() ? '#14000000' : '#120a59f7')
             .enabled(act.enabled)
-            .onClick(() => nativeApp.appEvent(this.model.snapshot.id, 12, String(idx)))
+            .onClick(() => this.emitEvent(this.model.snapshot.id, 12, String(idx)))
         }, (act: AlertActionNode, idx: number) => `${idx}_${act.title}`)
       }
       .width('100%')
@@ -591,7 +634,7 @@ struct GalleryElement {
         .enabled(this.model.snapshot.enabled)
         .onChange((isOn: boolean) => {
           if (isOn !== (this.model.snapshot.boolValue ?? false)) {
-            nativeApp.appEvent(this.model.snapshot.id, 10, isOn ? '1' : '0');
+            this.emitEvent(this.model.snapshot.id, 10, isOn ? '1' : '0');
           }
         })
     } else if (this.model.snapshot.kind === 'menu') {
@@ -603,7 +646,7 @@ struct GalleryElement {
         .backgroundColor(this.isIOS() ? '#1f767680' : '#120a59f7')
         .bindMenu((this.model.snapshot.items ?? []).map((label: string, idx: number): MenuElement => ({
           value: idx === (this.model.snapshot.intValue ?? 0) ? '✓ ' + label : label,
-          action: () => nativeApp.appEvent(this.model.snapshot.id, 12, String(idx))
+          action: () => this.emitEvent(this.model.snapshot.id, 12, String(idx))
         })))
     } else if (this.model.snapshot.kind === 'progressLinear') {
       Progress({ value: (this.model.snapshot.doubleValue ?? 0) * 100, total: 100, type: ProgressType.Linear })
@@ -650,7 +693,7 @@ struct GalleryElement {
           .height('100%')
           .borderRadius(this.model.snapshot.radius)
           .linearGradient({
-            angle: 135,
+            angle: this.model.snapshot.gradientAngle ?? 135,
             colors: this.model.snapshot.gradientColors.map((c: number, i: number): [ResourceColor, number] => [
               this.color(c, '#ff007aff'),
               i / Math.max(1, (this.model.snapshot.gradientColors?.length ?? 2) - 1)
@@ -663,24 +706,33 @@ struct GalleryElement {
         .fontSize(this.model.snapshot.fontSize + 'vp')
         .fontWeight(this.model.snapshot.fontWeight)
         .fontFamily(this.model.snapshot.fontFamily)
-        .fontColor(this.color(this.model.snapshot.foreground, '#ff000000'))
+        .fontColor(this.color(this.model.snapshot.foreground, this.isDark ? '#ffffffff' : '#ff000000'))
         .textAlign(this.model.snapshot.textAlignment === 'center' ? TextAlign.Center :
           this.model.snapshot.textAlignment === 'end' ? TextAlign.End : TextAlign.Start)
         .lineSpacing(LengthMetrics.vp(this.model.snapshot.lineSpacing))
         .letterSpacing(this.model.snapshot.tracking + 'vp')
         .decoration({ type: this.model.snapshot.underline ? TextDecorationType.Underline : TextDecorationType.None })
         .maxLines(this.model.snapshot.lineLimit > 0 ? this.model.snapshot.lineLimit : 1000)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
         .width('100%')
         .height('100%')
-        .align(Alignment.TopStart)
+        .align(this.resolvedTextAlignment())
         .hitTestBehavior(HitTestMode.None)
     } else if (this.model.snapshot.kind === 'image' && this.model.snapshot.image.length > 0) {
-      Image('resource://RAWFILE/' + this.model.snapshot.image)
-        .objectFit(ImageFit.Contain)
-        .fillColor(this.color(this.model.snapshot.foreground, '#ff000000'))
-        .width('100%')
-        .height('100%')
-        .hitTestBehavior(HitTestMode.None)
+      if (this.model.snapshot.imageTemplate) {
+        Image(this.imageSource(this.model.snapshot.image))
+          .objectFit(ImageFit.Contain)
+          .fillColor(this.color(this.model.snapshot.foreground, this.isDark ? '#ffffffff' : '#ff000000'))
+          .width('100%')
+          .height('100%')
+          .hitTestBehavior(HitTestMode.None)
+      } else {
+        Image(this.imageSource(this.model.snapshot.image))
+          .objectFit(ImageFit.Contain)
+          .width('100%')
+          .height('100%')
+          .hitTestBehavior(HitTestMode.None)
+      }
     } else if (this.model.snapshot.kind === 'path') {
       Path().commands(this.model.snapshot.path)
         .width('100%')
@@ -688,38 +740,60 @@ struct GalleryElement {
         .fill(this.color(this.model.snapshot.background, '#00000000'))
         .stroke(this.color(this.model.snapshot.border, '#00000000'))
         .strokeWidth(this.model.snapshot.borderWidth)
+        .strokeLineCap(LineCapStyle.Round)
+        .strokeLineJoin(LineJoinStyle.Round)
         .strokeDashArray(this.model.snapshot.dash)
         .hitTestBehavior(HitTestMode.None)
     } else if (this.model.snapshot.kind === 'editor') {
       if (this.model.snapshot.multiline) {
         TextArea({ text: this.model.snapshot.text, placeholder: this.model.snapshot.placeholder })
-          .backgroundColor(this.isIOS() ? '#14767680' : '#0d000000')
-          .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-          .borderRadius(this.isIOS() ? 14 : 12)
-          .fontSize(this.model.snapshot.fontSize)
-          .fontColor(this.color(this.model.snapshot.foreground, '#ff000000'))
+          .backgroundColor(this.model.snapshot.plainTextField ? Color.Transparent
+            : (this.isDesktop ? (this.isDark ? '#14ffffff' : '#ffffffff') : (this.isIOS() ? '#14767680' : '#0d000000')))
+          .padding(this.model.snapshot.plainTextField ? 0
+            : (this.isDesktop ? { left: 8, right: 8, top: 6, bottom: 6 } : { left: 12, right: 12, top: 8, bottom: 8 }))
+          .borderRadius(this.model.snapshot.plainTextField ? 0 : (this.isDesktop ? 6 : (this.isIOS() ? 14 : 12)))
+          .border(this.isDesktop && !this.model.snapshot.plainTextField
+            ? { width: 1, color: this.isDark ? '#26ffffff' : '#24000000', radius: 6 }
+            : { width: 0, color: '#00000000' })
+          .fontSize(this.model.snapshot.fontSize + 'vp')
+          .fontWeight(this.model.snapshot.fontWeight)
+          .fontColor(this.color(this.model.snapshot.foreground, this.isDark ? '#ffffffff' : '#ff000000'))
+          .placeholderFont({ size: this.model.snapshot.fontSize + 'vp', weight: this.model.snapshot.fontWeight })
+          .placeholderColor(this.isDark ? '#66ffffff' : '#66000000')
+          .caretColor(this.isDark ? '#ff409cff' : '#ff007aff')
+          .hoverEffect(this.model.snapshot.plainTextField ? HoverEffect.None : HoverEffect.Auto)
           .width('100%')
           .height('100%')
           .onFocus(() => this.action(8))
           .onBlur(() => this.action(9))
           .onChange((value: string) => {
-            if (value !== this.model.snapshot.text) nativeApp.appEvent(this.model.snapshot.id, 7, value);
+            if (value !== this.model.snapshot.text) this.emitEvent(this.model.snapshot.id, 7, value);
           })
       } else {
         TextInput({ text: this.model.snapshot.text, placeholder: this.model.snapshot.placeholder })
           .type(this.model.snapshot.secure ? InputType.Password : InputType.Normal)
-          .backgroundColor(this.isIOS() ? '#14767680' : '#0d000000')
-          .padding({ left: 12, right: 12 })
-          .borderRadius(this.isIOS() ? 14 : 12)
-          .fontSize(this.model.snapshot.fontSize)
-          .fontColor(this.color(this.model.snapshot.foreground, '#ff000000'))
+          .backgroundColor(this.model.snapshot.plainTextField ? Color.Transparent
+            : (this.isDesktop ? (this.isDark ? '#14ffffff' : '#ffffffff') : (this.isIOS() ? '#14767680' : '#0d000000')))
+          .padding(this.model.snapshot.plainTextField ? 0
+            : (this.isDesktop ? { left: 8, right: 8 } : { left: 12, right: 12 }))
+          .borderRadius(this.model.snapshot.plainTextField ? 0 : (this.isDesktop ? 6 : (this.isIOS() ? 14 : 12)))
+          .border(this.isDesktop && !this.model.snapshot.plainTextField
+            ? { width: 1, color: this.isDark ? '#26ffffff' : '#24000000', radius: 6 }
+            : { width: 0, color: '#00000000' })
+          .fontSize(this.model.snapshot.fontSize + 'vp')
+          .fontWeight(this.model.snapshot.fontWeight)
+          .fontColor(this.color(this.model.snapshot.foreground, this.isDark ? '#ffffffff' : '#ff000000'))
+          .placeholderFont({ size: this.model.snapshot.fontSize + 'vp', weight: this.model.snapshot.fontWeight })
+          .placeholderColor(this.isDark ? '#66ffffff' : '#66000000')
+          .caretColor(this.isDark ? '#ff409cff' : '#ff007aff')
+          .hoverEffect(this.model.snapshot.plainTextField ? HoverEffect.None : HoverEffect.Auto)
           .width('100%')
           .height('100%')
-          .onSubmit(() => nativeApp.appEvent(this.model.snapshot.id, 16, ''))
+          .onSubmit(() => this.emitEvent(this.model.snapshot.id, 16, ''))
           .onFocus(() => this.action(8))
           .onBlur(() => this.action(9))
           .onChange((value: string) => {
-            if (value !== this.model.snapshot.text) nativeApp.appEvent(this.model.snapshot.id, 7, value);
+            if (value !== this.model.snapshot.text) this.emitEvent(this.model.snapshot.id, 7, value);
           })
       }
     } else if (this.model.snapshot.kind === 'scroll') {
@@ -730,6 +804,7 @@ struct GalleryElement {
         .width(this.model.snapshot.children[0]?.width ?? this.model.snapshot.width)
         .height(this.model.snapshot.children[0]?.height ?? this.model.snapshot.height)
       }
+      .align(Alignment.TopStart)
       .width('100%')
       .height('100%')
       .scrollable(this.model.snapshot.scrollDirection === 'both' ? ScrollDirection.FREE :
@@ -740,7 +815,7 @@ struct GalleryElement {
         .fontSize(this.model.snapshot.fontSize + 'vp')
         .fontWeight(this.model.snapshot.fontWeight)
         .fontFamily(this.model.snapshot.fontFamily)
-        .fontColor(this.color(this.model.snapshot.foreground, '#ff000000'))
+        .fontColor(this.color(this.model.snapshot.foreground, this.isDark ? '#ffffffff' : '#ff000000'))
         .width('100%')
         .height('100%')
         .align(Alignment.Center)
@@ -770,15 +845,7 @@ struct GalleryElement {
       .accessibilityText(this.model.snapshot.label)
       .accessibilitySelected(this.model.snapshot.selected)
       .id(this.model.snapshot.label.length > 0 ? 'swift-action-' + this.model.snapshot.label : 'swift-node-' + String(this.model.snapshot.id))
-      .onClick((event: ClickEvent) => {
-        nativeApp.appEvent(this.model.snapshot.id, 11,
-          JSON.stringify([this.model.snapshot.x + event.x, this.model.snapshot.y + event.y]));
-      })
-      .parallelGesture(TapGesture({ count: 2 }).onAction((event: GestureEvent) => {
-        const finger = event.fingerList[0];
-        if (finger) nativeApp.appEvent(this.model.snapshot.id, 12,
-          JSON.stringify([this.model.snapshot.x + finger.localX, this.model.snapshot.y + finger.localY]));
-      }))
+      .onClick(() => this.action(1))
       .onHover((hovered: boolean) => this.action(hovered ? 2 : 3))
       .onTouch((event: TouchEvent) => {
         if (event.type === TouchType.Down) this.action(4);
@@ -804,12 +871,32 @@ struct GalleryElement {
       radius: this.resolvedRadius(),
       color: this.color(this.model.snapshot.border, '#00000000')
     })
+    .borderRadius(this.resolvedRadius())
     .clip(this.model.snapshot.clip && !this.model.snapshot.clipPath)
     .clipShape(this.makeClipShape(this.model.snapshot.clipPath))
+    .backgroundEffect(this.model.snapshot.backdropBlurRadius && this.model.snapshot.backdropBlurRadius > 0
+      ? {
+          radius: this.model.snapshot.backdropBlurRadius,
+          saturation: 1.35,
+          brightness: 1.0,
+          color: '#00000000',
+          policy: BlurStyleActivePolicy.ALWAYS_ACTIVE
+        }
+      : undefined)
+    .shadow(this.model.snapshot.shadowRadius && this.model.snapshot.shadowRadius > 0
+      ? {
+          radius: this.model.snapshot.shadowRadius,
+          color: this.color(this.model.snapshot.shadowColor, '#28000000'),
+          offsetX: this.model.snapshot.shadowX ?? 0,
+          offsetY: this.model.snapshot.shadowY ?? 0,
+          fill: false
+        }
+      : { radius: 0, color: '#00000000', offsetX: 0, offsetY: 0 })
     .rotate({ angle: this.model.snapshot.rotation })
     .scale({ x: this.model.snapshot.scaleX, y: this.model.snapshot.scaleY })
     .opacity(this.parentOpacity > 0 ? Math.min(1, this.model.snapshot.opacity / this.parentOpacity) : 0)
     .blur(this.model.snapshot.blurRadius ?? 0)
+    .grayscale(this.model.snapshot.grayscale ?? 0)
     .enabled(this.model.snapshot.enabled)
     .hitTestBehavior(this.model.snapshot.hitTesting ? HitTestMode.Transparent : HitTestMode.None)
   }
@@ -819,6 +906,7 @@ struct GalleryElement {
 struct NavStackHost {
   @ObjectLink @Watch('syncNavStack') model: GalleryModel;
   @Consume('uiStyle') uiStyle: string;
+  @Consume('surfaceId') surfaceId: number;
   @State private rootModel: GalleryModel | undefined = undefined;
   private pageInfos: NavPathStack = new NavPathStack();
   private pageCache: Map<string, GalleryModel> = new Map<string, GalleryModel>();
@@ -892,7 +980,11 @@ struct NavStackHost {
     .backgroundColor(this.uiStyle === 'ios' ? '#fff2f2f7' : '#fff1f3f5')
     .onBackPressed(() => {
       if ((this.model.snapshot.intValue ?? 0) > 0) {
-        nativeApp.appEvent(this.model.snapshot.id, 14, '');
+        if (this.surfaceId === 0) {
+          nativeApp.appEvent(this.model.snapshot.id, 14, '');
+        } else {
+          nativeApp.surfaceEvent(this.surfaceId, this.model.snapshot.id, 14, '');
+        }
       }
       return false;
     })
@@ -926,47 +1018,141 @@ struct NavStackHost {
 @Component
 struct Index {
   @State private tree: GalleryModel | undefined = undefined;
+  @State private windowTransparent: boolean = false;
+  @State private windowBleed: number = 0;
+  @State private windowCornerRadius: number = 0;
+  @State private contentWidth: number = 0;
+  @State private contentHeight: number = 0;
   @Provide('uiStyle') uiStyle: string = '{{INITIAL_UI_STYLE}}';
+  @Provide('isDesktop') isDesktop: boolean = {{IS_DESKTOP}};
+  @Provide('surfaceId') surfaceId: number = 0;
+  @Provide('effectiveDark') effectiveDark: boolean = false;
   @StorageProp('crossSwiftIsDark') @Watch('onColorModeChange') isDark: boolean = false;
   private mounted: boolean = false;
 
+  aboutToAppear(): void {
+    const storage = this.getUIContext().getSharedLocalStorage();
+    const id = storage?.get<number>('crossSwiftSurfaceId');
+    this.surfaceId = typeof id === 'number' ? id : 0;
+    this.effectiveDark = this.isDark;
+  }
+
+  private emitEvent(id: number, event: number, text: string): void {
+    if (this.surfaceId === 0) {
+      nativeApp.appEvent(id, event, text);
+    } else {
+      nativeApp.surfaceEvent(this.surfaceId, id, event, text);
+    }
+  }
+
   onColorModeChange(): void {
+    this.effectiveDark = this.isDark;
     if (this.mounted) {
       nativeApp.setColorScheme(this.isDark);
     }
   }
 
+  private dispatchKey(event: KeyEvent): void {
+    if (event.type !== KeyType.Down || !this.mounted) return;
+    let mapped = 0;
+    if (event.keyCode === 2070) mapped = 27;       // Escape
+    else if (event.keyCode === 2012) mapped = 38;  // Up
+    else if (event.keyCode === 2013) mapped = 40;  // Down
+    else if (event.keyCode === 2049) mapped = 9;   // Tab
+    else if (event.keyCode === 2054 || event.keyCode === 2119) mapped = 13; // Enter
+    if (mapped !== 0) {
+      this.emitEvent(0, 17, String(mapped));
+    }
+  }
+
   aboutToDisappear(): void {
-    if (this.mounted) nativeApp.unmountApp();
+    if (this.mounted) {
+      if (this.surfaceId === 0) {
+        nativeApp.unmountApp();
+      } else {
+        nativeApp.unmountSurface(this.surfaceId);
+      }
+    }
     this.mounted = false;
   }
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
-      if (this.tree) {
+      if (this.tree && this.windowTransparent) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#00000000')
+          .onClick(() => {
+            if (this.mounted) {
+              this.emitEvent(0, 17, '27');
+            }
+          })
+        Stack({ alignContent: Alignment.TopStart }) {
+          GalleryElement({ model: this.tree })
+        }
+        .width(this.contentWidth > 0 ? this.contentWidth : '100%')
+        .height(this.contentHeight > 0 ? this.contentHeight : '100%')
+        .position({ x: this.windowBleed, y: this.windowBleed })
+        .borderRadius(this.windowCornerRadius)
+        .shadow(this.windowCornerRadius > 0
+          ? {
+              radius: this.getUIContext().vp2px(this.windowCornerRadius >= 20 ? 26 : 18),
+              color: this.effectiveDark ? '#70000000' : '#2e000000',
+              offsetX: 0,
+              offsetY: this.getUIContext().vp2px(this.windowCornerRadius >= 20 ? 8 : 5),
+              fill: false
+            }
+          : { radius: 0, color: '#00000000', offsetX: 0, offsetY: 0 })
+      } else if (this.tree) {
         GalleryElement({ model: this.tree })
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.isDark ? '#ff000000' : (this.uiStyle === 'ios' ? '#fff2f2f7' : '#fff1f3f5'))
+    .backgroundColor(
+      this.windowTransparent
+        ? '#00000000'
+        : (this.isDesktop
+            ? (this.effectiveDark ? '#ff1b1b1f' : '#fff6f6f8')
+            : (this.effectiveDark ? '#ff1e1e22' : (this.uiStyle === 'ios' ? '#fff2f2f7' : '#fff1f3f5')))
+    )
+    .onKeyEvent((event: KeyEvent) => this.dispatchKey(event))
     .onAreaChange((_old: Area, area: Area) => {
       const width = Number(area.width);
       const height = Number(area.height);
       if (width <= 0 || height <= 0) return;
       if (this.mounted) {
-        nativeApp.resizeApp(width, height);
+        if (this.surfaceId === 0) {
+          nativeApp.resizeApp(width, height);
+        } else {
+          nativeApp.resizeSurface(this.surfaceId, width, height);
+        }
       } else {
         this.mounted = true;
-        nativeApp.mountApp((json: string) => {
+        const onTree = (json: string): void => {
           const snapshot = JSON.parse(json) as GalleryNode;
+          this.windowTransparent = Boolean(snapshot.windowTransparent);
+          this.windowBleed = snapshot.windowBleed ?? 0;
+          this.windowCornerRadius = snapshot.windowCornerRadius ?? (snapshot.height >= 120 ? 26 : 0);
+          if (typeof snapshot.isDark === 'boolean') {
+            this.effectiveDark = snapshot.isDark;
+          }
+          this.contentWidth = snapshot.width;
+          this.contentHeight = snapshot.height;
           if (this.tree && this.tree.snapshot.id === snapshot.id) {
             this.tree.update(snapshot);
           } else {
             this.tree = new GalleryModel(snapshot);
-            hilog.info(0x0000, 'CrossSwiftUI', 'CROSSSWIFT_HARMONY mounted');
+            hilog.info(0x0000, 'CrossSwiftUI', 'CROSSSWIFT_HARMONY mounted surface=%{public}d', this.surfaceId);
           }
-        }, width, height, this.getUIContext().vp2px(1));
+        };
+        const scale = this.getUIContext().vp2px(1);
+        if (this.surfaceId === 0) {
+          nativeApp.mountApp(onTree, width, height, scale);
+        } else {
+          nativeApp.mountSurface(this.surfaceId, onTree, width, height, scale);
+        }
         nativeApp.setColorScheme(this.isDark);
       }
     })
