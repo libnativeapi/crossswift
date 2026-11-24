@@ -437,6 +437,7 @@ void PositionWindowShadow(Surface *s) {
 }
 
 void CommitPendingResizeImpl(Surface *s, bool from_pos_changed);
+void ClearPopupSurfaceReferences(Surface *s);
 
 LRESULT CALLBACK ShadowRootSubclassProc(
     HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclass_id, DWORD_PTR data
@@ -3380,6 +3381,7 @@ void sui_surface_destroy(void *handle) {
   RemoveWindowSubclass(s->host, HostProc, subclass_id);
   ClearWindowShadow(s);
   UnhookRoot(s);
+  ClearPopupSurfaceReferences(s);
   if (s->host_clipped_children)
     SetWindowLongPtrW(s->host, GWL_STYLE,
                       GetWindowLongPtrW(s->host, GWL_STYLE) | WS_CLIPCHILDREN);
@@ -4787,5 +4789,507 @@ void sui_window_set_dark_mode(void *window, int dark) {
   SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
   RedrawWindow(hwnd, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE);
+}
+} // extern "C"
+
+namespace {
+constexpr UINT_PTR kPopupSubclassId = 0x53555001u;
+constexpr UINT_PTR kPopupOwnerSubclassId = 0x53555002u;
+
+struct PopupHookData {
+  HWND owner_hwnd = nullptr;
+  Surface *popup_surface = nullptr;
+  sui_popup_event_callback callback = nullptr;
+  void *context = nullptr;
+  bool suppress_deactivate = false;
+};
+
+struct OwnerHookData {
+  sui_popup_event_callback callback = nullptr;
+  void *context = nullptr;
+  std::vector<HWND> popups;
+  bool blocks_background = true;
+};
+
+std::unordered_map<HWND, PopupHookData *> g_popup_hooks;
+std::unordered_map<HWND, OwnerHookData *> g_owner_hooks;
+
+bool IsTargetInPopupList(const std::vector<HWND> &popups, HWND target) {
+  if (!target || popups.empty()) return false;
+  HWND root = GetAncestor(target, GA_ROOT);
+  for (HWND p : popups) {
+    if (p == target || (root && p == root)) return true;
+  }
+  return false;
+}
+
+void ClearPopupSurfaceReferences(Surface *s) {
+  if (!s) return;
+  for (auto &entry : g_popup_hooks) {
+    if (entry.second && entry.second->popup_surface == s) {
+      entry.second->popup_surface = nullptr;
+    }
+  }
+}
+
+LRESULT CALLBACK PopupWindowSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclass_id, DWORD_PTR
+) {
+  auto it = g_popup_hooks.find(hwnd);
+  PopupHookData *data = (it != g_popup_hooks.end()) ? it->second : nullptr;
+
+  switch (msg) {
+    case WM_NCCALCSIZE:
+      return 0;
+    case WM_NCPAINT:
+    case 0x00AE: // WM_NCUAHDRAWCAPTION
+    case 0x00AF: // WM_NCUAHDRAWFRAME
+      return 0;
+    case WM_NCACTIVATE:
+      return TRUE;
+    case WM_NCHITTEST: {
+      if (data && data->popup_surface && data->popup_surface->host &&
+          data->popup_surface->buffer && data->popup_surface->buffer->pixels) {
+        Surface *s = data->popup_surface;
+        POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (ScreenToClient(s->host, &pt)) {
+          if (pt.x >= 0 && pt.x < int(s->buffer->width) &&
+              pt.y >= 0 && pt.y < int(s->buffer->height)) {
+            const uint32_t px =
+                s->buffer->pixels[size_t(pt.y) * size_t(s->buffer->stride_pixels) + size_t(pt.x)];
+            if ((px >> 24) < 8u) {
+              return HTTRANSPARENT;
+            }
+          }
+        }
+      }
+      return HTCLIENT;
+    }
+    case WM_ACTIVATE: {
+      const LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
+      auto after = g_popup_hooks.find(hwnd);
+      if (after != g_popup_hooks.end() && after->second) {
+        PopupHookData *d = after->second;
+        if (LOWORD(wp) == WA_INACTIVE && !d->suppress_deactivate && d->callback) {
+          auto cb = d->callback;
+          void *ctx = d->context;
+          HWND other = reinterpret_cast<HWND>(lp);
+          HWND other_root = other ? GetAncestor(other, GA_ROOT) : nullptr;
+          cb(ctx, 1, other_root ? other_root : other);
+        }
+      }
+      return res;
+    }
+    case WM_NCDESTROY: {
+      RemoveWindowSubclass(hwnd, PopupWindowSubclassProc, subclass_id);
+      if (it != g_popup_hooks.end()) {
+        PopupHookData *victim = it->second;
+        g_popup_hooks.erase(it);
+        delete victim;
+      }
+      return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    default:
+      break;
+  }
+  return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+LRESULT CALLBACK OwnerWindowSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclass_id, DWORD_PTR
+) {
+  auto it = g_owner_hooks.find(hwnd);
+  OwnerHookData *data = (it != g_owner_hooks.end()) ? it->second : nullptr;
+
+  switch (msg) {
+    case WM_NCACTIVATE: {
+      if (!wp && data && !data->popups.empty()) {
+        HWND other = reinterpret_cast<HWND>(lp);
+        HWND fg = GetForegroundWindow();
+        if (IsTargetInPopupList(data->popups, other) ||
+            IsTargetInPopupList(data->popups, fg)) {
+          return DefSubclassProc(hwnd, WM_NCACTIVATE, TRUE, lp);
+        }
+      }
+      break;
+    }
+    case WM_MOUSEACTIVATE: {
+      if (data && !data->popups.empty() && data->blocks_background && data->callback) {
+        auto cb = data->callback;
+        void *ctx = data->context;
+        cb(ctx, 2, hwnd);
+        if (LOWORD(lp) == HTCLIENT) {
+          return MA_ACTIVATEANDEAT;
+        }
+        return MA_ACTIVATE;
+      }
+      break;
+    }
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN: {
+      if (data && !data->popups.empty() && data->blocks_background && data->callback) {
+        auto cb = data->callback;
+        void *ctx = data->context;
+        cb(ctx, 2, hwnd);
+        return 0;
+      }
+      break;
+    }
+    case WM_NCLBUTTONDOWN:
+    case WM_NCRBUTTONDOWN: {
+      if (data && !data->popups.empty() && data->blocks_background && data->callback) {
+        auto cb = data->callback;
+        void *ctx = data->context;
+        cb(ctx, 2, hwnd);
+      }
+      break;
+    }
+    case WM_ACTIVATE: {
+      const LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
+      auto after = g_owner_hooks.find(hwnd);
+      if (after != g_owner_hooks.end() && after->second) {
+        OwnerHookData *d = after->second;
+        if (LOWORD(wp) == WA_INACTIVE && !d->popups.empty() && d->callback) {
+          HWND other = reinterpret_cast<HWND>(lp);
+          if (!IsTargetInPopupList(d->popups, other)) {
+            auto cb = d->callback;
+            void *ctx = d->context;
+            cb(ctx, 3, other);
+          }
+        }
+      }
+      return res;
+    }
+    case WM_SHOWWINDOW: {
+      const LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
+      auto after = g_owner_hooks.find(hwnd);
+      if (after != g_owner_hooks.end() && after->second && after->second->callback) {
+        OwnerHookData *d = after->second;
+        auto cb = d->callback;
+        void *ctx = d->context;
+        if (!wp) {
+          if (!d->popups.empty()) cb(ctx, 4, nullptr);
+        } else {
+          cb(ctx, 6, nullptr);
+        }
+      }
+      return res;
+    }
+    case WM_SIZE: {
+      const LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
+      auto after = g_owner_hooks.find(hwnd);
+      if (after != g_owner_hooks.end() && after->second && !after->second->popups.empty() &&
+          after->second->callback) {
+        auto cb = after->second->callback;
+        void *ctx = after->second->context;
+        cb(ctx, wp == SIZE_MINIMIZED ? 4 : 5, nullptr);
+      }
+      return res;
+    }
+    case WM_WINDOWPOSCHANGED: {
+      const LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
+      auto after = g_owner_hooks.find(hwnd);
+      if (after != g_owner_hooks.end() && after->second && after->second->callback) {
+        OwnerHookData *d = after->second;
+        const bool visible = IsWindowVisible(hwnd) && !IsIconic(hwnd);
+        if (!d->popups.empty()) {
+          auto cb = d->callback;
+          void *ctx = d->context;
+          cb(ctx, visible ? 5 : 4, nullptr);
+        } else if (visible) {
+          auto *pos = reinterpret_cast<const WINDOWPOS *>(lp);
+          if (pos && (pos->flags & SWP_SHOWWINDOW)) {
+            auto cb = d->callback;
+            void *ctx = d->context;
+            cb(ctx, 6, nullptr);
+          }
+        }
+      }
+      return res;
+    }
+    case WM_CLOSE:
+    case WM_DESTROY: {
+      if (data && !data->popups.empty() && data->callback) {
+        auto cb = data->callback;
+        void *ctx = data->context;
+        cb(ctx, 4, nullptr);
+      }
+      break;
+    }
+    case WM_NCDESTROY: {
+      RemoveWindowSubclass(hwnd, OwnerWindowSubclassProc, subclass_id);
+      if (it != g_owner_hooks.end()) {
+        OwnerHookData *victim = it->second;
+        g_owner_hooks.erase(it);
+        delete victim;
+      }
+      return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    default:
+      break;
+  }
+  return DefSubclassProc(hwnd, msg, wp, lp);
+}
+} // namespace
+
+extern "C" {
+void *sui_surface_root_hwnd(void *handle) {
+  auto *s = static_cast<Surface *>(handle);
+  if (!s || !s->host || !IsWindow(s->host)) return nullptr;
+  return GetAncestor(s->host, GA_ROOT);
+}
+
+int sui_hwnd_is_visible(void *hwnd_ptr) {
+  HWND hwnd = static_cast<HWND>(hwnd_ptr);
+  if (!hwnd || !IsWindow(hwnd)) return 0;
+  return (IsWindowVisible(hwnd) && !IsIconic(hwnd)) ? 1 : 0;
+}
+
+int sui_popup_measure_anchor(void *handle, double x, double y, double w,
+                             double h, sui_popup_metrics *out_metrics) {
+  auto *s = static_cast<Surface *>(handle);
+  if (!s || !s->host || !IsWindow(s->host) || !out_metrics) return 0;
+  double ox = 0.0, oy = 0.0;
+  EffectiveOffset(s, ox, oy);
+  UINT dpi = GetDpiForWindow(s->host);
+  if (!dpi) dpi = 96;
+  const double scale = double(dpi) / 96.0;
+  POINT tl{LONG(std::lround((x + ox) * scale)),
+           LONG(std::lround((y + oy) * scale))};
+  if (!ClientToScreen(s->host, &tl)) return 0;
+  const LONG px_w = max(1L, LONG(std::lround(w * scale)));
+  const LONG px_h = max(1L, LONG(std::lround(h * scale)));
+  RECT anchor_px{tl.x, tl.y, tl.x + px_w, tl.y + px_h};
+  HMONITOR mon = MonitorFromRect(&anchor_px, MONITOR_DEFAULTTONEAREST);
+  if (!mon) {
+    HWND root = GetAncestor(s->host, GA_ROOT);
+    mon = MonitorFromWindow(root ? root : s->host, MONITOR_DEFAULTTONEAREST);
+  }
+  MONITORINFO mi{};
+  mi.cbSize = sizeof(mi);
+  if (!mon || !GetMonitorInfoW(mon, &mi)) {
+    RECT desk{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &desk, 0);
+    mi.rcWork = desk;
+  }
+  out_metrics->work_px_left = int(mi.rcWork.left);
+  out_metrics->work_px_top = int(mi.rcWork.top);
+  out_metrics->scale = scale;
+  out_metrics->work_x = 0.0;
+  out_metrics->work_y = 0.0;
+  out_metrics->work_w = double(mi.rcWork.right - mi.rcWork.left) / scale;
+  out_metrics->work_h = double(mi.rcWork.bottom - mi.rcWork.top) / scale;
+  out_metrics->anchor_x = double(anchor_px.left - mi.rcWork.left) / scale;
+  out_metrics->anchor_y = double(anchor_px.top - mi.rcWork.top) / scale;
+  out_metrics->anchor_w = w;
+  out_metrics->anchor_h = h;
+  return 1;
+}
+
+void sui_popup_configure(void *popup_ptr, void *owner_ptr,
+                         void *popup_surface_ptr, int is_dark,
+                         sui_popup_event_callback callback, void *context) {
+  HWND hwnd = static_cast<HWND>(popup_ptr);
+  HWND owner = static_cast<HWND>(owner_ptr);
+  if (!hwnd || !IsWindow(hwnd)) return;
+
+  PopupHookData *data = nullptr;
+  auto it = g_popup_hooks.find(hwnd);
+  if (it != g_popup_hooks.end()) {
+    data = it->second;
+  } else {
+    data = new PopupHookData();
+    g_popup_hooks[hwnd] = data;
+    SetWindowSubclass(hwnd, PopupWindowSubclassProc, kPopupSubclassId, 0);
+  }
+  data->owner_hwnd = owner;
+  data->popup_surface = static_cast<Surface *>(popup_surface_ptr);
+  data->callback = callback;
+  data->context = context;
+
+  LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+  const LONG_PTR target_style =
+      (style & ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX |
+                 WS_MAXIMIZEBOX | WS_BORDER | WS_DLGFRAME)) |
+      WS_POPUP;
+  if (target_style != style) {
+    SetWindowLongPtrW(hwnd, GWL_STYLE, target_style);
+  }
+
+  const bool owner_topmost =
+      owner && IsWindow(owner) &&
+      (GetWindowLongPtrW(owner, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+  LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  LONG_PTR target_ex =
+      (ex & ~(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE |
+              WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_NOACTIVATE)) |
+      WS_EX_TOOLWINDOW;
+  if (owner_topmost) {
+    target_ex |= WS_EX_TOPMOST;
+  } else {
+    target_ex &= ~WS_EX_TOPMOST;
+  }
+  if (target_ex != ex) {
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, target_ex);
+  }
+
+  if (owner && IsWindow(owner) && owner != hwnd) {
+    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
+  }
+
+  DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
+  DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+  COLORREF none_border = 0xFFFFFFFEu;
+  DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */, &none_border, sizeof(none_border));
+  int dont_round = 1; // DWMWCP_DONOTROUND
+  DwmSetWindowAttribute(hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &dont_round, sizeof(dont_round));
+  int backdrop_none = 1; // DWMSBT_NONE
+  DwmSetWindowAttribute(hwnd, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &backdrop_none, sizeof(backdrop_none));
+  BOOL dark = is_dark ? TRUE : FALSE;
+  DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+  BOOL disable_transitions = TRUE;
+  DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disable_transitions,
+                        sizeof(disable_transitions));
+
+  SetWindowPos(
+      hwnd, nullptr, 0, 0, 0, 0,
+      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
+          SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOCOPYBITS);
+}
+
+void sui_popup_unconfigure(void *popup_ptr) {
+  HWND hwnd = static_cast<HWND>(popup_ptr);
+  if (!hwnd) return;
+  auto it = g_popup_hooks.find(hwnd);
+  if (it != g_popup_hooks.end()) {
+    PopupHookData *victim = it->second;
+    g_popup_hooks.erase(it);
+    if (IsWindow(hwnd)) {
+      RemoveWindowSubclass(hwnd, PopupWindowSubclassProc, kPopupSubclassId);
+    }
+    delete victim;
+  }
+}
+
+void sui_popup_owner_attach(void *owner_ptr, sui_popup_event_callback callback,
+                            void *context) {
+  HWND hwnd = static_cast<HWND>(owner_ptr);
+  if (!hwnd || !IsWindow(hwnd)) return;
+  auto it = g_owner_hooks.find(hwnd);
+  if (it != g_owner_hooks.end()) {
+    it->second->callback = callback;
+    it->second->context = context;
+    return;
+  }
+  auto *data = new OwnerHookData();
+  data->callback = callback;
+  data->context = context;
+  g_owner_hooks[hwnd] = data;
+  SetWindowSubclass(hwnd, OwnerWindowSubclassProc, kPopupOwnerSubclassId, 0);
+}
+
+void sui_popup_owner_detach(void *owner_ptr) {
+  HWND hwnd = static_cast<HWND>(owner_ptr);
+  if (!hwnd) return;
+  auto it = g_owner_hooks.find(hwnd);
+  if (it != g_owner_hooks.end()) {
+    OwnerHookData *victim = it->second;
+    g_owner_hooks.erase(it);
+    if (IsWindow(hwnd)) {
+      RemoveWindowSubclass(hwnd, OwnerWindowSubclassProc, kPopupOwnerSubclassId);
+    }
+    delete victim;
+  }
+}
+
+void sui_popup_owner_set_popups(void *owner_ptr, void *const *popup_hwnds,
+                                int count, int blocks_background) {
+  HWND hwnd = static_cast<HWND>(owner_ptr);
+  if (!hwnd) return;
+  auto it = g_owner_hooks.find(hwnd);
+  if (it == g_owner_hooks.end() || !it->second) return;
+  OwnerHookData *data = it->second;
+  data->popups.clear();
+  if (popup_hwnds && count > 0) {
+    data->popups.reserve(size_t(count));
+    for (int i = 0; i < count; ++i) {
+      if (popup_hwnds[i]) {
+        data->popups.push_back(static_cast<HWND>(popup_hwnds[i]));
+      }
+    }
+  }
+  data->blocks_background = blocks_background != 0;
+}
+
+void sui_popup_set_bounds_px(void *popup_ptr, void *owner_ptr, int x, int y,
+                             int width, int height, int show, int activate) {
+  HWND hwnd = static_cast<HWND>(popup_ptr);
+  HWND owner = static_cast<HWND>(owner_ptr);
+  if (!hwnd || !IsWindow(hwnd)) return;
+
+  const bool owner_topmost =
+      owner && IsWindow(owner) &&
+      (GetWindowLongPtrW(owner, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+  HWND insert_after = owner_topmost ? HWND_TOPMOST : HWND_TOP;
+  UINT flags = SWP_NOOWNERZORDER | SWP_NOCOPYBITS;
+  if (show) {
+    flags |= SWP_SHOWWINDOW;
+  }
+  if (!activate) {
+    flags |= SWP_NOACTIVATE;
+  }
+
+  auto it = g_popup_hooks.find(hwnd);
+  const bool prev_suppress = (it != g_popup_hooks.end() && it->second)
+                                 ? it->second->suppress_deactivate
+                                 : false;
+  if (it != g_popup_hooks.end() && it->second) {
+    it->second->suppress_deactivate = true;
+  }
+  SetWindowPos(hwnd, insert_after, x, y, max(1, width), max(1, height), flags);
+  if (show && activate) {
+    SetActiveWindow(hwnd);
+  }
+  auto after = g_popup_hooks.find(hwnd);
+  if (after != g_popup_hooks.end() && after->second) {
+    after->second->suppress_deactivate = prev_suppress;
+  }
+}
+
+void sui_popup_restore_owner_focus(void *popup_ptr, void *owner_ptr) {
+  HWND popup = static_cast<HWND>(popup_ptr);
+  HWND owner = static_cast<HWND>(owner_ptr);
+  if (!owner || !IsWindow(owner) || !IsWindowVisible(owner) || IsIconic(owner)) {
+    return;
+  }
+  HWND fg = GetForegroundWindow();
+  HWND active = GetActiveWindow();
+  const bool popup_has_focus =
+      (popup && (fg == popup || active == popup ||
+                 (fg && IsChild(popup, fg)) || (active && IsChild(popup, active))));
+  if (popup_has_focus) {
+    SetActiveWindow(owner);
+  }
+}
+
+int sui_popup_get_window_info(void *hwnd_ptr, sui_popup_window_info *out_info) {
+  HWND hwnd = static_cast<HWND>(hwnd_ptr);
+  if (!hwnd || !IsWindow(hwnd) || !out_info) return 0;
+  const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+  const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  RECT rect{};
+  GetWindowRect(hwnd, &rect);
+  out_info->is_visible = IsWindowVisible(hwnd) ? 1 : 0;
+  out_info->is_popup_style = (style & WS_POPUP) != 0 ? 1 : 0;
+  out_info->is_tool_window = (ex & WS_EX_TOOLWINDOW) != 0 ? 1 : 0;
+  out_info->has_app_window = (ex & WS_EX_APPWINDOW) != 0 ? 1 : 0;
+  out_info->is_topmost = (ex & WS_EX_TOPMOST) != 0 ? 1 : 0;
+  out_info->left = int(rect.left);
+  out_info->top = int(rect.top);
+  out_info->width = int(rect.right - rect.left);
+  out_info->height = int(rect.bottom - rect.top);
+  out_info->owner_hwnd = GetWindow(hwnd, GW_OWNER);
+  return 1;
 }
 }

@@ -393,6 +393,11 @@ public struct Element {
   var presentationPopoverChrome = false
   var presentationColorScheme: ColorScheme = .light
   var dismissPresentation: (() -> Void)? = nil
+  package var presentationStyle: PresentationStyle = .modal
+  package var presentationID: ObjectIdentifier? = nil
+  package var popupPresentationIndex: Int? = nil
+  package var popupPresentationRole: PopupPresentationRole? = nil
+  package var popupPresentations: [PopupPresentationMetadata] = []
   var pressedAction: ((Bool) -> Void)? = nil
   package var semanticBoolAction: ((Bool) -> Void)? = nil
   package var semanticDoubleAction: ((Double, Bool) -> Void)? = nil

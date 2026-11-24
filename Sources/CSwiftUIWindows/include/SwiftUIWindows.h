@@ -139,6 +139,44 @@ void sui_offscreen_text(void *canvas, double x, double y, double width,
 uint8_t *sui_offscreen_finish_png(void *canvas, int *out_len);
 void sui_free_bytes(void *ptr);
 void sui_window_set_dark_mode(void *window, int dark);
+
+// Native owned popup window helpers (`.popover`, `._menuPopover`, `.contextMenu`).
+typedef void (*sui_popup_event_callback)(void *context, int event,
+                                         void *other_hwnd);
+typedef struct {
+  double anchor_x, anchor_y, anchor_w, anchor_h;
+  double work_x, work_y, work_w, work_h;
+  int work_px_left, work_px_top;
+  double scale;
+} sui_popup_metrics;
+
+typedef struct {
+  int is_visible;
+  int is_popup_style;
+  int is_tool_window;
+  int has_app_window;
+  int is_topmost;
+  int left, top, width, height;
+  void *owner_hwnd;
+} sui_popup_window_info;
+
+void *sui_surface_root_hwnd(void *surface);
+int sui_hwnd_is_visible(void *hwnd);
+int sui_popup_measure_anchor(void *surface, double x, double y, double w,
+                             double h, sui_popup_metrics *out_metrics);
+void sui_popup_configure(void *popup_hwnd, void *owner_hwnd,
+                         void *popup_surface, int is_dark,
+                         sui_popup_event_callback callback, void *context);
+void sui_popup_unconfigure(void *popup_hwnd);
+void sui_popup_owner_attach(void *owner_hwnd, sui_popup_event_callback callback,
+                            void *context);
+void sui_popup_owner_detach(void *owner_hwnd);
+void sui_popup_owner_set_popups(void *owner_hwnd, void *const *popup_hwnds,
+                                int count, int blocks_background);
+void sui_popup_set_bounds_px(void *popup_hwnd, void *owner_hwnd, int x, int y,
+                             int width, int height, int show, int activate);
+void sui_popup_restore_owner_focus(void *popup_hwnd, void *owner_hwnd);
+int sui_popup_get_window_info(void *hwnd, sui_popup_window_info *out_info);
 #ifdef __cplusplus
 }
 #endif

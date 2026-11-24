@@ -57,7 +57,16 @@
     }
     private var edits: [NodeID: RetainedEdit] = [:]
     private var root: Element?
+    private var fullRoot: Element?
     private var appliedDarkMode: Bool? = nil
+    public var usesNativePopupWindows = true
+    internal private(set) var popupController: WindowsPopupController?
+    internal var surfaceHandle: UnsafeMutableRawPointer? { surface }
+    internal var hostWindow: NativeAPI.Window? { window }
+    internal var schedulesUpdatesFlag: Bool { schedulesUpdates }
+    internal var activePopupWindows: [NativeAPI.Window] { popupController?.activeWindows ?? [] }
+    internal var activePopupPlacements: [PopupPlacement] { popupController?.activePlacements ?? [] }
+    internal var activePopupBackends: [WindowsDrawingBackend] { popupController?.activeBackends ?? [] }
     private final class NativeShadowMask {
       let handle: UnsafeMutableRawPointer
       init?(_ mask: ShadowMask) {
@@ -272,7 +281,7 @@
             if [2, 3, 4, 6, 7, 9].contains(Int(event)) { backend.drainInput() }
           }
           if event == 12 {
-            if let root = backend.root { backend.didRender(root) }
+            if let root = backend.fullRoot ?? backend.root { backend.didRender(root) }
             return 0
           }
           if event == 11 {
@@ -297,6 +306,16 @@
             // Leaving a native scrolling container for one of its children is
             // not leaving the SwiftUI surface. Reconcile the current hit path.
             return backend.inputHandler?(nil, 1, point, 0, [], "") == true ? 1 : 0
+          }
+          if let popup = backend.popupController, popup.hasActivePopups {
+            if event == 6 && value == 27 && EventModifiers(rawValue: Int(modifiers)).isEmpty {
+              popup.dismissTopmost()
+              return 1
+            }
+            if (event == 2 || event == 9) && popup.hasActiveBlockingPopup {
+              popup.dismissAll()
+              return 1
+            }
           }
           if backend.onPreInput?(
             Int(event), CGPoint(x: x, y: y), Int(value), EventModifiers(rawValue: Int(modifiers))
@@ -333,6 +352,8 @@
       }
     }
     deinit {
+      popupController?.tearDown()
+      popupController = nil
       content.cancelUpdate()
       if let contentListener { _ = content.removeListener(contentListener) }
       for id in Array(hostedViews.keys) { removeHostedView(id) }
@@ -426,9 +447,47 @@
       return nil
     }
 
+    internal func scheduleDeferredPopupResync() {
+      enqueue { [weak self] in
+        self?.resyncDeferredPopupsIfNeeded()
+      }
+    }
+
+    internal func resyncDeferredPopupsIfNeeded() {
+      guard let fullRoot, !fullRoot.popupPresentations.isEmpty, usesNativePopupWindows,
+        let surface, let ownerHwnd = sui_surface_root_hwnd(surface),
+        sui_hwnd_is_visible(ownerHwnd) != 0
+      else { return }
+      didRender(fullRoot)
+    }
+
     public func didRender(_ root: Element) {
       guard let surface else { return }
-      if let scheme = findColorSchemeOverride(root) {
+      self.fullRoot = root
+      let hasPopups = !root.popupPresentations.isEmpty
+      let canUseNativePopups = usesNativePopupWindows && window != nil && hasPopups
+      let ownerHwnd = canUseNativePopups ? sui_surface_root_hwnd(surface) : nil
+      let ownerVisible = ownerHwnd != nil && sui_hwnd_is_visible(ownerHwnd) != 0
+      let renderRoot: Element
+      if canUseNativePopups && ownerVisible {
+        var stripped = root
+        stripped.children = root.children.filter { $0.popupPresentationIndex == nil }
+        renderRoot = stripped
+      } else {
+        if canUseNativePopups, let ownerHwnd {
+          let controller = popupController ?? {
+            let created = WindowsPopupController(hostBackend: self)
+            popupController = created
+            return created
+          }()
+          controller.ensureOwnerAttached(ownerHwnd)
+          controller.closeAll(restoreFocus: false)
+        } else {
+          popupController?.closeAll(restoreFocus: true)
+        }
+        renderRoot = root
+      }
+      if let scheme = findColorSchemeOverride(renderRoot) {
         let isDark = (scheme == .dark)
         if appliedDarkMode != isDark {
           appliedDarkMode = isDark
@@ -452,9 +511,9 @@
       var hasModal = false
       var hasFocusRequest = false
       let rootSizeChanged = self.root.map {
-        abs($0.frame.width - root.frame.width) > 0.5 || abs($0.frame.height - root.frame.height) > 0.5
+        abs($0.frame.width - renderRoot.frame.width) > 0.5 || abs($0.frame.height - renderRoot.frame.height) > 0.5
       } ?? false
-      let suppressAllAnimations = root.props.animationDisabled || rootSizeChanged
+      let suppressAllAnimations = renderRoot.props.animationDisabled || rootSizeChanged
       @discardableResult
       func animate(_ node: Element, inherited: Animation?, disabled: Bool) -> Bool {
         var hasControl = false
@@ -507,7 +566,7 @@
         if hasControl { controlBranches.insert(node.id) }
         return hasControl
       }
-      animate(root, inherited: nil, disabled: suppressAllAnimations)
+      animate(renderRoot, inherited: nil, disabled: suppressAllAnimations)
       if suppressAllAnimations {
         motions.removeAll(keepingCapacity: true)
       }
@@ -515,7 +574,7 @@
       if !motions.isEmpty {
         motions = motions.filter { current[$0.key] != nil }
       }
-      self.root = root
+      self.root = renderRoot
       modalControls = nil
       func modal(_ node: Element) {
         if node.props.accessibilityTraits & AccessibilityTraits.isModal.rawValue != 0 {
@@ -524,7 +583,7 @@
         }
         for child in node.children { modal(child) }
       }
-      if hasModal { modal(root) }
+      if hasModal { modal(renderRoot) }
       desiredFocus = nil
       func focusTarget(_ node: Element) {
         if node.props.focusRequested {
@@ -542,7 +601,7 @@
         }
         for child in node.children { focusTarget(child) }
       }
-      if hasFocusRequest { focusTarget(root) }
+      if hasFocusRequest { focusTarget(renderRoot) }
       if !buttons.isEmpty {
         let deadButtons = buttons.keys.filter { !live.contains($0) }
         for id in deadButtons { removeButton(id) }
@@ -557,8 +616,16 @@
       }
       sui_surface_begin(surface)
       lastTimings["prepare"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
-      publish(root, on: surface)
-      if schedulesUpdates && !deliveringUpdate && (!motions.isEmpty || root.hasLayoutAnimation) {
+      publish(renderRoot, on: surface)
+      if canUseNativePopups && ownerVisible, let ownerHwnd {
+        let controller = popupController ?? {
+          let created = WindowsPopupController(hostBackend: self)
+          popupController = created
+          return created
+        }()
+        controller.sync(root: root, ownerHwnd: ownerHwnd)
+      }
+      if schedulesUpdates && !deliveringUpdate && (!motions.isEmpty || renderRoot.hasLayoutAnimation) {
         _ = content.requestUpdate()
       }
     }
@@ -620,25 +687,33 @@
       if let handle = buttons[id]?.view.nativeObject {
         sui_button_activate(handle)
         if let surface { sui_surface_flush(surface) }
+      } else {
+        _ = popupController?.activate(id)
       }
     }
     /// Programmatic editing and pointer events are scoped to this surface's HWND.
     public func replaceText(_ id: NodeID, with text: String) {
-      guard let edit = edits[id]?.view else { return }
-      edit.setText(text)
-      enqueue { [weak self] in
-        _ = self?.inputHandler?(id, 7, .zero, 0, [], text)
-      }
-      if schedulesUpdates {
-        drainInput()
-      } else if let surface {
-        sui_surface_flush(surface)
+      if let edit = edits[id]?.view {
+        edit.setText(text)
+        enqueue { [weak self] in
+          _ = self?.inputHandler?(id, 7, .zero, 0, [], text)
+        }
+        if schedulesUpdates {
+          drainInput()
+        } else if let surface {
+          sui_surface_flush(surface)
+        }
+      } else {
+        _ = popupController?.replaceText(id, with: text)
       }
     }
     public func pointer(event: Int, at point: CGPoint, value: Int = 0) {
       if let surface { sui_surface_pointer(surface, Int32(event), point.x, point.y, Int32(value)) }
     }
     public func pointerLocation(fallback: CGPoint) -> CGPoint? {
+      if let popupPoint = popupController?.pointerLocationInTreeCoordinates() {
+        return popupPoint
+      }
       guard let surface else { return nil }
       let started = Date.timeIntervalSinceReferenceDate
       defer {
@@ -649,9 +724,15 @@
       guard sui_surface_cursor(surface, &x, &y) != 0 else { return nil }
       return CGPoint(x: x, y: y)
     }
-    public func nativeButton(_ id: NodeID) -> NativeAPI.Button? { buttons[id]?.view }
-    public func nativeTextField(_ id: NodeID) -> NativeAPI.TextField? { edits[id]?.view }
-    public func hostedNativeView(_ id: NodeID) -> NativeAPI.View? { hostedViews[id]?.nativeView }
+    public func nativeButton(_ id: NodeID) -> NativeAPI.Button? {
+      buttons[id]?.view ?? popupController?.nativeButton(id)
+    }
+    public func nativeTextField(_ id: NodeID) -> NativeAPI.TextField? {
+      edits[id]?.view ?? popupController?.nativeTextField(id)
+    }
+    public func hostedNativeView(_ id: NodeID) -> NativeAPI.View? {
+      hostedViews[id]?.nativeView ?? popupController?.hostedNativeView(id)
+    }
     internal func handleHostedKeyDown(id: NodeID, vk: Int, modifiers: EventModifiers) -> Bool {
       hostedViews[id]?.handleKeyDown?(vk, modifiers) ?? false
     }
