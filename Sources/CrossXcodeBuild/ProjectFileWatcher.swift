@@ -1,6 +1,6 @@
 import Foundation
 
-#if canImport(Darwin)
+#if !os(Windows) && canImport(Darwin)
   import Darwin
 #elseif canImport(Glibc)
   import Glibc
@@ -324,7 +324,7 @@ public final class ProjectFileWatcher: @unchecked Sendable {
   }
 
   private func readFileStamp(atPath path: String) -> FileStamp? {
-    #if canImport(Darwin)
+    #if !os(Windows) && canImport(Darwin)
       var st = stat()
       guard stat(path, &st) == 0 else { return nil }
       return FileStamp(

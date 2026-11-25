@@ -1,6 +1,6 @@
 import Foundation
 
-#if canImport(Darwin)
+#if !os(Windows) && canImport(Darwin)
   import Darwin
 #elseif canImport(Glibc)
   import Glibc

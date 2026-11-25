@@ -6,6 +6,9 @@
 @_exported import SwiftUIRuntime
 #if os(WASI)
   @_exported import SwiftUIWeb
+
+  public typealias URLSession = SwiftUIWeb.WebURLSession
+  public typealias URLResponse = SwiftUIWeb.WebURLResponse
 #elseif os(Android)
   @_exported import SwiftUIAndroid
 #elseif CROSS_SWIFTUI_HARMONY

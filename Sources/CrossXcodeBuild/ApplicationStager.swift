@@ -689,8 +689,13 @@ public final class ApplicationStager {
     }
 
     let home = fm.homeDirectoryForCurrentUser
+    #if os(Windows)
+      let npmCandidates = ["npm.cmd", "npm"]
+    #else
+      let npmCandidates = ["npm"]
+    #endif
     if let npmURL = ProcessRunner.findExecutable(
-      named: ["npm"],
+      named: npmCandidates,
       extraDirectories: [
         home.appendingPathComponent(".vite-plus/bin"),
         URL(fileURLWithPath: "/opt/homebrew/bin"),

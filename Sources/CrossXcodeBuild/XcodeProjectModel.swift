@@ -23,7 +23,9 @@ public enum TargetPlatform: String, CaseIterable, Codable, Hashable, Sendable {
       return Self.currentHost == .windows
     case .linux:
       return Self.currentHost == .linux
-    case .wasm, .harmonyos, .android:
+    case .wasm:
+      return true
+    case .harmonyos, .android:
       #if os(macOS) || os(Linux)
         return true
       #else

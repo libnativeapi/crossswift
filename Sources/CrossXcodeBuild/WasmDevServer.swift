@@ -1,6 +1,6 @@
 import Foundation
 
-#if canImport(Darwin)
+#if !os(Windows) && canImport(Darwin)
   import Darwin
 #elseif canImport(Glibc)
   import Glibc
@@ -256,7 +256,9 @@ public final class WasmDevServer: @unchecked Sendable {
       lastStatusEvent = event
       lock.unlock()
     }
-    sendSSEFrame("data: \(event.toJSON())\n\n")
+    #if !os(Windows)
+      sendSSEFrame("data: \(event.toJSON())\n\n")
+    #endif
   }
 
   /// Resolves the HTTP Content-Type header for a file path.

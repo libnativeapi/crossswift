@@ -168,7 +168,11 @@ private func _webFlattenScenes(_ scene: any Scene) -> [any Scene] {
   guard let host = document.getElementById!("swiftui-root").object else {
     fatalError("CrossSwiftUI requires a #swiftui-root element")
   }
-  document.title = .string(scene._windowTitle.isEmpty ? "CrossSwiftUI" : scene._windowTitle)
+  if !scene._windowTitle.isEmpty {
+    document.title = .string(scene._windowTitle)
+  } else if (document.title.string ?? "").isEmpty {
+    document.title = .string("CrossSwiftUI")
+  }
 
   let backend = WebBackend(document: document, host: host)
   backend.environment.openURL = OpenURLAction { url in

@@ -68,8 +68,19 @@ public enum ProcessRunner {
     postExitIdleTimeout: TimeInterval = 2.0
   ) throws -> ProcessResult {
     let process = Process()
-    process.executableURL = executable
-    process.arguments = arguments
+    #if os(Windows)
+      let ext = executable.pathExtension.lowercased()
+      if ext == "cmd" || ext == "bat" {
+        process.executableURL = URL(fileURLWithPath: environmentValue("ComSpec") ?? "C:\\Windows\\System32\\cmd.exe")
+        process.arguments = ["/c", executable.path] + arguments
+      } else {
+        process.executableURL = executable
+        process.arguments = arguments
+      }
+    #else
+      process.executableURL = executable
+      process.arguments = arguments
+    #endif
     if let workingDirectory {
       process.currentDirectoryURL = workingDirectory
     }

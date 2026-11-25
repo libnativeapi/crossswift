@@ -256,19 +256,32 @@ public final class SwiftPMBackend {
         "-c", configuration.swiftPMFlag,
       ]
       let logURL = buildRoot.appendingPathComponent("swift-wasm-build.log")
-      var wasmEnv: [String: String] = ["CROSS_SWIFTUI_WEB": "1"]
-      if let resolvedNativeAPI = try? Self.resolveNativeAPISwiftRoot(
-        explicit: options.nativeAPISwiftPath,
-        crossSwiftRoot: crossSwiftRoot
-      ) {
-        wasmEnv["NATIVEAPI_SWIFT_PATH"] = resolvedNativeAPI.path
-      }
+      let wasmEnv: [String: String] = {
+        var env: [String: String] = ["CROSS_SWIFTUI_WEB": "1"]
+        if let resolvedNativeAPI = try? Self.resolveNativeAPISwiftRoot(
+          explicit: options.nativeAPISwiftPath,
+          crossSwiftRoot: crossSwiftRoot
+        ) {
+          env["NATIVEAPI_SWIFT_PATH"] = resolvedNativeAPI.path
+        }
+        return env
+      }()
+      #if os(Windows)
+        try ensureWindowsPackageToJSPatched(
+          swiftTool: swiftTool,
+          prefixArgs: prefixArgs,
+          buildRoot: buildRoot,
+          scratchDir: scratchDir,
+          wasmEnv: wasmEnv,
+          quiet: options.quiet
+        )
+      #endif
       if !options.quiet {
         ProcessRunner.writeStdoutLine(
           "Running swift package js (\(wasmSDK), \(configuration.rawValue)) — log: \(logURL.path)"
         )
       }
-      let buildResult = try ProcessRunner.run(
+      var buildResult = try ProcessRunner.run(
         executable: swiftTool,
         arguments: jsArgs,
         workingDirectory: buildRoot,
@@ -276,6 +289,31 @@ public final class SwiftPMBackend {
         logFile: logURL,
         echoOutput: !options.quiet
       )
+      #if os(Windows)
+        if buildResult.exitCode != 0,
+           let linkedWasm = try tryWindowsWasmLinkFallback(
+             buildOutput: buildResult.stdout,
+             swiftTool: swiftTool,
+             wasmSDK: wasmSDK,
+             executableName: project.mainTarget.executableName,
+             configuration: configuration,
+             buildRoot: buildRoot,
+             scratchDir: scratchDir,
+             quiet: options.quiet
+           )
+        {
+          var packageEnv = wasmEnv
+          packageEnv["CROSS_SWIFTUI_PREBUILT_WASM"] = linkedWasm.path
+          buildResult = try ProcessRunner.run(
+            executable: swiftTool,
+            arguments: jsArgs,
+            workingDirectory: buildRoot,
+            environmentOverrides: packageEnv,
+            logFile: logURL,
+            echoOutput: !options.quiet
+          )
+        }
+      #endif
       if buildResult.exitCode != 0 {
         throw ProcessRunnerError.commandFailed(
           command: "\(swiftTool.path) \(jsArgs.joined(separator: " "))",
@@ -478,16 +516,22 @@ public final class SwiftPMBackend {
       return scratch.appendingPathComponent("\(slug)-\(hash)").standardizedFileURL
     }
 
-    if platform == .windows {
+    #if os(Windows)
       // Keep build and scratch paths short on Windows to avoid MAX_PATH (260 chars).
       return FileManager.default.temporaryDirectory
         .appendingPathComponent("csb/\(slug)-\(hash)")
         .standardizedFileURL
-    }
+    #else
+      if platform == .windows {
+        return FileManager.default.temporaryDirectory
+          .appendingPathComponent("csb/\(slug)-\(hash)")
+          .standardizedFileURL
+      }
 
-    return derivedDataURL
-      .appendingPathComponent("Build/Intermediates.noindex/\(slug)-\(hash)")
-      .standardizedFileURL
+      return derivedDataURL
+        .appendingPathComponent("Build/Intermediates.noindex/\(slug)-\(hash)")
+        .standardizedFileURL
+    #endif
   }
 
   private func ensureWindowsNativeAPICoreJunction(nativeAPISwiftRoot: URL) throws {
@@ -524,6 +568,222 @@ public final class SwiftPMBackend {
       )
     }
   }
+
+  #if os(Windows)
+    /// JavaScriptKit's PackageToJS plugin references POSIX `stderr` without a Windows import.
+    /// Resolve checkouts first if needed and patch `printStderr` so `swift package js` builds on Windows.
+    private func ensureWindowsPackageToJSPatched(
+      swiftTool: URL,
+      prefixArgs: [String],
+      buildRoot: URL,
+      scratchDir: URL,
+      wasmEnv: [String: String],
+      quiet: Bool
+    ) throws {
+      let fm = FileManager.default
+      let pluginFile = scratchDir
+        .appendingPathComponent("checkouts/JavaScriptKit/Plugins/PackageToJS/Sources/PackageToJSPlugin.swift")
+      if !fm.fileExists(atPath: pluginFile.path) {
+        let resolveArgs = prefixArgs + [
+          "package",
+          "--package-path", buildRoot.path,
+          "--scratch-path", scratchDir.path,
+          "resolve",
+        ]
+        _ = try? ProcessRunner.run(
+          executable: swiftTool,
+          arguments: resolveArgs,
+          workingDirectory: buildRoot,
+          environmentOverrides: wasmEnv,
+          echoOutput: !quiet
+        )
+      }
+      guard fm.fileExists(atPath: pluginFile.path),
+            var text = try? String(contentsOf: pluginFile, encoding: .utf8)
+      else {
+        return
+      }
+      var changed = false
+      if text.contains("fputs(message + \"\\n\", stderr)") {
+        if !text.contains("import class Foundation.FileHandle") {
+          text = text.replacingOccurrences(
+            of: "@preconcurrency import func Foundation.fputs",
+            with: "@preconcurrency import func Foundation.fputs\n@preconcurrency import class Foundation.FileHandle"
+          )
+        }
+        text = text.replacingOccurrences(
+          of: "fputs(message + \"\\n\", stderr)",
+          with: "try? FileHandle.standardError.write(contentsOf: Data((message + \"\\n\").utf8))"
+        )
+        changed = true
+      }
+      let prebuiltMarker = "CROSS_SWIFTUI_PREBUILT_WASM"
+      if !text.contains(prebuiltMarker),
+         let startRange = text.range(of: "let build = try buildWasm("),
+         let endRange = text.range(
+           of: "let productArtifact = try build.findWasmArtifact(for: productName)",
+           range: startRange.lowerBound..<text.endIndex
+         )
+      {
+        let replacement = """
+        let productArtifact: URL
+                if let prebuiltPath = ProcessInfo.processInfo.environment["\(prebuiltMarker)"],
+                   !prebuiltPath.isEmpty,
+                   FileManager.default.fileExists(atPath: prebuiltPath)
+                {
+                    productArtifact = URL(fileURLWithPath: prebuiltPath)
+                } else {
+                    let build = try buildWasm(
+                        productName: productName,
+                        selfPackage: selfPackage,
+                        context: context,
+                        options: buildOptions.packageOptions
+                    )
+                    guard build.succeeded else {
+                        reportBuildFailure(build, arguments)
+                        exit(1)
+                    }
+                    productArtifact = try build.findWasmArtifact(for: productName)
+                }
+                let skeletonCollector = SkeletonCollector(context: context)
+                let skeletons = skeletonCollector.collectFromProduct(name: productName)
+        """
+        text.replaceSubrange(startRange.lowerBound..<endRange.upperBound, with: replacement)
+        changed = true
+      }
+      guard changed else { return }
+      let cmdExe = URL(fileURLWithPath: ProcessRunner.environmentValue("ComSpec") ?? "C:\\Windows\\System32\\cmd.exe")
+      let winPath = pluginFile.path.replacingOccurrences(of: "/", with: "\\")
+      _ = try? ProcessRunner.run(executable: cmdExe, arguments: ["/c", "attrib", "-R", winPath])
+      try text.write(to: pluginFile, atomically: true, encoding: .utf8)
+    }
+
+    /// Works around Swift 6.4.2's Windows swift-driver bug where large wasm32 link commands
+    /// (>32 KiB) spill to a temporary response file with unescaped backslashes that clang
+    /// parses with POSIX quoting rules. Links the already-compiled `.o` files directly via
+    /// `clang.exe --rsp-quoting=windows` so PackageToJS can complete packaging.
+    private func tryWindowsWasmLinkFallback(
+      buildOutput: String,
+      swiftTool: URL,
+      wasmSDK: String,
+      executableName: String,
+      configuration: BuildConfiguration,
+      buildRoot: URL,
+      scratchDir: URL,
+      quiet: Bool
+    ) throws -> URL? {
+      guard buildOutput.contains("clang: error: no such file or directory:") else {
+        return nil
+      }
+      let fm = FileManager.default
+      let clangExe = swiftTool.deletingLastPathComponent().appendingPathComponent("clang.exe")
+      guard fm.fileExists(atPath: clangExe.path) else { return nil }
+
+      let configDir = configuration == .release ? "Release" : "Debug"
+      let productsDir = scratchDir.appendingPathComponent("out/Products/\(configDir)-webassembly-wasm32")
+      let intermediatesDir = scratchDir.appendingPathComponent("out/Intermediates.noindex")
+      guard fm.fileExists(atPath: productsDir.path) else { return nil }
+
+      // Locate LinkFileList and autolink generated by swiftbuild.
+      var linkFileListURL: URL?
+      var autolinkURL: URL?
+      if let enumerator = fm.enumerator(at: intermediatesDir, includingPropertiesForKeys: nil) {
+        for case let url as URL in enumerator {
+          let name = url.lastPathComponent
+          if name == "\(executableName).LinkFileList" && url.path.contains("\(configDir)-webassembly-wasm32") {
+            linkFileListURL = url
+          } else if name == "\(executableName).autolink" && url.path.contains("\(configDir)-webassembly-wasm32") {
+            autolinkURL = url
+          }
+        }
+      }
+      guard let linkFileList = linkFileListURL,
+            let autolink = autolinkURL
+      else {
+        return nil
+      }
+
+      // Locate the installed WASI SDK root.
+      let home = fm.homeDirectoryForCurrentUser
+      let sdkCandidates = [
+        home.appendingPathComponent(".swiftpm/swift-sdks/\(wasmSDK).artifactbundle/\(wasmSDK)/wasm32-unknown-wasip1"),
+        home.appendingPathComponent(".swiftpm/swift-sdks/\(wasmSDK)/wasm32-unknown-wasip1"),
+      ]
+      guard let sdkRoot = sdkCandidates.first(where: {
+        fm.fileExists(atPath: $0.appendingPathComponent("WASI.sdk").path)
+      }) else {
+        return nil
+      }
+
+      func posix(_ url: URL) -> String {
+        url.standardizedFileURL.path.replacingOccurrences(of: "\\", with: "/")
+      }
+
+      var objects: [String] = []
+      if let listText = try? String(contentsOf: linkFileList, encoding: .utf8) {
+        for line in listText.components(separatedBy: .newlines) {
+          let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+          if !trimmed.isEmpty { objects.append(trimmed.replacingOccurrences(of: "\\", with: "/")) }
+        }
+      }
+      let productEntries = (try? fm.contentsOfDirectory(at: productsDir, includingPropertiesForKeys: nil)) ?? []
+      for entry in productEntries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+        where entry.lastPathComponent.hasSuffix(".objlib")
+      {
+        let resp = entry.appendingPathComponent("args.resp")
+        guard let text = try? String(contentsOf: resp, encoding: .utf8) else { continue }
+        for token in text.split(whereSeparator: \.isWhitespace) {
+          objects.append(String(token).replacingOccurrences(of: "\\", with: "/"))
+        }
+      }
+      guard !objects.isEmpty else { return nil }
+
+      let outputWasm = productsDir.appendingPathComponent("\(executableName).wasm")
+      let swiftStatic = sdkRoot.appendingPathComponent("swift.xctoolchain/usr/lib/swift_static")
+      var rspArgs: [String] = [
+        "-target", "wasm32-unknown-wasip1",
+        posix(swiftStatic.appendingPathComponent("wasi/wasm32/swiftrt.o")),
+      ]
+      rspArgs.append(contentsOf: objects)
+      rspArgs += [
+        "@\(posix(autolink))",
+        "--sysroot", posix(sdkRoot.appendingPathComponent("WASI.sdk")),
+        "-L", posix(swiftStatic.appendingPathComponent("wasi")),
+        "@\(posix(swiftStatic.appendingPathComponent("wasi/static-executable-args.lnk")))",
+        "--target=wasm32-unknown-wasip1",
+        "-resource-dir", posix(swiftStatic.appendingPathComponent("clang")),
+        "-mexec-model=reactor",
+        "-Xlinker", "--global-base=4096",
+        "-Xlinker", "--table-base=4096",
+        "-Xlinker", "-z", "-Xlinker", "stack-size=16777216",
+        "-Xlinker", "--gc-sections",
+        "-Xlinker", "--export-if-defined=__main_argc_argv",
+      ]
+      if configuration == .release {
+        rspArgs += ["-Xlinker", "--strip-all"]
+      }
+      rspArgs += ["-o", posix(outputWasm)]
+
+      let rspFile = buildRoot.appendingPathComponent("link-wasm.rsp")
+      try rspArgs.joined(separator: "\n").write(to: rspFile, atomically: true, encoding: .utf8)
+
+      if !quiet {
+        ProcessRunner.writeStdoutLine(
+          "Linking \(executableName).wasm via clang --rsp-quoting=windows fallback..."
+        )
+      }
+      let linkResult = try ProcessRunner.run(
+        executable: clangExe,
+        arguments: ["--rsp-quoting=windows", "@\(posix(rspFile))"],
+        workingDirectory: buildRoot,
+        echoOutput: !quiet
+      )
+      guard linkResult.exitCode == 0, fm.fileExists(atPath: outputWasm.path) else {
+        return nil
+      }
+      return outputWasm
+    }
+  #endif
 
   private func compileWindowsResources(rcURL: URL, echoOutput: Bool = false) throws -> URL {
     let rcDir = rcURL.deletingLastPathComponent()
@@ -954,9 +1214,14 @@ public final class SwiftPMBackend {
     var adaptedLocal: [String: URL] = [:]
     let cacheRoot = buildRoot.deletingLastPathComponent().appendingPathComponent("AdaptedPackageCache")
     let stagingRoot = buildRoot.appendingPathComponent("AdaptedPackages")
-    let allowedModules: Set<String> = (platform == .wasm || platform == .android || platform == .harmonyos)
-      ? ["SwiftUI", "SwiftUIRuntime"]
-      : PackageDependencyAdapter.crossSwiftProvidedModules
+    let allowedModules: Set<String>
+    if platform == .wasm {
+      allowedModules = ["SwiftUI", "SwiftUIRuntime", "OSLog", "os", "CoreText", "AppKit"]
+    } else if platform == .android || platform == .harmonyos {
+      allowedModules = ["SwiftUI", "SwiftUIRuntime"]
+    } else {
+      allowedModules = PackageDependencyAdapter.crossSwiftProvidedModules
+    }
 
     let consumerRefs = (project.remotePackages.isEmpty && project.localPackages.isEmpty)
       ? nil
@@ -1129,8 +1394,10 @@ public final class SwiftPMBackend {
         }
       }
 
+      let wasmAllowedModules: Set<String> = ["SwiftUI", "SwiftUIRuntime", "OSLog", "os", "CoreText", "AppKit"]
       for mod in project.inferredCrossSwiftModules {
-        if (platform == .wasm || platform == .android) && mod != "SwiftUI" && mod != "SwiftUIRuntime" { continue }
+        if platform == .wasm && !wasmAllowedModules.contains(mod) { continue }
+        if platform == .android && mod != "SwiftUI" && mod != "SwiftUIRuntime" { continue }
         if mod == "SQLite3" && platform != .windows && platform != .linux { continue }
         if target.importedModules.contains(mod)
           || (isMain && mod == "SwiftUI" && project.inferredCrossSwiftModules.contains("SwiftUI"))

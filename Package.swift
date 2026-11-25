@@ -213,17 +213,28 @@ if buildForHarmony {
 }
 if buildForWeb {
   targets += [
+    .target(name: "OSLog"),
+    .target(name: "os", dependencies: ["OSLog"]),
+    .target(name: "AppKit", path: "Sources/WebShims/AppKit"),
+    .target(name: "CoreText", dependencies: ["AppKit"], path: "Sources/WebShims/CoreText"),
     .target(
       name: "SwiftUIWeb",
       dependencies: [
         "SwiftUIRuntime",
+        "AppKit",
         .product(name: "JavaScriptKit", package: "JavaScriptKit"),
         .product(name: "JavaScriptEventLoop", package: "JavaScriptKit"),
       ]
     ),
     .target(name: "SwiftUI", dependencies: ["SwiftUIRuntime", "SwiftUIWeb"]),
   ]
-  products.append(.library(name: "SwiftUI", targets: ["SwiftUI"]))
+  products += [
+    .library(name: "OSLog", targets: ["OSLog"]),
+    .library(name: "os", targets: ["os"]),
+    .library(name: "AppKit", targets: ["AppKit"]),
+    .library(name: "CoreText", targets: ["CoreText"]),
+    .library(name: "SwiftUI", targets: ["SwiftUI"]),
+  ]
   counterDependencies = ["SwiftUI"]
 }
 
