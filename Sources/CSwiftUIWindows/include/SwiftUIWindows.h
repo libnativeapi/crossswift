@@ -26,6 +26,7 @@ void sui_edit_set_transparent(void *surface, void *edit, int transparent,
 void sui_surface_set_background(void *surface, uint32_t argb);
 void sui_surface_set_window_shadow(void *surface, int enabled, int is_dark);
 void sui_surface_flush_paint(void *surface);
+void sui_surface_show_on_top(void *surface, int defer_paint);
 void sui_surface_begin_pending_resize(void *surface, double logical_width,
                                       double logical_height);
 void sui_surface_prerender_pending_resize(void *surface);

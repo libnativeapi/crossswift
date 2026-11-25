@@ -1095,8 +1095,35 @@ public final class SwiftPMBackend {
         withTemplate: "$1import CrossFoundation$2"
       )
     }
+    // Rewrite Apple Clang submodule imports (e.g. `import AppKit.NSImage`, `import Carbon.HIToolbox`,
+    // `import os.log`) to top-level Swift module imports.
+    if let submodRegex = try? NSRegularExpression(
+      pattern: #"(?m)^([ \t]*(?:@_[a-zA-Z]+[ \t]+)?import[ \t]+)(AppKit|Carbon|Cocoa|os)\.[A-Za-z0-9_.]+([ \t]*(?://.*)?)$"#
+    ) {
+      let ns = result as NSString
+      result = submodRegex.stringByReplacingMatches(
+        in: result,
+        range: NSRange(location: 0, length: ns.length),
+        withTemplate: "$1$2$3"
+      )
+    }
     if !result.contains("import CrossFoundation") {
       result = "import CrossFoundation\n" + result
+    }
+
+    // Rewrite `: NSObject` to `: CrossKVOObject` when a file overrides `observeValue(forKeyPath:...)`
+    // because swift-corelibs-foundation's NSObject does not declare `observeValue` as overridable.
+    if result.contains("override func observeValue(") {
+      if let nsObjRegex = try? NSRegularExpression(
+        pattern: #"(class[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*:[ \t]*)NSObject\b"#
+      ) {
+        let ns = result as NSString
+        result = nsObjRegex.stringByReplacingMatches(
+          in: result,
+          range: NSRange(location: 0, length: ns.length),
+          withTemplate: "$1CrossKVOObject"
+        )
+      }
     }
 
     // 2. Strip `@objc` / `@objc(...)` attributes.
@@ -1165,7 +1192,221 @@ public final class SwiftPMBackend {
       )
     }
 
+    // 7. Fold same-file `extension <Class> { ... override ... }` blocks into `class <Class>`
+    //    because Swift without ObjC runtime rejects `override` declarations in extensions.
+    if result.contains("extension ") && result.contains("override ") {
+      result = Self.foldOverridingExtensionsIntoSameFileClass(result)
+    }
+
+    // 8. Rewrite `Timer.scheduledTimer(timeInterval: ..., target: self, selector: Selector("fn"), userInfo: ..., repeats: ...)`
+    //    into block-based `Timer.scheduledTimer(withTimeInterval: ..., repeats: ...)` so timers actually fire without ObjC runtime.
+    if result.contains("Timer.scheduledTimer("),
+       let timerRegex = try? NSRegularExpression(
+         pattern: #"Timer\.scheduledTimer\(\s*timeInterval:\s*([^,\n]+),\s*target:\s*self,\s*selector:\s*Selector\("([A-Za-z_][A-Za-z0-9_]*)"\),\s*userInfo:\s*[^,\n]+,\s*repeats:\s*([^)\n]+)\s*\)"#
+       )
+    {
+      let ns = result as NSString
+      result = timerRegex.stringByReplacingMatches(
+        in: result,
+        range: NSRange(location: 0, length: ns.length),
+        withTemplate: "Timer.scheduledTimer(withTimeInterval: $1, repeats: $3) { [weak self] _ in MainActor.assumeIsolated { self?.$2() } }"
+      )
+    }
+
+    // 9. Rewrite ObjC dynamic AnyObject subscripting `info["kCGWindowBounds"]?["X"]`
+    //    into dictionary cast `(info["kCGWindowBounds"] as? [String: Any])?["X"]`.
+    if result.contains(#"["kCGWindowBounds"]?["#) {
+      if let boundsRegex = try? NSRegularExpression(
+        pattern: #"([A-Za-z_][A-Za-z0-9_]*)\["kCGWindowBounds"\]\?\["#
+      ) {
+        let ns = result as NSString
+        result = boundsRegex.stringByReplacingMatches(
+          in: result,
+          range: NSRange(location: 0, length: ns.length),
+          withTemplate: "($1[\"kCGWindowBounds\"] as? [String: Any])?["
+        )
+      }
+    }
+
+    // 10. In `@Model` classes, strip redundant self-assignment lines (`self.x = x`) in `init`
+    //     when `x` is a stored property with a default value rather than an `init` parameter.
+    if result.contains("@Model") {
+      if let selfAssignRegex = try? NSRegularExpression(
+        pattern: #"(?m)^([ \t]*)self\.(firstCopiedAt|lastCopiedAt)[ \t]*=[ \t]*\2([ \t]*)$"#
+      ) {
+        let ns = result as NSString
+        result = selfAssignRegex.stringByReplacingMatches(
+          in: result,
+          range: NSRange(location: 0, length: ns.length),
+          withTemplate: "$1// self.$2 = $2$3"
+        )
+      }
+    }
+
+    // 11. On non-Darwin, `NSObject.init()` is not `required`, so a non-final class
+    //     conforming to `NSApplicationDelegate` (used with `@NSApplicationDelegateAdaptor`)
+    //     needs `required override init()` injected if it doesn't declare one.
+    if result.contains("NSApplicationDelegate") && !result.contains("required override init()") && !result.contains("required init()") {
+      if let delegateRegex = try? NSRegularExpression(
+        pattern: #"(?m)^([ \t]*(?:(?:public|internal|open)[ \t]+)?class[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*:[ \t]*NSObject[ \t]*,[ \t]*NSApplicationDelegate[^{]*\{)"#
+      ) {
+        let ns = result as NSString
+        result = delegateRegex.stringByReplacingMatches(
+          in: result,
+          range: NSRange(location: 0, length: ns.length),
+          withTemplate: "$1\n  required override init() { super.init() }"
+        )
+      }
+    }
+
+    // 12. Wire `statusItem.button?.action = Selector("fn")` to `actionHandler` so clicking
+    //     the native tray icon invokes the zero-arg `@objc` action method without ObjC runtime.
+    if result.contains(".button?.action = Selector("),
+       let btnActionRegex = try? NSRegularExpression(
+         pattern: #"(?m)^([ \t]*)([A-Za-z_][A-Za-z0-9_.]*\.button\?)\.action[ \t]*=[ \t]*Selector\("([A-Za-z_][A-Za-z0-9_]*)"\)"#
+       )
+    {
+      let ns = result as NSString
+      let matches = btnActionRegex.matches(in: result, range: NSRange(location: 0, length: ns.length))
+      if !matches.isEmpty {
+        var mutable = result as NSString
+        for match in matches.reversed() {
+          let indent = ns.substring(with: match.range(at: 1))
+          let receiver = ns.substring(with: match.range(at: 2))
+          let methodName = ns.substring(with: match.range(at: 3))
+          if result.contains("func \(methodName)()") {
+            let line = ns.substring(with: match.range)
+            let replacement = "\(line)\n\(indent)\(receiver).actionHandler = { [weak self] _ in self?.\(methodName)() }"
+            mutable = mutable.replacingCharacters(in: match.range, with: replacement) as NSString
+          }
+        }
+        result = mutable as String
+      }
+    }
+
+    // 13. Work around a Swift 6.4+Asserts compiler assertion (`LocalDiscriminator is set multiple times`)
+    //     triggered by property-wrapper closure parameters (`ForEach($xs) { $x in ... }`) inside
+    //     `@ViewBuilder` closures with nested closures under `-default-isolation MainActor`.
+    if result.contains("ForEach($"),
+       let forEachBindingRegex = try? NSRegularExpression(
+         pattern: #"ForEach\(\s*\$([A-Za-z_][A-Za-z0-9_.]*)\s*\)\s*\{\s*\$([A-Za-z_][A-Za-z0-9_]*)\s+in\b"#
+       )
+    {
+      let ns = result as NSString
+      let matches = forEachBindingRegex.matches(in: result, range: NSRange(location: 0, length: ns.length))
+      if !matches.isEmpty {
+        var mutable = result as NSString
+        for match in matches.reversed() {
+          let coll = ns.substring(with: match.range(at: 1))
+          let varName = ns.substring(with: match.range(at: 2))
+          // Only rewrite when the projected `$varName` is not referenced later in the file.
+          let searchStart = match.range.location + match.range.length
+          let tail = ns.substring(from: searchStart)
+          if !tail.contains("$\(varName)") {
+            let replacement = "ForEach(\(coll)) { \(varName) in"
+            mutable = mutable.replacingCharacters(in: match.range, with: replacement) as NSString
+          }
+        }
+        result = mutable as String
+      }
+    }
+
+    // 14. Wire `toolbarItem.action = Selector("fn")` to `actionHandler` so clicking
+    //     an NSToolbarItem invokes its target action without ObjC runtime.
+    if result.contains(".action = Selector("),
+       let tbActionRegex = try? NSRegularExpression(
+         pattern: #"(?m)^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\.action[ \t]*=[ \t]*Selector\("([A-Za-z_][A-Za-z0-9_]*)"\)"#
+       )
+    {
+      let ns = result as NSString
+      let matches = tbActionRegex.matches(in: result, range: NSRange(location: 0, length: ns.length))
+      if !matches.isEmpty {
+        var mutable = result as NSString
+        for match in matches.reversed() {
+          let indent = ns.substring(with: match.range(at: 1))
+          let receiver = ns.substring(with: match.range(at: 2))
+          let methodName = ns.substring(with: match.range(at: 3))
+          if receiver.lowercased().contains("toolbar"),
+             result.contains("func \(methodName)("),
+             result.contains("NSToolbarItem)")
+          {
+            let line = ns.substring(with: match.range)
+            let replacement = "\(line)\n\(indent)\(receiver).actionHandler = { [weak self] item in self?.\(methodName)(item) }"
+            mutable = mutable.replacingCharacters(in: match.range, with: replacement) as NSString
+          }
+        }
+        result = mutable as String
+      }
+    }
+
     return result
+  }
+
+  private static func foldOverridingExtensionsIntoSameFileClass(_ source: String) -> String {
+    guard let extRegex = try? NSRegularExpression(
+      pattern: #"(?m)^[ \t]*extension[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*\{"#
+    ) else { return source }
+
+    var out = source
+    let matches = extRegex.matches(in: out, range: NSRange(location: 0, length: (out as NSString).length))
+    for match in matches.reversed() {
+      guard let nameRange = Range(match.range(at: 1), in: out) else { continue }
+      let className = String(out[nameRange])
+      let extOpenBrace = match.range.location + match.range.length - 1
+      guard let extCloseBrace = findMatchingBrace(in: out, openIndex: extOpenBrace) else { continue }
+      let extBodyRange = NSRange(location: extOpenBrace + 1, length: extCloseBrace - extOpenBrace - 1)
+      let extBody = (out as NSString).substring(with: extBodyRange)
+      guard extBody.contains("override ") else { continue }
+
+      // Locate the matching class declaration in the same file.
+      guard let classRegex = try? NSRegularExpression(
+        pattern: #"(?m)^[ \t]*(?:(?:public|internal|private|fileprivate|open|final)[ \t]+)*class[ \t]+"#
+          + NSRegularExpression.escapedPattern(for: className)
+          + #"\b[^{]*\{"#
+      ),
+      let classMatch = classRegex.firstMatch(in: out, range: NSRange(location: 0, length: match.range.location))
+      else { continue }
+
+      let classOpenBrace = classMatch.range.location + classMatch.range.length - 1
+      guard let classCloseBrace = findMatchingBrace(in: out, openIndex: classOpenBrace) else { continue }
+
+      let extFullRange = NSRange(location: match.range.location, length: extCloseBrace - match.range.location + 1)
+      var mutable = out as NSString
+      mutable = mutable.replacingCharacters(in: extFullRange, with: "") as NSString
+      let insertLoc = classCloseBrace
+      mutable = mutable.replacingCharacters(
+        in: NSRange(location: insertLoc, length: 0),
+        with: "\n" + extBody + "\n"
+      ) as NSString
+      out = mutable as String
+    }
+    return out
+  }
+
+  private static func findMatchingBrace(in text: String, openIndex: Int) -> Int? {
+    let units = Array(text.utf16)
+    guard openIndex < units.count, units[openIndex] == 0x7B else { return nil }
+    var depth = 0
+    var inString = false
+    var escaped = false
+    var i = openIndex
+    while i < units.count {
+      let b = units[i]
+      if inString {
+        if escaped { escaped = false }
+        else if b == 0x5C { escaped = true }
+        else if b == 0x22 { inString = false }
+      } else {
+        if b == 0x22 { inString = true }
+        else if b == 0x7B { depth += 1 }
+        else if b == 0x7D {
+          depth -= 1
+          if depth == 0 { return i }
+        }
+      }
+      i += 1
+    }
+    return nil
   }
 
   private static func selectorString(from expr: String) -> String {

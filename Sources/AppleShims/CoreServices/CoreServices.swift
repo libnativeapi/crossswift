@@ -1,5 +1,6 @@
 import Foundation
 @_exported import CoreFoundation
+@_exported import Carbon
 
 #if !os(macOS)
   public typealias DCSDictionary = AnyObject

@@ -9,6 +9,7 @@ public final class XCStringsCatalog: @unchecked Sendable {
   private let lock = NSLock()
   private var sourceLanguage: String = "en"
   private var entries: [String: Entry] = [:]
+  private var tables: [String: [String: Entry]] = [:]
   private var availableLanguages: [String] = []
   private var languageOverride: String?
   private var latchedLaunchLanguage: String?
@@ -35,6 +36,17 @@ public final class XCStringsCatalog: @unchecked Sendable {
 
   public init() {}
 
+  private static let cacheLock = NSLock()
+  nonisolated(unsafe) private static var cachedDefaultPrefs: [ObjectIdentifier: [String]] = [:]
+  nonisolated(unsafe) private static var cachedCandidates: [String: [String]] = [:]
+
+  private func invalidateLookupCaches() {
+    Self.cacheLock.lock()
+    Self.cachedDefaultPrefs.removeValue(forKey: ObjectIdentifier(self))
+    Self.cachedCandidates.removeAll()
+    Self.cacheLock.unlock()
+  }
+
   public var preferredLanguage: String? {
     get {
       lock.lock()
@@ -45,6 +57,7 @@ public final class XCStringsCatalog: @unchecked Sendable {
       lock.lock()
       languageOverride = newValue
       lock.unlock()
+      invalidateLookupCaches()
     }
   }
 
@@ -58,6 +71,7 @@ public final class XCStringsCatalog: @unchecked Sendable {
       lock.lock()
       systemLanguagesHook = newValue
       lock.unlock()
+      invalidateLookupCaches()
     }
   }
 
@@ -138,19 +152,174 @@ public final class XCStringsCatalog: @unchecked Sendable {
       if fm.fileExists(atPath: mainCat.path), let data = try? Data(contentsOf: mainCat) {
         loadedAny = load(data: data, merge: true) || loadedAny
       }
+      let resDir = root.appendingPathComponent("Resources")
+      if loadLprojStrings(in: resDir) {
+        loadedAny = true
+      }
       if loadedAny {
         break
       }
     }
   }
 
+  @discardableResult
+  private func loadLprojStrings(in resourcesDir: URL) -> Bool {
+    let fm = FileManager.default
+    guard let items = try? fm.contentsOfDirectory(atPath: resourcesDir.path) else {
+      return false
+    }
+    var loadedAny = false
+    var mergedEntries: [String: Entry] = [:]
+    var mergedTables: [String: [String: Entry]] = [:]
+    var langSet = Set<String>()
+
+    for item in items where item.hasSuffix(".lproj") {
+      let lang = String(item.dropLast(".lproj".count))
+      guard !lang.isEmpty else { continue }
+      let lprojDir = resourcesDir.appendingPathComponent(item)
+      guard let files = try? fm.contentsOfDirectory(atPath: lprojDir.path) else { continue }
+      for file in files where file.hasSuffix(".strings") {
+        let tableName = String(file.dropLast(".strings".count))
+        let fileURL = lprojDir.appendingPathComponent(file)
+        guard let data = try? Data(contentsOf: fileURL),
+              let content = Self.decodeStringsData(data)
+        else { continue }
+        let pairs = Self.parseStringsFile(content)
+        guard !pairs.isEmpty else { continue }
+        loadedAny = true
+        langSet.insert(lang)
+        let isDefaultTable = (tableName == "Localizable" || tableName == "InfoPlist")
+        for (k, v) in pairs {
+          var tableEntry = mergedTables[tableName]?[k] ?? Entry()
+          tableEntry.localizations[lang] = LocalizationUnit(value: v)
+          mergedTables[tableName, default: [:]][k] = tableEntry
+          if isDefaultTable {
+            var mainEntry = mergedEntries[k] ?? Entry()
+            mainEntry.localizations[lang] = LocalizationUnit(value: v)
+            mergedEntries[k] = mainEntry
+          }
+        }
+      }
+    }
+
+    guard loadedAny else { return false }
+    lock.lock()
+    for (k, entry) in mergedEntries {
+      var existing = self.entries[k] ?? Entry()
+      for (lang, unit) in entry.localizations {
+        existing.localizations[lang] = unit
+      }
+      self.entries[k] = existing
+    }
+    for (tableName, tbl) in mergedTables {
+      for (k, entry) in tbl {
+        var existing = self.tables[tableName]?[k] ?? Entry()
+        for (lang, unit) in entry.localizations {
+          existing.localizations[lang] = unit
+        }
+        self.tables[tableName, default: [:]][k] = existing
+      }
+    }
+    let src = self.sourceLanguage
+    let combined = Set(self.availableLanguages).union(langSet)
+    self.availableLanguages = [src] + combined.filter { $0 != src }.sorted()
+    lock.unlock()
+    return true
+  }
+
+  private static func decodeStringsData(_ data: Data) -> String? {
+    if data.count >= 2 {
+      if data[0] == 0xFF && data[1] == 0xFE {
+        return String(data: data, encoding: .utf16LittleEndian)
+      }
+      if data[0] == 0xFE && data[1] == 0xFF {
+        return String(data: data, encoding: .utf16BigEndian)
+      }
+    }
+    return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16)
+  }
+
+  private static func parseStringsFile(_ text: String) -> [(String, String)] {
+    var result: [(String, String)] = []
+    let chars = Array(text.unicodeScalars)
+    let n = chars.count
+    var i = 0
+
+    func skipWhitespaceAndComments() {
+      while i < n {
+        let c = chars[i]
+        if c == " " || c == "\t" || c == "\r" || c == "\n" || c == "\u{FEFF}" {
+          i += 1
+        } else if c == "/" && i + 1 < n && chars[i + 1] == "/" {
+          i += 2
+          while i < n && chars[i] != "\n" { i += 1 }
+        } else if c == "/" && i + 1 < n && chars[i + 1] == "*" {
+          i += 2
+          while i + 1 < n && !(chars[i] == "*" && chars[i + 1] == "/") { i += 1 }
+          i = min(n, i + 2)
+        } else {
+          break
+        }
+      }
+    }
+
+    func parseQuotedString() -> String? {
+      guard i < n && chars[i] == "\"" else { return nil }
+      i += 1
+      var out = ""
+      while i < n {
+        let c = chars[i]
+        if c == "\\" && i + 1 < n {
+          i += 1
+          let esc = chars[i]
+          switch esc {
+          case "n": out.append("\n")
+          case "r": out.append("\r")
+          case "t": out.append("\t")
+          case "\"": out.append("\"")
+          case "\\": out.append("\\")
+          default: out.unicodeScalars.append(esc)
+          }
+          i += 1
+        } else if c == "\"" {
+          i += 1
+          return out
+        } else {
+          out.unicodeScalars.append(c)
+          i += 1
+        }
+      }
+      return nil
+    }
+
+    while i < n {
+      skipWhitespaceAndComments()
+      guard i < n else { break }
+      guard let key = parseQuotedString() else {
+        i += 1
+        continue
+      }
+      skipWhitespaceAndComments()
+      guard i < n && chars[i] == "=" else { continue }
+      i += 1
+      skipWhitespaceAndComments()
+      guard let val = parseQuotedString() else { continue }
+      skipWhitespaceAndComments()
+      if i < n && chars[i] == ";" { i += 1 }
+      result.append((key, val))
+    }
+    return result
+  }
+
   public func reset() {
     lock.lock()
     sourceLanguage = "en"
     entries.removeAll()
+    tables.removeAll()
     availableLanguages.removeAll()
     didAttemptAutoBootstrap = true
     lock.unlock()
+    invalidateLookupCaches()
   }
 
   @discardableResult
@@ -230,11 +399,18 @@ public final class XCStringsCatalog: @unchecked Sendable {
 
   public func resolve(
     key: String,
+    tableName: String? = nil,
     defaultValue: String? = nil,
     arguments: [LocalizationArg] = [],
     locale: Locale? = nil
   ) -> String {
-    let template = lookupTemplate(key: key, defaultValue: defaultValue, arguments: arguments, locale: locale)
+    let template = lookupTemplate(
+      key: key,
+      tableName: tableName,
+      defaultValue: defaultValue,
+      arguments: arguments,
+      locale: locale
+    )
     guard !arguments.isEmpty else { return template }
     return Self.formatTemplate(template, arguments: arguments)
   }
@@ -341,6 +517,7 @@ public final class XCStringsCatalog: @unchecked Sendable {
 
   private func lookupTemplate(
     key: String,
+    tableName: String? = nil,
     defaultValue: String?,
     arguments: [LocalizationArg],
     locale: Locale?
@@ -349,7 +526,12 @@ public final class XCStringsCatalog: @unchecked Sendable {
     lock.lock()
     let override = languageOverride
     let latched = latchedLaunchLanguage
-    let entry = entries[key]
+    let entry: Entry?
+    if let tableName, !tableName.isEmpty {
+      entry = tables[tableName]?[key] ?? entries[key]
+    } else {
+      entry = entries[key]
+    }
     let src = sourceLanguage
     let hook = systemLanguagesHook
     lock.unlock()
@@ -365,17 +547,42 @@ public final class XCStringsCatalog: @unchecked Sendable {
     } else if let latched, !latched.isEmpty {
       preferences = [latched]
     } else {
-      preferences = Self.effectiveUserPreferences(systemHook: hook)
-    }
-
-    var candidates: [String] = []
-    for pref in preferences {
-      for c in Self.languageCandidates(for: pref, sourceLanguage: src) where !candidates.contains(c) {
-        candidates.append(c)
+      let selfID = ObjectIdentifier(self)
+      Self.cacheLock.lock()
+      let cached = Self.cachedDefaultPrefs[selfID]
+      Self.cacheLock.unlock()
+      if let cached {
+        preferences = cached
+      } else {
+        let resolved = Self.effectiveUserPreferences(systemHook: hook)
+        Self.cacheLock.lock()
+        Self.cachedDefaultPrefs[selfID] = resolved
+        Self.cacheLock.unlock()
+        preferences = resolved
       }
     }
-    if !candidates.contains(src) {
-      candidates.append(src)
+
+    let candKey = preferences.joined(separator: ",") + "|" + src
+    Self.cacheLock.lock()
+    let cachedCand = Self.cachedCandidates[candKey]
+    Self.cacheLock.unlock()
+    let candidates: [String]
+    if let cachedCand {
+      candidates = cachedCand
+    } else {
+      var built: [String] = []
+      for pref in preferences {
+        for c in Self.languageCandidates(for: pref, sourceLanguage: src) where !built.contains(c) {
+          built.append(c)
+        }
+      }
+      if !built.contains(src) {
+        built.append(src)
+      }
+      Self.cacheLock.lock()
+      Self.cachedCandidates[candKey] = built
+      Self.cacheLock.unlock()
+      candidates = built
     }
 
     for candidate in candidates {
@@ -830,8 +1037,8 @@ public struct LocalizedStringKey: ExpressibleByStringLiteral, ExpressibleByStrin
     self.arguments = stringInterpolation.arguments
   }
 
-  package func resolved(locale: Locale? = nil) -> String {
-    XCStringsCatalog.shared.resolve(key: key, arguments: arguments, locale: locale)
+  package func resolved(tableName: String? = nil, locale: Locale? = nil) -> String {
+    XCStringsCatalog.shared.resolve(key: key, tableName: tableName, arguments: arguments, locale: locale)
   }
 }
 

@@ -560,9 +560,15 @@ open class NSImage: NSObject, @unchecked Sendable {
       ctx.ops.append(.image(pngData: data, rect: rect))
     }
   }
-  public func draw(in dstSpacePortionRect: NSRect, from srcSpacePortionRect: NSRect, operation op: UInt, fraction requestedAlpha: CGFloat) {}
+  public func draw(in dstSpacePortionRect: NSRect, from srcSpacePortionRect: NSRect, operation op: NSCompositingOperation, fraction requestedAlpha: CGFloat) {
+    draw(in: dstSpacePortionRect)
+  }
+  public func draw(in dstSpacePortionRect: NSRect, from srcSpacePortionRect: NSRect, operation op: UInt, fraction requestedAlpha: CGFloat) {
+    draw(in: dstSpacePortionRect)
+  }
   public func lockFocus() {}
   public func unlockFocus() {}
+  public func recache() {}
 
   public func _ensureMemoryImageKey() -> (key: String, isNew: Bool)? {
     if let cached = _memoryImageKey {

@@ -8,7 +8,9 @@ public struct EventModifiers: OptionSet, Hashable, Sendable {
   public let rawValue: Int
   public init(rawValue: Int) { self.rawValue = rawValue }
   public static let shift = Self(rawValue: 1), control = Self(rawValue: 2),
-    option = Self(rawValue: 4), command = Self(rawValue: 8)
+    option = Self(rawValue: 4), command = Self(rawValue: 8),
+    capsLock = Self(rawValue: 16), numericPad = Self(rawValue: 32)
+  public static let all: EventModifiers = [.shift, .control, .option, .command, .capsLock, .numericPad]
 }
 public struct KeyEquivalent: Hashable, ExpressibleByExtendedGraphemeClusterLiteral, Sendable {
   public let character: Character
@@ -22,11 +24,24 @@ public struct KeyEquivalent: Hashable, ExpressibleByExtendedGraphemeClusterLiter
     pageDown = Self("\u{f72d}")
 }
 public struct KeyboardShortcut: Equatable, Sendable {
+  public struct Localization: Equatable, Hashable, Sendable {
+    public static let automatic = Localization()
+    public static let withoutMirroring = Localization()
+    public static let custom = Localization()
+  }
+
   public let key: KeyEquivalent
   public let modifiers: EventModifiers
-  public init(_ key: KeyEquivalent, modifiers: EventModifiers = .command) {
+  public let localization: Localization
+
+  public init(
+    _ key: KeyEquivalent,
+    modifiers: EventModifiers = .command,
+    localization: Localization = .automatic
+  ) {
     self.key = key
     self.modifiers = modifiers
+    self.localization = localization
   }
   public static let cancelAction = Self(.escape, modifiers: []),
     defaultAction = Self(.return, modifiers: [])
@@ -107,6 +122,50 @@ public struct TextField: View, _PrimitiveView {
     self.title = prompt?.content ?? String(title)
     self.text = text
     self.axis = axis
+  }
+  public init<V>(
+    _ titleKey: LocalizedStringKey,
+    value: Binding<V>,
+    formatter: Formatter,
+    prompt: Text? = nil
+  ) {
+    self.title = prompt?.content ?? titleKey.resolved()
+    self.text = Binding<String>(
+      get: { formatter.string(for: value.wrappedValue) ?? "\(value.wrappedValue)" },
+      set: { newStr in
+        if let nf = formatter as? NumberFormatter, let num = nf.number(from: newStr) {
+          if let v = num as? V {
+            value.wrappedValue = v
+            return
+          }
+          if V.self == Int.self, let n = num.intValue as? V {
+            value.wrappedValue = n
+            return
+          }
+          if V.self == Double.self, let d = num.doubleValue as? V {
+            value.wrappedValue = d
+            return
+          }
+        }
+        if V.self == Int.self, let n = Int(newStr) as? V {
+          value.wrappedValue = n
+        } else if V.self == Double.self, let d = Double(newStr) as? V {
+          value.wrappedValue = d
+        } else if V.self == String.self, let s = newStr as? V {
+          value.wrappedValue = s
+        }
+      }
+    )
+    self.axis = .horizontal
+  }
+  @_disfavoredOverload
+  public init<S: StringProtocol, V>(
+    _ title: S,
+    value: Binding<V>,
+    formatter: Formatter,
+    prompt: Text? = nil
+  ) {
+    self.init(LocalizedStringKey(String(title)), value: value, formatter: formatter, prompt: prompt)
   }
   public var body: Never { fatalError() }
   func _makeElement(path: ViewPath) -> Element {
@@ -201,6 +260,7 @@ extension View {
             DragGesture.Value(location: pt, startLocation: pt, translation: .zero, time: Date()))
         }
       } else {
+        el.dragMinimumDistance = Double((gesture as? DragGesture)?.minimumDistance ?? 0)
         el.dragAction = { value, ended in
           if ended { gesture.ended?(value) } else { gesture.changed?(value) }
         }
@@ -266,8 +326,12 @@ extension View {
   public func keyboardShortcut(_ key: KeyEquivalent, modifiers: EventModifiers = .command)
     -> some View
   { keyboardShortcut(KeyboardShortcut(key, modifiers: modifiers)) }
-  public func keyboardShortcut(_ shortcut: KeyboardShortcut) -> some View {
-    TransformView(content: self) { $0.props.keyboardShortcut = shortcut }
+  public func keyboardShortcut(_ shortcut: KeyboardShortcut?) -> some View {
+    TransformView(content: self) {
+      if let shortcut {
+        $0.props.keyboardShortcut = shortcut
+      }
+    }
   }
   public func focusable(_ focusable: Bool = true) -> some View {
     TransformView(content: self) { $0.props.focusable = focusable }

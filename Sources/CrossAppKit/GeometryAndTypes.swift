@@ -147,54 +147,90 @@ public enum CrossAppKitCoordinates {
 }
 
 #if !os(macOS)
-  open class DistributedNotificationCenter: NotificationCenter, @unchecked Sendable {
-    private static let sharedDistributed = DistributedNotificationCenter()
-    public static func `default`() -> DistributedNotificationCenter {
-      sharedDistributed
-    }
-  }
+  @_exported import CrossFoundation
 
-  public final class NSKeyValueObservation: NSObject, @unchecked Sendable {
-    private var cancelBlock: (() -> Void)?
-    public init(_ cancel: @escaping () -> Void = {}) {
-      self.cancelBlock = cancel
-    }
-    public func invalidate() {
-      cancelBlock?()
-      cancelBlock = nil
-    }
-    deinit { invalidate() }
-  }
+  // Standard AppKit key character constants (NSEvent.h / NSText.h)
+  public let NSNewlineCharacter: Int = 0x000A
+  public let NSCarriageReturnCharacter: Int = 0x000D
+  public let NSTabCharacter: Int = 0x0009
+  public let NSBackTabCharacter: Int = 0x0019
+  public let NSBackspaceCharacter: Int = 0x0008
+  public let NSDeleteCharacter: Int = 0x007F
+  public let NSEnterCharacter: Int = 0x0003
+  public let NSFormFeedCharacter: Int = 0x000C
 
-  public struct NSKeyValueObservingOptions: OptionSet, Sendable {
-    public let rawValue: UInt
-    public init(rawValue: UInt) { self.rawValue = rawValue }
-    public static let new = NSKeyValueObservingOptions(rawValue: 1 << 0)
-    public static let old = NSKeyValueObservingOptions(rawValue: 1 << 1)
-    public static let initial = NSKeyValueObservingOptions(rawValue: 1 << 2)
-    public static let prior = NSKeyValueObservingOptions(rawValue: 1 << 3)
-  }
-
-  public struct NSKeyValueObservedChange<Value>: @unchecked Sendable {
-    public let newValue: Value?
-    public let oldValue: Value?
-    public init(newValue: Value? = nil, oldValue: Value? = nil) {
-      self.newValue = newValue
-      self.oldValue = oldValue
-    }
-  }
-
-  open class NSItemProvider: NSObject, @unchecked Sendable {
-    public let url: URL?
-    public init?(contentsOf fileURL: URL!) {
-      self.url = fileURL
-      super.init()
-    }
-    public override init() {
-      self.url = nil
-      super.init()
-    }
-  }
+  public let NSUpArrowFunctionKey: Int = 0xF700
+  public let NSDownArrowFunctionKey: Int = 0xF701
+  public let NSLeftArrowFunctionKey: Int = 0xF702
+  public let NSRightArrowFunctionKey: Int = 0xF703
+  public let NSF1FunctionKey: Int = 0xF704
+  public let NSF2FunctionKey: Int = 0xF705
+  public let NSF3FunctionKey: Int = 0xF706
+  public let NSF4FunctionKey: Int = 0xF707
+  public let NSF5FunctionKey: Int = 0xF708
+  public let NSF6FunctionKey: Int = 0xF709
+  public let NSF7FunctionKey: Int = 0xF70A
+  public let NSF8FunctionKey: Int = 0xF70B
+  public let NSF9FunctionKey: Int = 0xF70C
+  public let NSF10FunctionKey: Int = 0xF70D
+  public let NSF11FunctionKey: Int = 0xF70E
+  public let NSF12FunctionKey: Int = 0xF70F
+  public let NSF13FunctionKey: Int = 0xF710
+  public let NSF14FunctionKey: Int = 0xF711
+  public let NSF15FunctionKey: Int = 0xF712
+  public let NSF16FunctionKey: Int = 0xF713
+  public let NSF17FunctionKey: Int = 0xF714
+  public let NSF18FunctionKey: Int = 0xF715
+  public let NSF19FunctionKey: Int = 0xF716
+  public let NSF20FunctionKey: Int = 0xF717
+  public let NSF21FunctionKey: Int = 0xF718
+  public let NSF22FunctionKey: Int = 0xF719
+  public let NSF23FunctionKey: Int = 0xF71A
+  public let NSF24FunctionKey: Int = 0xF71B
+  public let NSF25FunctionKey: Int = 0xF71C
+  public let NSF26FunctionKey: Int = 0xF71D
+  public let NSF27FunctionKey: Int = 0xF71E
+  public let NSF28FunctionKey: Int = 0xF71F
+  public let NSF29FunctionKey: Int = 0xF720
+  public let NSF30FunctionKey: Int = 0xF721
+  public let NSF31FunctionKey: Int = 0xF722
+  public let NSF32FunctionKey: Int = 0xF723
+  public let NSF33FunctionKey: Int = 0xF724
+  public let NSF34FunctionKey: Int = 0xF725
+  public let NSF35FunctionKey: Int = 0xF726
+  public let NSInsertFunctionKey: Int = 0xF727
+  public let NSDeleteFunctionKey: Int = 0xF728
+  public let NSHomeFunctionKey: Int = 0xF729
+  public let NSBeginFunctionKey: Int = 0xF72A
+  public let NSEndFunctionKey: Int = 0xF72B
+  public let NSPageUpFunctionKey: Int = 0xF72C
+  public let NSPageDownFunctionKey: Int = 0xF72D
+  public let NSPrintScreenFunctionKey: Int = 0xF72E
+  public let NSScrollLockFunctionKey: Int = 0xF72F
+  public let NSPauseFunctionKey: Int = 0xF730
+  public let NSSysReqFunctionKey: Int = 0xF731
+  public let NSBreakFunctionKey: Int = 0xF732
+  public let NSResetFunctionKey: Int = 0xF733
+  public let NSStopFunctionKey: Int = 0xF734
+  public let NSMenuFunctionKey: Int = 0xF735
+  public let NSUserFunctionKey: Int = 0xF736
+  public let NSSystemFunctionKey: Int = 0xF737
+  public let NSPrintFunctionKey: Int = 0xF738
+  public let NSClearLineFunctionKey: Int = 0xF739
+  public let NSClearDisplayFunctionKey: Int = 0xF73A
+  public let NSInsertLineFunctionKey: Int = 0xF73B
+  public let NSDeleteLineFunctionKey: Int = 0xF73C
+  public let NSInsertCharFunctionKey: Int = 0xF73D
+  public let NSDeleteCharFunctionKey: Int = 0xF73E
+  public let NSPrevFunctionKey: Int = 0xF73F
+  public let NSNextFunctionKey: Int = 0xF740
+  public let NSSelectFunctionKey: Int = 0xF741
+  public let NSExecuteFunctionKey: Int = 0xF742
+  public let NSUndoFunctionKey: Int = 0xF743
+  public let NSRedoFunctionKey: Int = 0xF744
+  public let NSFindFunctionKey: Int = 0xF745
+  public let NSHelpFunctionKey: Int = 0xF746
+  public let NSModeSwitchFunctionKey: Int = 0xF747
 
   public enum NSCompositingOperation: UInt, Sendable {
     case clear = 0

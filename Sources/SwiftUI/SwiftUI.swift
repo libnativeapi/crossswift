@@ -32,9 +32,38 @@
     @_exported import CrossUIKit
     @_exported import CrossFoundation
     @_exported import CoreGraphics
+    import UniformTypeIdentifiers
 
     extension SwiftUIRuntime.Path {
       public var cgPath: CGPath { CGPath(commands: self.commands) }
+    }
+
+    extension SwiftUIRuntime.View {
+      public func fileImporter(
+        isPresented: Binding<Bool>,
+        allowedContentTypes: [UTType],
+        allowsMultipleSelection: Bool = false,
+        onCompletion: @escaping (Result<[URL], any Error>) -> Void
+      ) -> some View {
+        fileImporter(
+          isPresented: isPresented,
+          allowedContentTypes: allowedContentTypes.compactMap(\.preferredFilenameExtension),
+          allowsMultipleSelection: allowsMultipleSelection,
+          onCompletion: onCompletion
+        )
+      }
+
+      public func fileImporter(
+        isPresented: Binding<Bool>,
+        allowedContentTypes: [UTType],
+        onCompletion: @escaping (Result<URL, any Error>) -> Void
+      ) -> some View {
+        fileImporter(
+          isPresented: isPresented,
+          allowedContentTypes: allowedContentTypes.compactMap(\.preferredFilenameExtension),
+          onCompletion: onCompletion
+        )
+      }
     }
   #endif
 #endif

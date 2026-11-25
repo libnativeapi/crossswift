@@ -56,6 +56,15 @@ open class NSLayoutConstraint: NSObject {
     return Array(activeRegistry.values)
   }
 
+  public class func constraints(
+    withVisualFormat format: String,
+    options opts: FormatOptions = [],
+    metrics: [String: Any]? = nil,
+    views: [String: Any]
+  ) -> [NSLayoutConstraint] {
+    []
+  }
+
   public weak var firstItem: AnyObject?
   public let firstAttribute: Attribute
   public let relation: Relation

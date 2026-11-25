@@ -21,6 +21,7 @@ public enum PackageDependencyAdapter {
     "SwiftUI",
     "AppKit",
     "UIKit",
+    "Cocoa",
     "QuartzCore",
     "CoreGraphics",
     "Combine",
@@ -31,16 +32,40 @@ public enum PackageDependencyAdapter {
     "CoreText",
     "PDFKit",
     "CoreFoundation",
+    "Carbon",
+    "ApplicationServices",
     "ServiceManagement",
     "ImageIO",
     "QuickLookThumbnailing",
+    "QuickLookUI",
+    "AVFoundation",
     "AVKit",
+    "AudioToolbox",
+    "CoreAudio",
+    "CoreMedia",
+    "CoreServices",
     "CloudKit",
+    "EventKit",
     "ColorSync",
     "CommonCrypto",
     "Compression",
     "JavaScriptCore",
     "Translation",
+    "Network",
+    "Security",
+    "SystemConfiguration",
+    "AuthenticationServices",
+    "IOKit",
+    "Accelerate",
+    "NaturalLanguage",
+    "FoundationModels",
+    "AppleArchive",
+    "Sparkle",
+    "Vision",
+    "StoreKit",
+    "UserNotifications",
+    "AppIntents",
+    "SwiftData",
   ]
 
   /// Consumer-side symbol and string-literal references collected from the app
@@ -132,6 +157,8 @@ public enum PackageDependencyAdapter {
     public let hasObjCAttributes: Bool
     public let hasRedundantCTFontConformance: Bool
     public let importsJavaScriptKit: Bool
+    public let hasCrossPlatformRewrites: Bool
+    public let hasCrossPlatformDarwinGuard: Bool
 
     public init(
       name: String,
@@ -141,7 +168,9 @@ public enum PackageDependencyAdapter {
       largeAssetCatalogs: [String],
       hasObjCAttributes: Bool,
       hasRedundantCTFontConformance: Bool = false,
-      importsJavaScriptKit: Bool = false
+      importsJavaScriptKit: Bool = false,
+      hasCrossPlatformRewrites: Bool = false,
+      hasCrossPlatformDarwinGuard: Bool = false
     ) {
       self.name = name
       self.relativePath = relativePath
@@ -151,6 +180,8 @@ public enum PackageDependencyAdapter {
       self.hasObjCAttributes = hasObjCAttributes
       self.hasRedundantCTFontConformance = hasRedundantCTFontConformance
       self.importsJavaScriptKit = importsJavaScriptKit
+      self.hasCrossPlatformRewrites = hasCrossPlatformRewrites
+      self.hasCrossPlatformDarwinGuard = hasCrossPlatformDarwinGuard
     }
   }
 
@@ -164,6 +195,8 @@ public enum PackageDependencyAdapter {
           || $0.hasObjCAttributes
           || $0.hasRedundantCTFontConformance
           || $0.importsJavaScriptKit
+          || $0.hasCrossPlatformRewrites
+          || $0.hasCrossPlatformDarwinGuard
       }
     }
   }
@@ -211,11 +244,16 @@ public enum PackageDependencyAdapter {
       // (e.g. `#if canImport(UIKit) ... #elseif canImport(AppKit)`). When a target
       // supports AppKit and only imports UIKit conditionally, prefer AppKit so
       // desktop code paths and toll-free CTFont == NSFont semantics stay consistent.
-      if filteredImports.contains("AppKit")
+      if (filteredImports.contains("AppKit") || filteredImports.contains("Cocoa"))
         && filteredImports.contains("UIKit")
         && !scan.unconditionalModules.contains("UIKit")
       {
         filteredImports.remove("UIKit")
+      }
+      if (!filteredImports.isEmpty || scan.hasCrossPlatformRewrites)
+        && allowedCrossSwiftModules.contains("AppKit")
+      {
+        filteredImports.insert("CrossFoundation")
       }
       let crossSwiftImports = filteredImports.sorted()
       let importsJSKit = includeJavaScriptKit && scan.modules.contains("JavaScriptKit")
@@ -248,7 +286,9 @@ public enum PackageDependencyAdapter {
         largeAssetCatalogs: largeCatalogs,
         hasObjCAttributes: scan.hasObjC,
         hasRedundantCTFontConformance: scan.hasRedundantCTFontConformance,
-        importsJavaScriptKit: importsJSKit
+        importsJavaScriptKit: importsJSKit,
+        hasCrossPlatformRewrites: scan.hasCrossPlatformRewrites,
+        hasCrossPlatformDarwinGuard: scan.hasCrossPlatformDarwinGuard
       ))
     }
 
@@ -527,7 +567,7 @@ public enum PackageDependencyAdapter {
     let stampSummary = prunedImagesetsByCatalogKey.keys.sorted().map { key in
       "\(key)=\(prunedImagesetsByCatalogKey[key]?.joined(separator: ",") ?? "")"
     }.joined(separator: "\n")
-    let stampText = patchedManifest + "\n// PRUNED-V3:\n" + stampSummary
+    let stampText = patchedManifest + "\n// PRUNED-V11:\n" + stampSummary
     let stampURL = outputDirectory.appendingPathComponent(".crossswift-adapt-stamp")
     let dstManifestURL = outputDirectory.appendingPathComponent("Package.swift")
     if let existingStamp = try? String(contentsOf: stampURL, encoding: .utf8),
@@ -542,11 +582,25 @@ public enum PackageDependencyAdapter {
     }
     try fm.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
+    // Stage auxiliary targets (`.macro`, `.testTarget`, `.plugin`) declared in Package.swift
+    // so SwiftPM can validate their source paths when building the adapted package.
+    for auxRel in parseAuxiliaryTargetPaths(from: originalManifest) {
+      let srcAux = sourceRoot.appendingPathComponent(auxRel)
+      let dstAux = outputDirectory.appendingPathComponent(auxRel)
+      guard fm.fileExists(atPath: srcAux.path), !fm.fileExists(atPath: dstAux.path) else { continue }
+      try fm.createDirectory(at: dstAux.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try linkOrCopyDirectory(from: srcAux, to: dstAux)
+    }
+
     // Only stage the directories actually referenced by declared targets (plus Package.swift),
     // avoiding unrelated repository trees (such as web/android assets or docs).
     let needsObjCStrip = inspection.targets.contains { $0.hasObjCAttributes }
     let needsCTFontDedupe = inspection.targets.contains { $0.hasRedundantCTFontConformance }
-    let needsSwiftRewrite = needsObjCStrip || needsCTFontDedupe
+    let applyDesktopRewrites = !useWasmBundleShim
+      && inspection.targets.contains { $0.hasCrossPlatformRewrites || !$0.importedCrossSwiftModules.isEmpty }
+    let guardDarwinCanImport = !useWasmBundleShim
+      && inspection.targets.contains { $0.hasCrossPlatformDarwinGuard }
+    let needsSwiftRewrite = needsObjCStrip || needsCTFontDedupe || applyDesktopRewrites || guardDarwinCanImport
     for target in inspection.targets {
       let rel = target.relativePath
       let srcTarget = sourceRoot.appendingPathComponent(rel)
@@ -579,6 +633,8 @@ public enum PackageDependencyAdapter {
           skipNames: Set(target.largeAssetCatalogs.map { URL(fileURLWithPath: $0).lastPathComponent }),
           stripObjCInSwiftFiles: needsObjCStrip,
           dedupeCTFontConformances: needsCTFontDedupe,
+          applyDesktopRewrites: applyDesktopRewrites,
+          guardDarwinCanImport: guardDarwinCanImport,
           pruneEnumCases: keptEnumCases
         )
       }
@@ -731,6 +787,8 @@ public enum PackageDependencyAdapter {
     skipNames: Set<String> = [],
     stripObjCInSwiftFiles: Bool,
     dedupeCTFontConformances: Bool = false,
+    applyDesktopRewrites: Bool = false,
+    guardDarwinCanImport: Bool = false,
     pruneEnumCases: Set<String>? = nil
   ) throws {
     let fm = FileManager.default
@@ -743,7 +801,7 @@ public enum PackageDependencyAdapter {
       var isDir: ObjCBool = false
       guard fm.fileExists(atPath: srcItem.path, isDirectory: &isDir) else { continue }
       if isDir.boolValue {
-        let needsSwiftProcessing = stripObjCInSwiftFiles || dedupeCTFontConformances || pruneEnumCases != nil
+        let needsSwiftProcessing = stripObjCInSwiftFiles || dedupeCTFontConformances || applyDesktopRewrites || guardDarwinCanImport || pruneEnumCases != nil
         if !needsSwiftProcessing
           || item.lowercased().hasSuffix(".xcassets")
           || (!directoryContainsSwiftFiles(srcItem) && !directoryContainsAnyName(srcItem, names: skipNames))
@@ -756,14 +814,24 @@ public enum PackageDependencyAdapter {
             skipNames: skipNames,
             stripObjCInSwiftFiles: stripObjCInSwiftFiles,
             dedupeCTFontConformances: dedupeCTFontConformances,
+            applyDesktopRewrites: applyDesktopRewrites,
+            guardDarwinCanImport: guardDarwinCanImport,
             pruneEnumCases: pruneEnumCases
           )
         }
-      } else if (stripObjCInSwiftFiles || dedupeCTFontConformances || pruneEnumCases != nil) && srcItem.pathExtension.lowercased() == "swift",
+      } else if (stripObjCInSwiftFiles || dedupeCTFontConformances || applyDesktopRewrites || guardDarwinCanImport || pruneEnumCases != nil) && srcItem.pathExtension.lowercased() == "swift",
                 var text = try? String(contentsOf: srcItem, encoding: .utf8)
       {
-        if stripObjCInSwiftFiles {
+        if applyDesktopRewrites {
+          text = SwiftPMBackend.preprocessSwiftSourceForCrossPlatform(text)
+          text = rewriteMacOSGuardsForDesktop(text)
+          text = workaroundSwiftPackNestedFuncCrash(text)
+          text = fixCGFloatDefaultsSerialization(text)
+        } else if stripObjCInSwiftFiles {
           text = stripObjCAttributes(text)
+        }
+        if guardDarwinCanImport {
+          text = rewriteDarwinCanImportGuards(text)
         }
         if dedupeCTFontConformances {
           text = guardRedundantCTFontExtensions(text)
@@ -776,6 +844,97 @@ public enum PackageDependencyAdapter {
         try IncrementalFileWriter.copyFileIfChanged(from: srcItem, to: dstItem)
       }
     }
+  }
+
+  /// Prevents CrossSwiftUI's shared `Darwin.swiftmodule` in `--build-system native`
+  /// from hijacking `#if canImport(Darwin)` branches in genuinely cross-platform Swift
+  /// packages (e.g. `swift-log`) that provide explicit Windows/Linux branches.
+  private static func rewriteDarwinCanImportGuards(_ source: String) -> String {
+    guard source.contains("canImport(Darwin)"),
+          source.contains("os(Windows)") || source.contains("os(Linux)")
+            || source.contains("canImport(Glibc)") || source.contains("canImport(CRT)")
+    else { return source }
+    var lines: [String] = []
+    lines.reserveCapacity(128)
+    source.enumerateLines { line, _ in
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if (trimmed.hasPrefix("#if ") || trimmed.hasPrefix("#if(") || trimmed.hasPrefix("#elseif ") || trimmed.hasPrefix("#elseif(")),
+         line.contains("canImport(Darwin)")
+      {
+        lines.append(
+          line.replacingOccurrences(
+            of: "canImport(Darwin)",
+            with: "(canImport(Darwin) && !os(Windows) && !os(Linux))"
+          )
+        )
+      } else {
+        lines.append(line)
+      }
+    }
+    return lines.joined(separator: "\n") + (source.hasSuffix("\n") ? "\n" : "")
+  }
+
+  /// For adapted Apple desktop packages that wrap macOS implementations in `#if os(macOS)`
+  /// without explicit Windows/Linux branches, widen `os(macOS)` in preprocessor lines to
+  /// include Windows and Linux so desktop AppKit/Carbon code paths compile on non-Apple desktops.
+  private static func rewriteMacOSGuardsForDesktop(_ source: String) -> String {
+    guard source.contains("os(macOS)"),
+          !source.contains("os(Windows)"),
+          !source.contains("os(Linux)")
+    else { return source }
+    var lines: [String] = []
+    lines.reserveCapacity(128)
+    source.enumerateLines { line, _ in
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if (trimmed.hasPrefix("#if ") || trimmed.hasPrefix("#if(") || trimmed.hasPrefix("#elseif ") || trimmed.hasPrefix("#elseif(")),
+         line.contains("os(macOS)")
+      {
+        lines.append(
+          line.replacingOccurrences(of: "os(macOS)", with: "(os(macOS) || os(Windows) || os(Linux))")
+        )
+      } else {
+        lines.append(line)
+      }
+    }
+    return lines.joined(separator: "\n") + (source.hasSuffix("\n") ? "\n" : "")
+  }
+
+  /// Works around a Swift 6.4.x Windows SILGen assertion (`!E->getType()->hasLValueType()`)
+  /// when a mutable subscript (`self[each keys]`) is evaluated directly inside a variadic
+  /// parameter pack expansion `(repeat ...)`.
+  private static func workaroundSwiftPackNestedFuncCrash(_ source: String) -> String {
+    guard source.contains("(repeat self[each keys])") else {
+      return source
+    }
+    var out = source
+    out = out.replacingOccurrences(
+      of: "(repeat self[each keys])",
+      with: "{ () -> (repeat each Value) in func _r<V: Serializable>(_ k: Key<V>) -> V { self[k] }; return (repeat _r(each keys)) }()"
+    )
+    return out
+  }
+
+  /// On non-Darwin (`swift-corelibs-foundation`), `Foundation.CGFloat` is not
+  /// bridged to `NSNumber`, so passing a raw `CGFloat` into `UserDefaults.set(_:forKey:)`
+  /// traps inside `Foundation`. Route `CGFloat: Defaults.Serializable` through
+  /// `TopLevelCodableBridge<CGFloat>` instead of claiming native plist support.
+  private static func fixCGFloatDefaultsSerialization(_ source: String) -> String {
+    guard source.contains("extension CGFloat: Defaults.Serializable"),
+          let regex = try? NSRegularExpression(
+            pattern: #"extension\s+CGFloat\s*:\s*Defaults\.Serializable\s*\{\s*public\s+static\s+let\s+isNativelySupportedType\s*=\s*true\s*\}"#
+          )
+    else { return source }
+    let ns = source as NSString
+    return regex.stringByReplacingMatches(
+      in: source,
+      range: NSRange(location: 0, length: ns.length),
+      withTemplate: """
+      extension CGFloat: Defaults.Serializable {
+      \tpublic static let isNativelySupportedType = false
+      \tpublic static let bridge = Defaults.TopLevelCodableBridge<CGFloat>()
+      }
+      """
+    )
   }
 
   /// Scans `.swift` files <= 100 KB inside `targetDir` for `.member` references so
@@ -1016,6 +1175,33 @@ public enum PackageDependencyAdapter {
     let rawBody: String
   }
 
+  private static func parseAuxiliaryTargetPaths(from manifest: String) -> [String] {
+    var result: [String] = []
+    guard let regex = try? NSRegularExpression(pattern: "\\.(macro|testTarget|plugin)\\s*\\(") else {
+      return result
+    }
+    let ns = manifest as NSString
+    let matches = regex.matches(in: manifest, range: NSRange(location: 0, length: ns.length))
+    for match in matches {
+      let kind = ns.substring(with: match.range(at: 1))
+      let openParenIdx = match.range.location + match.range.length - 1
+      guard let closeParenIdx = findMatchingDelimiter(in: manifest, openIndex: openParenIdx, open: "(", close: ")")
+      else { continue }
+      let bodyRange = NSRange(location: openParenIdx + 1, length: closeParenIdx - openParenIdx - 1)
+      let body = ns.substring(with: bodyRange)
+      guard let name = extractStringArgument(named: "name", in: body) else { continue }
+      let defaultPrefix: String
+      switch kind {
+      case "testTarget": defaultPrefix = "Tests"
+      case "plugin": defaultPrefix = "Plugins"
+      default: defaultPrefix = "Sources"
+      }
+      let path = extractStringArgument(named: "path", in: body) ?? "\(defaultPrefix)/\(name)"
+      result.append(path)
+    }
+    return result
+  }
+
   private static func parseTargetDeclarations(from manifest: String) -> [RawTargetDecl] {
     var result: [RawTargetDecl] = []
     guard let regex = try? NSRegularExpression(pattern: "\\.(?:target|executableTarget)\\s*\\(") else {
@@ -1092,24 +1278,28 @@ public enum PackageDependencyAdapter {
     modules: Set<String>,
     unconditionalModules: Set<String>,
     hasObjC: Bool,
-    hasRedundantCTFontConformance: Bool
+    hasRedundantCTFontConformance: Bool,
+    hasCrossPlatformRewrites: Bool,
+    hasCrossPlatformDarwinGuard: Bool
   ) {
     let fm = FileManager.default
     guard let enumerator = fm.enumerator(
       at: directory,
       includingPropertiesForKeys: [.isDirectoryKey],
       options: [.skipsHiddenFiles]
-    ) else { return ([], [], false, false) }
+    ) else { return ([], [], false, false, false, false) }
 
     guard let importRegex = try? NSRegularExpression(
       pattern: "^\\s*(?:@\\w+\\s+)*import\\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\\s+)?([A-Za-z_][A-Za-z0-9_]*)"
-    ) else { return ([], [], false, false) }
+    ) else { return ([], [], false, false, false, false) }
     let objcRegex = try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9_])@objc(?:\([^)]*\))?"#)
 
     var modules = Set<String>()
     var unconditionalModules = Set<String>()
     var hasObjC = false
     var hasRedundantCTFont = false
+    var hasCrossPlatformRewrites = false
+    var hasCrossPlatformDarwinGuard = false
     for case let fileURL as URL in enumerator {
       let name = fileURL.lastPathComponent
       if name.lowercased().hasSuffix(".xcassets") || name == ".build" || name == ".git" {
@@ -1149,8 +1339,27 @@ public enum PackageDependencyAdapter {
       {
         hasRedundantCTFont = true
       }
+      if !hasCrossPlatformRewrites {
+        if (text.contains("os(macOS)") && !text.contains("os(Windows)") && !text.contains("os(Linux)"))
+          || text.contains("#selector(")
+          || text.contains("override func observeValue(")
+          || text.contains("import AppKit.")
+          || text.contains("import Carbon.")
+          || text.contains("import os.")
+        {
+          hasCrossPlatformRewrites = true
+        }
+      }
+      if !hasCrossPlatformDarwinGuard {
+        if text.contains("canImport(Darwin)")
+          && (text.contains("os(Windows)") || text.contains("os(Linux)")
+            || text.contains("canImport(Glibc)") || text.contains("canImport(CRT)"))
+        {
+          hasCrossPlatformDarwinGuard = true
+        }
+      }
     }
-    return (modules, unconditionalModules, hasObjC, hasRedundantCTFont)
+    return (modules, unconditionalModules, hasObjC, hasRedundantCTFont, hasCrossPlatformRewrites, hasCrossPlatformDarwinGuard)
   }
 
   private static func findAssetCatalogs(in targetDir: URL) -> [String] {

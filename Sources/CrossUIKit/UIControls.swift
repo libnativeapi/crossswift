@@ -1176,7 +1176,7 @@ open class UITextView: UIScrollView {
     let resolvedContainer = textContainer ?? NSTextContainer(size: CGSize(width: max(frame.width, 100), height: 1e7))
     let lm = resolvedContainer.layoutManager ?? NSLayoutManager()
     if resolvedContainer.layoutManager == nil { lm.addTextContainer(resolvedContainer) }
-    let storage = lm.textStorage ?? NSTextStorage()
+    let storage = lm.textStorage ?? NSTextStorage(string: "")
     if lm.textStorage == nil { storage.addLayoutManager(lm) }
     self.textStorage = storage
     self.layoutManager = lm
@@ -1193,7 +1193,7 @@ open class UITextView: UIScrollView {
   }
 
   public required init?(coder: NSCoder) {
-    let storage = NSTextStorage()
+    let storage = NSTextStorage(string: "")
     let lm = NSLayoutManager()
     let container = NSTextContainer()
     storage.addLayoutManager(lm)

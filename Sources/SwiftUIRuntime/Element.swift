@@ -343,8 +343,8 @@ public struct Element {
   var focusAction: ((Bool) -> Void)? = nil
   public var pathBuilder: ((CGRect) -> Path)? = nil
   public var clipPathBuilder: ((CGRect) -> Path)? = nil
-  var horizontalGuide: ((ViewDimensions) -> CGFloat)? = nil
-  var verticalGuide: ((ViewDimensions) -> CGFloat)? = nil
+  var horizontalGuides: [HorizontalAlignment: (ViewDimensions) -> CGFloat] = [:]
+  var verticalGuides: [VerticalAlignment: (ViewDimensions) -> CGFloat] = [:]
   var preferences: [ObjectIdentifier: PreferenceValue] = [:]
   var anchorPreferences: [(CGRect, inout [ObjectIdentifier: PreferenceValue]) -> Void] = []
   var preferenceTransforms: [(inout [ObjectIdentifier: PreferenceValue]) -> Void] = []
@@ -358,9 +358,11 @@ public struct Element {
   var textAction: ((String) -> Void)? = nil
   var submitAction: (() -> Void)? = nil
   var dragAction: ((DragGesture.Value, Bool) -> Void)? = nil
+  var dragMinimumDistance: Double = 10
   var highPriorityAction: (() -> Void)? = nil
   var simultaneousActions: [() -> Void] = []
   var highPriorityDragAction: ((DragGesture.Value, Bool) -> Void)? = nil
+  var highPriorityDragMinimumDistance: Double = 10
   var simultaneousDragActions: [(DragGesture.Value, Bool) -> Void] = []
   struct LongPressConfig {
     let minimumDuration: Double
@@ -533,7 +535,13 @@ func normalize(_ element: Element, previous: Element? = nil) -> Element {
     let normalized = normalize(
       child, previous: previous.flatMap { index < $0.children.count ? $0.children[index] : nil })
     switch normalized.kind {
-    case .fragment: children.append(contentsOf: normalized.children)
+    case .fragment:
+      for var nested in normalized.children {
+        if normalized.props.opacity != 1 { nested.props.opacity *= normalized.props.opacity }
+        if !normalized.props.visible { nested.props.visible = false }
+        if normalized.props.accessibilityHidden { nested.props.accessibilityHidden = true }
+        children.append(nested)
+      }
     case .empty: break
     default: children.append(normalized)
     }

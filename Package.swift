@@ -241,6 +241,7 @@ if buildForWeb {
 #if !os(macOS)
 if buildDesktopNative {
   crossAppKitDependencies.append(.product(name: "NativeAPI", package: "NativeAPI"))
+  crossAppKitDependencies.append("CrossFoundation")
   crossAppKitDependencies.append("CoreGraphics")
   crossAppKitDependencies.append("UniformTypeIdentifiers")
   crossAppKitDependencies.append("Combine")
@@ -254,7 +255,7 @@ if buildDesktopNative {
   #endif
 
   let crossFoundationDeps: [Target.Dependency] = [
-    "SwiftUIRuntime", "CoreFoundation", "Darwin", "CoreGraphics", "Carbon",
+    "SwiftUIRuntime", "CoreFoundation", "CoreServices", "ApplicationServices", "Darwin", "CoreGraphics", "Carbon",
   ] + winGlueDependencies
   let darwinDeps: [Target.Dependency] = ["CoreFoundation", "CDarwinShims"] + winGlueDependencies
   let appServicesDeps: [Target.Dependency] = ["CoreFoundation", "CoreGraphics"] + winGlueDependencies
@@ -284,7 +285,7 @@ if buildDesktopNative {
     .target(name: "CoreAudio", dependencies: ["CoreFoundation"], path: "Sources/AppleShims/CoreAudio"),
     .target(name: "AudioToolbox", path: "Sources/AppleShims/AudioToolbox"),
     .target(name: "CoreMedia", dependencies: ["CoreFoundation", "AudioToolbox"], path: "Sources/AppleShims/CoreMedia"),
-    .target(name: "CoreServices", dependencies: ["CoreFoundation"], path: "Sources/AppleShims/CoreServices"),
+    .target(name: "CoreServices", dependencies: ["CoreFoundation", "Carbon"], path: "Sources/AppleShims/CoreServices"),
     .target(name: "CoreText", dependencies: ["CoreFoundation", "CoreGraphics", "CrossAppKit"], path: "Sources/AppleShims/CoreText"),
     .target(name: "ImageIO", dependencies: imageIODeps, path: "Sources/AppleShims/ImageIO"),
     .target(name: "ColorSync", path: "Sources/AppleShims/ColorSync"),
@@ -327,6 +328,17 @@ if buildDesktopNative {
     .target(name: "FoundationModels", path: "Sources/AppleShims/FoundationModels"),
     .target(name: "NaturalLanguage", path: "Sources/AppleShims/NaturalLanguage"),
     .target(name: "Translation", path: "Sources/AppleShims/Translation"),
+    .target(name: "Cocoa", dependencies: ["CrossFoundation", "AppKit"], path: "Sources/AppleShims/Cocoa"),
+    .target(name: "Sparkle", dependencies: ["CrossFoundation"], path: "Sources/AppleShims/Sparkle"),
+    .target(name: "Vision", dependencies: ["CoreGraphics"], path: "Sources/AppleShims/Vision"),
+    .target(name: "StoreKit", path: "Sources/AppleShims/StoreKit"),
+    .target(name: "UserNotifications", path: "Sources/AppleShims/UserNotifications"),
+    .target(name: "AppIntents", dependencies: ["CrossFoundation"], path: "Sources/AppleShims/AppIntents"),
+    .target(
+      name: "SwiftData",
+      dependencies: ["CrossFoundation", "SwiftUIRuntime", "SwiftUIRuntimeMacros"],
+      path: "Sources/AppleShims/SwiftData"
+    ),
     .target(name: "Carbon", publicHeadersPath: "include"),
     .target(name: "CoreGraphics", dependencies: coreGraphicsDeps),
     .target(name: "UniformTypeIdentifiers"),
@@ -347,6 +359,7 @@ if buildDesktopNative {
         "CrossFoundation",
         "CoreGraphics",
         "Combine",
+        "UniformTypeIdentifiers",
       ]
     ),
     .testTarget(
@@ -401,6 +414,13 @@ if buildDesktopNative {
     .library(name: "FoundationModels", targets: ["FoundationModels"]),
     .library(name: "NaturalLanguage", targets: ["NaturalLanguage"]),
     .library(name: "Translation", targets: ["Translation"]),
+    .library(name: "Cocoa", targets: ["Cocoa"]),
+    .library(name: "Sparkle", targets: ["Sparkle"]),
+    .library(name: "Vision", targets: ["Vision"]),
+    .library(name: "StoreKit", targets: ["StoreKit"]),
+    .library(name: "UserNotifications", targets: ["UserNotifications"]),
+    .library(name: "AppIntents", targets: ["AppIntents"]),
+    .library(name: "SwiftData", targets: ["SwiftData"]),
     .library(name: "AppKit", targets: ["AppKit"]),
     .library(name: "UIKit", targets: ["UIKit"]),
     .library(name: "Carbon", targets: ["Carbon"]),

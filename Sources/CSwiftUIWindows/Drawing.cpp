@@ -3584,11 +3584,27 @@ void sui_surface_flush_paint(void *handle) {
   if (!s || !s->host || !IsWindow(s->host) || s->defer_commit) return;
   RenderFrame(s);
   HWND root = GetAncestor(s->host, GA_ROOT);
-  if (root && IsWindowVisible(root)) {
+  if (root && IsWindowVisible(root) && IsWindowVisible(s->host)) {
     RedrawWindow(
         s->host, nullptr, nullptr,
         RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     PositionWindowShadow(s);
+  }
+}
+void sui_surface_show_on_top(void *handle, int defer_paint) {
+  auto *s = static_cast<Surface *>(handle);
+  if (!s || !s->host || !IsWindow(s->host)) return;
+  RenderFrame(s);
+  UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+  if (defer_paint) flags |= SWP_NOREDRAW;
+  SetWindowPos(s->host, HWND_TOP, 0, 0, 0, 0, flags);
+  if (!defer_paint) {
+    HWND root = GetAncestor(s->host, GA_ROOT);
+    if (root && IsWindowVisible(root)) {
+      RedrawWindow(
+          s->host, nullptr, nullptr,
+          RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    }
   }
 }
 void sui_surface_begin_pending_resize(void *handle, double logical_width,

@@ -245,15 +245,116 @@ private func parseEntryDecl(_ source: String) -> ParsedEntryDecl? {
   return nil
 }
 
+private func parseModelClassName(_ source: String) -> String? {
+  guard let regex = try? NSRegularExpression(
+    pattern: #"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)"#
+  ),
+  let match = regex.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)),
+  let range = Range(match.range(at: 1), in: source)
+  else {
+    return nil
+  }
+  return String(source[range])
+}
+
+private struct ParsedRelationship {
+  let propertyName: String
+  let isCollection: Bool
+  let isCascade: Bool
+  let inverseProperty: String?
+}
+
+private func parseModelRelationships(_ source: String) -> [ParsedRelationship] {
+  var results: [ParsedRelationship] = []
+  guard let regex = try? NSRegularExpression(
+    pattern: #"@Relationship(?:\(([^)]*)\))?\s*(?:(?:public|internal|private|fileprivate|open)\s+)*var\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^\n={]+)"#
+  ) else {
+    return results
+  }
+  let ns = source as NSString
+  let matches = regex.matches(in: source, range: NSRange(location: 0, length: ns.length))
+  let inverseRegex = try? NSRegularExpression(pattern: #"inverse\s*:\s*\\[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)"#)
+  for match in matches {
+    let args = match.range(at: 1).location != NSNotFound ? ns.substring(with: match.range(at: 1)) : ""
+    let propName = ns.substring(with: match.range(at: 2))
+    let typeStr = ns.substring(with: match.range(at: 3)).trimmingCharacters(in: .whitespacesAndNewlines)
+    let isCollection = typeStr.hasPrefix("[") || typeStr.hasPrefix("Array<") || typeStr.hasPrefix("Set<")
+    let isCascade = args.contains(".cascade")
+    var inverseProp: String? = nil
+    if let inverseRegex,
+       let invMatch = inverseRegex.firstMatch(in: args, range: NSRange(location: 0, length: (args as NSString).length)),
+       let invRange = Range(invMatch.range(at: 1), in: args)
+    {
+      inverseProp = String(args[invRange])
+    }
+    results.append(ParsedRelationship(
+      propertyName: propName,
+      isCollection: isCollection,
+      isCascade: isCascade,
+      inverseProperty: inverseProp
+    ))
+  }
+  return results
+}
+
 private func handleExpandAttachedMacro(_ req: [String: Any]) -> [String: Any] {
   let macroInfo = req["macro"] as? [String: Any]
   let typeName = macroInfo?["typeName"] as? String ?? ""
-  if typeName == "PreviewableMacro" {
+  if typeName == "PreviewableMacro" || typeName == "SwiftDataNoOpMacro" {
     return ["expandMacroResult": ["diagnostics": []]]
   }
   let role = req["macroRole"] as? String ?? ""
   let declSyntax = req["declSyntax"] as? [String: Any]
   let source = declSyntax?["source"] as? String ?? ""
+
+  if typeName == "ModelMacro" {
+    if role == "extension" {
+      let extendedType = (req["extendedTypeSyntax"] as? [String: Any])?["source"] as? String
+        ?? parseModelClassName(source)
+        ?? ""
+      guard !extendedType.isEmpty else {
+        return ["expandMacroResult": ["diagnostics": []]]
+      }
+      let expanded = "extension \(extendedType): SwiftData.PersistentModel, Swift.Hashable, Swift.Identifiable, @unchecked Swift.Sendable {}"
+      return ["expandMacroResult": ["expandedSource": expanded, "diagnostics": []]]
+    }
+    if role == "member" {
+      let rels = parseModelRelationships(source)
+      var syncLines: [String] = []
+      var cascadeLines: [String] = []
+      for rel in rels {
+        if rel.isCollection {
+          if let inv = rel.inverseProperty {
+            syncLines.append("  for _child in self.\(rel.propertyName) { _child.\(inv) = self; context.insert(_child) }")
+          } else {
+            syncLines.append("  for _child in self.\(rel.propertyName) { context.insert(_child) }")
+          }
+          if rel.isCascade {
+            cascadeLines.append("  _children.append(contentsOf: self.\(rel.propertyName))")
+          }
+        } else {
+          if let inv = rel.inverseProperty {
+            syncLines.append("  if let _child = self.\(rel.propertyName) { _child.\(inv) = self; context.insert(_child) }")
+          }
+          if rel.isCascade {
+            cascadeLines.append("  if let _child = self.\(rel.propertyName) { _children.append(_child) }")
+          }
+        }
+      }
+      let syncBody = syncLines.isEmpty ? "" : "\n" + syncLines.joined(separator: "\n") + "\n"
+      let cascadeBody = cascadeLines.isEmpty
+        ? "[]"
+        : "{\n  var _children: [any SwiftData.PersistentModel] = []\n" + cascadeLines.joined(separator: "\n") + "\n  return _children\n}()"
+      let expanded = """
+        public func _swiftDataSyncRelationships(in context: SwiftData.ModelContext) {\(syncBody)}
+        public func _swiftDataCascadeChildren() -> [any SwiftData.PersistentModel] {
+          \(cascadeBody)
+        }
+        """
+      return ["expandMacroResult": ["expandedSource": expanded, "diagnostics": []]]
+    }
+    return ["expandMacroResult": ["diagnostics": []]]
+  }
 
   guard let parsed = parseEntryDecl(source) else {
     return ["expandMacroResult": ["diagnostics": []]]

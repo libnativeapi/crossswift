@@ -110,17 +110,108 @@ public struct EdgeInsets: Equatable, Sendable, Codable {
     )
   }
 }
-public enum HorizontalAlignment: Equatable, Sendable {
-  case leading
-  case center
-  case trailing
+public protocol AlignmentID {
+  static func defaultValue(in context: ViewDimensions) -> CGFloat
 }
-public enum VerticalAlignment: Equatable, Sendable {
-  case top
-  case center
-  case bottom
+
+public struct HorizontalAlignment: Equatable, Hashable, Sendable {
+  private enum Kind: Equatable, Hashable, Sendable {
+    case leading
+    case center
+    case trailing
+    case custom(ObjectIdentifier)
+  }
+
+  private let kind: Kind
+  private let defaultProvider: (@Sendable (ViewDimensions) -> CGFloat)?
+
+  public static let leading = HorizontalAlignment(kind: .leading, defaultProvider: nil)
+  public static let center = HorizontalAlignment(kind: .center, defaultProvider: nil)
+  public static let trailing = HorizontalAlignment(kind: .trailing, defaultProvider: nil)
+
+  public init(_ id: any AlignmentID.Type) {
+    self.kind = .custom(ObjectIdentifier(id))
+    self.defaultProvider = { id.defaultValue(in: $0) }
+  }
+
+  private init(kind: Kind, defaultProvider: (@Sendable (ViewDimensions) -> CGFloat)?) {
+    self.kind = kind
+    self.defaultProvider = defaultProvider
+  }
+
+  public var isCustom: Bool {
+    if case .custom = kind { return true }
+    return false
+  }
+
+  package func defaultValue(in dimensions: ViewDimensions) -> CGFloat {
+    if let defaultProvider { return defaultProvider(dimensions) }
+    switch kind {
+    case .leading: return 0
+    case .trailing: return dimensions.width
+    case .center: return dimensions.width / 2
+    case .custom: return 0
+    }
+  }
+
+  public static func == (lhs: HorizontalAlignment, rhs: HorizontalAlignment) -> Bool {
+    lhs.kind == rhs.kind
+  }
+
+  public func hash(into hasher: inout Hasher) {
+    hasher.combine(kind)
+  }
+}
+
+public struct VerticalAlignment: Equatable, Hashable, Sendable {
+  private enum Kind: Equatable, Hashable, Sendable {
+    case top
+    case center
+    case bottom
+    case custom(ObjectIdentifier)
+  }
+
+  private let kind: Kind
+  private let defaultProvider: (@Sendable (ViewDimensions) -> CGFloat)?
+
+  public static let top = VerticalAlignment(kind: .top, defaultProvider: nil)
+  public static let center = VerticalAlignment(kind: .center, defaultProvider: nil)
+  public static let bottom = VerticalAlignment(kind: .bottom, defaultProvider: nil)
   public static let firstTextBaseline: VerticalAlignment = .center
   public static let lastTextBaseline: VerticalAlignment = .center
+
+  public init(_ id: any AlignmentID.Type) {
+    self.kind = .custom(ObjectIdentifier(id))
+    self.defaultProvider = { id.defaultValue(in: $0) }
+  }
+
+  private init(kind: Kind, defaultProvider: (@Sendable (ViewDimensions) -> CGFloat)?) {
+    self.kind = kind
+    self.defaultProvider = defaultProvider
+  }
+
+  public var isCustom: Bool {
+    if case .custom = kind { return true }
+    return false
+  }
+
+  package func defaultValue(in dimensions: ViewDimensions) -> CGFloat {
+    if let defaultProvider { return defaultProvider(dimensions) }
+    switch kind {
+    case .top: return 0
+    case .bottom: return dimensions.height
+    case .center: return dimensions.height / 2
+    case .custom: return dimensions.height / 2
+    }
+  }
+
+  public static func == (lhs: VerticalAlignment, rhs: VerticalAlignment) -> Bool {
+    lhs.kind == rhs.kind
+  }
+
+  public func hash(into hasher: inout Hasher) {
+    hasher.combine(kind)
+  }
 }
 public struct Alignment: Equatable, Sendable {
   public var horizontal: HorizontalAlignment

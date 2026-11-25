@@ -22,6 +22,8 @@ open class NSResponder: NSObject {
   open func becomeFirstResponder() -> Bool { true }
   open func resignFirstResponder() -> Bool { true }
   open var undoManager: UndoManager? { nextResponder?.undoManager }
+  open func supplementalTarget(forAction action: Selector, sender: Any?) -> Any? { nil }
+  open func responds(to aSelector: Selector!) -> Bool { false }
 
   open func keyDown(with event: NSEvent) { nextResponder?.keyDown(with: event) }
   open func keyUp(with event: NSEvent) { nextResponder?.keyUp(with: event) }
@@ -77,12 +79,26 @@ open class NSEvent: NSObject, @unchecked Sendable {
     case periodic = 16
     case cursorUpdate = 17
     case scrollWheel = 22
+    case tabletPoint = 23
+    case tabletProximity = 24
     case otherMouseDown = 25
     case otherMouseUp = 26
     case otherMouseDragged = 27
+    case gesture = 29
+    case magnify = 30
+    case swipe = 31
+    case rotate = 18
+    case beginGesture = 19
+    case endGesture = 20
+    case smartMagnify = 32
+    case quickLook = 33
+    case pressure = 34
+    case directTouch = 37
   }
 
   public static let foreverDuration: TimeInterval = .greatestFiniteMagnitude
+  public static let keyRepeatDelay: TimeInterval = 0.5
+  public static let keyRepeatInterval: TimeInterval = 0.05
 
   public struct EventTypeMask: OptionSet, Sendable {
     public let rawValue: UInt64
@@ -138,6 +154,7 @@ open class NSEvent: NSObject, @unchecked Sendable {
     public static let leftArrow = SpecialKey(rawValue: 0xF702)
     public static let rightArrow = SpecialKey(rawValue: 0xF703)
     public static let delete = SpecialKey(rawValue: 0x007F)
+    public static let backspace = SpecialKey(rawValue: 0x0008)
     public static let deleteForward = SpecialKey(rawValue: 0xF728)
     public static let home = SpecialKey(rawValue: 0xF729)
     public static let end = SpecialKey(rawValue: 0xF72B)
@@ -147,6 +164,41 @@ open class NSEvent: NSObject, @unchecked Sendable {
     public static let enter = SpecialKey(rawValue: 0x0003)
     public static let tab = SpecialKey(rawValue: 0x0009)
     public static let backTab = SpecialKey(rawValue: 0x0019)
+    public static let f1 = SpecialKey(rawValue: 0xF704)
+    public static let f2 = SpecialKey(rawValue: 0xF705)
+    public static let f3 = SpecialKey(rawValue: 0xF706)
+    public static let f4 = SpecialKey(rawValue: 0xF707)
+    public static let f5 = SpecialKey(rawValue: 0xF708)
+    public static let f6 = SpecialKey(rawValue: 0xF709)
+    public static let f7 = SpecialKey(rawValue: 0xF70A)
+    public static let f8 = SpecialKey(rawValue: 0xF70B)
+    public static let f9 = SpecialKey(rawValue: 0xF70C)
+    public static let f10 = SpecialKey(rawValue: 0xF70D)
+    public static let f11 = SpecialKey(rawValue: 0xF70E)
+    public static let f12 = SpecialKey(rawValue: 0xF70F)
+    public static let f13 = SpecialKey(rawValue: 0xF710)
+    public static let f14 = SpecialKey(rawValue: 0xF711)
+    public static let f15 = SpecialKey(rawValue: 0xF712)
+    public static let f16 = SpecialKey(rawValue: 0xF713)
+    public static let f17 = SpecialKey(rawValue: 0xF714)
+    public static let f18 = SpecialKey(rawValue: 0xF715)
+    public static let f19 = SpecialKey(rawValue: 0xF716)
+    public static let f20 = SpecialKey(rawValue: 0xF717)
+    public static let f21 = SpecialKey(rawValue: 0xF718)
+    public static let f22 = SpecialKey(rawValue: 0xF719)
+    public static let f23 = SpecialKey(rawValue: 0xF71A)
+    public static let f24 = SpecialKey(rawValue: 0xF71B)
+    public static let f25 = SpecialKey(rawValue: 0xF71C)
+    public static let f26 = SpecialKey(rawValue: 0xF71D)
+    public static let f27 = SpecialKey(rawValue: 0xF71E)
+    public static let f28 = SpecialKey(rawValue: 0xF71F)
+    public static let f29 = SpecialKey(rawValue: 0xF720)
+    public static let f30 = SpecialKey(rawValue: 0xF721)
+    public static let f31 = SpecialKey(rawValue: 0xF722)
+    public static let f32 = SpecialKey(rawValue: 0xF723)
+    public static let f33 = SpecialKey(rawValue: 0xF724)
+    public static let f34 = SpecialKey(rawValue: 0xF725)
+    public static let f35 = SpecialKey(rawValue: 0xF726)
   }
 
   public let type: EventType
@@ -900,6 +952,8 @@ open class NSCursor: NSObject, @unchecked Sendable {
   public static let crosshair = NSCursor(kind: 3)
   public static let resizeLeftRight = NSCursor(kind: 4)
   public static let resizeUpDown = NSCursor(kind: 5)
+  public static let columnResize = NSCursor(kind: 4)
+  public static let rowResize = NSCursor(kind: 5)
   public static let openHand = NSCursor(kind: 2)
   public static let closedHand = NSCursor(kind: 2)
 

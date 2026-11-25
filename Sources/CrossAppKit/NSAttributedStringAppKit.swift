@@ -233,6 +233,43 @@ public enum NSTextAlignment: Int, Sendable {
     }
   }
 
+  extension NSMutableAttributedString {
+    public func setAlignment(_ alignment: NSTextAlignment, range: NSRange) {}
+  }
+
+  public protocol NSTextInputClient: AnyObject {
+    func hasMarkedText() -> Bool
+  }
+
+  public enum NSAccessibilityPriorityLevel: Int, Sendable {
+    case low = 10
+    case medium = 50
+    case high = 90
+  }
+
+  public extension NSAccessibility {
+    struct Notification: RawRepresentable, Hashable, Sendable {
+      public let rawValue: String
+      public init(rawValue: String) { self.rawValue = rawValue }
+      public static let announcementRequested = Notification(rawValue: "AXAnnouncementRequested")
+      public static let focusedUIElementChanged = Notification(rawValue: "AXFocusedUIElementChanged")
+      public static let valueChanged = Notification(rawValue: "AXValueChanged")
+    }
+
+    struct NotificationUserInfoKey: RawRepresentable, Hashable, Sendable {
+      public let rawValue: String
+      public init(rawValue: String) { self.rawValue = rawValue }
+      public static let announcement = NotificationUserInfoKey(rawValue: "AXAnnouncementKey")
+      public static let priority = NotificationUserInfoKey(rawValue: "AXPriorityKey")
+    }
+
+    static func post(
+      element: Any,
+      notification: Notification,
+      userInfo: [NotificationUserInfoKey: Any]? = nil
+    ) {}
+  }
+
   extension NSString {
     public struct DrawingOptions: OptionSet, Sendable {
       public let rawValue: Int

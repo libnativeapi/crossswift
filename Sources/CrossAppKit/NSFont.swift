@@ -3,7 +3,20 @@ import Foundation
   import CAppKitWindows
 #endif
 
-open class NSFontDescriptor: NSObject, @unchecked Sendable {
+open class NSFontDescriptor: NSObject, NSSecureCoding, @unchecked Sendable {
+  public static var supportsSecureCoding: Bool { true }
+
+  public required convenience init?(coder: NSCoder) {
+    let family = (coder.decodeObject(forKey: "familyName") as? String) ?? "Segoe UI"
+    let size = CGFloat(coder.decodeDouble(forKey: "pointSize"))
+    self.init(familyName: family, pointSize: size > 0 ? size : 13)
+  }
+
+  open func encode(with coder: NSCoder) {
+    coder.encode(familyName as NSString, forKey: "familyName")
+    coder.encode(Double(pointSize), forKey: "pointSize")
+  }
+
   public struct SystemDesign: RawRepresentable, Equatable, Hashable, Sendable {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
@@ -165,6 +178,15 @@ open class NSFont: NSObject, @unchecked Sendable {
   public static var systemFontSize: CGFloat { 13 }
   public static var smallSystemFontSize: CGFloat { 11 }
   public static var labelFontSize: CGFloat { 10 }
+
+  public static func systemFontSize(for controlSize: NSControl.ControlSize) -> CGFloat {
+    switch controlSize {
+    case .regular: return 13
+    case .small: return 11
+    case .mini: return 9
+    case .large: return 15
+    }
+  }
 
   public static func systemFont(ofSize fontSize: CGFloat, weight: Weight = .regular) -> NSFont {
     let sz = fontSize > 0 ? fontSize : systemFontSize

@@ -446,6 +446,39 @@ open class NSView: NSResponder {
   }
 
   open var isFlipped: Bool { false }
+  open var canBecomeKeyView: Bool { acceptsFirstResponder }
+  public var constraints: [NSLayoutConstraint] = []
+  public func addConstraint(_ constraint: NSLayoutConstraint) {
+    constraints.append(constraint)
+  }
+  public func addConstraints(_ newConstraints: [NSLayoutConstraint]) {
+    constraints.append(contentsOf: newConstraints)
+  }
+  public func removeConstraint(_ constraint: NSLayoutConstraint) {
+    constraints.removeAll { $0 === constraint }
+  }
+  public func removeConstraints(_ toRemove: [NSLayoutConstraint]) {
+    let ids = Set(toRemove.map { ObjectIdentifier($0) })
+    constraints.removeAll { ids.contains(ObjectIdentifier($0)) }
+  }
+  public func isMousePoint(_ point: NSPoint, in rect: NSRect) -> Bool {
+    rect.contains(point)
+  }
+  public func bitmapImageRepForCachingDisplay(in rect: NSRect) -> NSBitmapImageRep? {
+    NSBitmapImageRep(
+      bitmapDataPlanes: nil,
+      pixelsWide: max(1, Int(rect.width)),
+      pixelsHigh: max(1, Int(rect.height)),
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+      hasAlpha: true,
+      isPlanar: false,
+      colorSpaceName: .deviceRGB,
+      bytesPerRow: 0,
+      bitsPerPixel: 0
+    )
+  }
+  public func cacheDisplay(in rect: NSRect, to bitmapImageRep: NSBitmapImageRep) {}
   open var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0) }
   open var intrinsicContentSize: NSSize { NSSize(width: Self.noIntrinsicMetric, height: Self.noIntrinsicMetric) }
   open var fittingSize: NSSize {
@@ -522,7 +555,16 @@ open class NSView: NSResponder {
 
   open func viewDidMoveToWindow() {}
   open func viewDidMoveToSuperview() {}
-  open func viewDidChangeFrameSize(from oldSize: NSSize) {}
+  open func viewDidChangeFrameSize(from oldSize: NSSize) {
+    if self === window?.contentView, ownedNativeView == nil, subviews.count == 1,
+      window?.toolbar?._pendingSelectedItemIdentifier == nil
+    {
+      let child = subviews[0]
+      if child.frame.size != frame.size || child.frame.origin != .zero {
+        child.frame = NSRect(origin: .zero, size: frame.size)
+      }
+    }
+  }
   open func viewDidChangeEffectiveAppearance() {
     for sub in subviews { sub.viewDidChangeEffectiveAppearance() }
   }
@@ -764,7 +806,10 @@ open class NSCell: NSObject {
   public var isSelectable: Bool = true
   public var wraps: Bool = false
   public var isScrollable: Bool = true
+  public var controlSize: NSControl.ControlSize = .regular
   public weak var controlView: NSView?
+  public weak var target: AnyObject?
+  public var action: Selector?
 
   public override init() {
     super.init()
@@ -773,6 +818,32 @@ open class NSCell: NSObject {
   public init(textCell string: String) {
     self.stringValue = string
     super.init()
+  }
+
+  open func performClick(_ sender: Any?) {}
+}
+
+open class NSButtonCell: NSCell {
+  public var title: String = ""
+  public var image: NSImage?
+}
+
+open class NSSearchFieldCell: NSTextFieldCell {
+  public var searchButtonCell: NSButtonCell? = NSButtonCell()
+  public var cancelButtonCell: NSButtonCell? = NSButtonCell()
+}
+
+open class NSSegmentedCell: NSCell {
+  public var trackingMode: NSSegmentedControl.SwitchTracking = .selectOne
+  public var segmentStyle: NSSegmentedControl.Style = .automatic
+  private var tags: [Int: Int] = [:]
+
+  public func setTag(_ tag: Int, forSegment segment: Int) {
+    tags[segment] = tag
+  }
+
+  public func tag(forSegment segment: Int) -> Int {
+    tags[segment] ?? 0
   }
 }
 
@@ -972,6 +1043,7 @@ open class NSTextField: NSControl {
   public static let textDidEndEditingNotification = Notification.Name("NSControlTextDidEndEditingNotification")
 
   public weak var delegate: (any NSTextFieldDelegate)?
+  public var alignment: NSTextAlignment = .natural
   public var placeholderString: String?
   public var placeholderAttributedString: NSAttributedString?
   public var isEditable: Bool = true
@@ -982,6 +1054,10 @@ open class NSTextField: NSControl {
   public var backgroundColor: NSColor?
   public var textColor: NSColor? = .labelColor
   public var maximumNumberOfLines: Int = 1
+
+  open override var intrinsicContentSize: NSSize {
+    NSSize(width: 120, height: 22)
+  }
 
   public convenience init(labelWithString stringValue: String) {
     self.init(frame: .zero)
@@ -1293,7 +1369,7 @@ open class NSTextView: NSText {
   }
 
   public override init(frame frameRect: NSRect) {
-    let storage = NSTextStorage()
+    let storage = NSTextStorage(string: "")
     let lm = NSLayoutManager()
     let container = NSTextContainer(size: NSSize(width: max(frameRect.width, 100), height: 1e7))
     storage.addLayoutManager(lm)
@@ -1315,7 +1391,7 @@ open class NSTextView: NSText {
     let resolvedContainer = container ?? NSTextContainer(size: NSSize(width: max(frameRect.width, 100), height: 1e7))
     let lm = resolvedContainer.layoutManager ?? NSLayoutManager()
     if resolvedContainer.layoutManager == nil { lm.addTextContainer(resolvedContainer) }
-    let storage = lm.textStorage ?? NSTextStorage()
+    let storage = lm.textStorage ?? NSTextStorage(string: "")
     if lm.textStorage == nil { storage.addLayoutManager(lm) }
     let contentStorage = NSTextContentStorage()
     contentStorage.textStorage = storage
@@ -1706,6 +1782,17 @@ open class NSTableView: NSControl {
 }
 
 open class NSSegmentedControl: NSControl {
+  public enum Style: Int, Sendable {
+    case automatic = 0
+    case rounded = 1
+    case texturedRounded = 2
+    case roundRect = 3
+    case texturedSquare = 4
+    case capsule = 5
+    case smallSquare = 6
+    case separated = 8
+  }
+
   public enum SwitchTracking: UInt, Sendable {
     case selectOne = 0
     case selectAny = 1
@@ -1720,9 +1807,19 @@ open class NSSegmentedControl: NSControl {
   }
   public var selectedSegment: Int = 0
   public var trackingMode: SwitchTracking = .selectOne
-  public var segmentStyle: Int = 0
+  public var segmentStyle: Style = .automatic
   private var labels: [String] = []
   private var widths: [CGFloat] = []
+
+  public override init(frame frameRect: NSRect) {
+    super.init(frame: frameRect)
+    self.cell = NSSegmentedCell()
+  }
+
+  public required init?(coder: NSCoder) {
+    super.init(coder: coder)
+    self.cell = NSSegmentedCell()
+  }
 
   public convenience init(labels: [String], trackingMode: SwitchTracking, target: AnyObject?, action: Selector?) {
     self.init(frame: .zero)

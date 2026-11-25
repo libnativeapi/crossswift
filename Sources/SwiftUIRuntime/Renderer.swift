@@ -44,7 +44,10 @@ import Foundation
   private var contentSize: Size
   private var hoveredNodeIDs: [NodeID] = []
   private var focused: NodeID?
-  private var dragging: (id: NodeID, isHighPriority: Bool, start: CGPoint, origin: CGPoint, simultaneousIDs: [NodeID])?
+  private var dragging: (
+    id: NodeID, isHighPriority: Bool, start: CGPoint, origin: CGPoint,
+    simultaneousIDs: [NodeID], minDistance: Double, active: Bool
+  )?
   private var scrollDrag: (id: NodeID, start: CGPoint, offset: Point, ratio: Double)?
   private var pointerDown: NodeID?
   private var pointerDownHighPriority = false
@@ -225,18 +228,25 @@ import Foundation
     )
     mounted = mountedTree
     tree = mountedTree
-    refreshMountedGeometryChildren(mountedTree)
-    layoutAnimations.seed(mountedTree)
-    refreshHoverActions()
-    lastCommands = commands ?? []
-    if let commands { backend.perform(commands) }
-    backend.didRender(mountedTree)
     LifecycleRegistry.shared.commit(root: rootPath)
     isRendering = false
 
     if needsRender {
+      if let commands, !commands.isEmpty {
+        lastCommands = commands
+        backend.perform(commands)
+      }
       renderIfNeeded()
+      if let settled = mounted {
+        layoutAnimations.seed(settled)
+      }
     } else {
+      refreshMountedGeometryChildren(mountedTree)
+      layoutAnimations.seed(mountedTree)
+      refreshHoverActions()
+      lastCommands = commands ?? []
+      if let commands { backend.perform(commands) }
+      backend.didRender(mountedTree)
       onDidFinishRenderPasses?()
     }
     StateRegistry.shared.finishHotReloadRestore()
@@ -680,11 +690,22 @@ import Foundation
 
       let simDrags = chain.filter { !$0.simultaneousDragActions.isEmpty }.map(\.id)
       if let highDrag = chain.reversed().first(where: { $0.highPriorityDragAction != nil }) {
-        dragging = (highDrag.id, true, point, CGPoint(x: highDrag.frame.minX, y: highDrag.frame.minY), simDrags)
+        let md = highDrag.highPriorityDragMinimumDistance
+        dragging = (
+          highDrag.id, true, point, CGPoint(x: highDrag.frame.minX, y: highDrag.frame.minY),
+          simDrags, md, md <= 0
+        )
       } else if let node = chain.first(where: { $0.dragAction != nil }) {
-        dragging = (node.id, false, point, CGPoint(x: node.frame.minX, y: node.frame.minY), simDrags)
+        let md = node.dragMinimumDistance
+        dragging = (
+          node.id, false, point, CGPoint(x: node.frame.minX, y: node.frame.minY),
+          simDrags, md, md <= 0
+        )
       } else if let firstSim = simDrags.first, let node = find(firstSim, in: tree) {
-        dragging = (node.id, false, point, CGPoint(x: node.frame.minX, y: node.frame.minY), simDrags)
+        dragging = (
+          node.id, false, point, CGPoint(x: node.frame.minX, y: node.frame.minY),
+          simDrags, 0, true
+        )
       }
       if let node = chain.first(where: { $0.props.focusable || $0.focusAction != nil }) {
         focused = node.id
@@ -728,34 +749,50 @@ import Foundation
         return true
       }
     }
-    if event == 1 || event == 2 || event == 3, let drag = dragging {
-      let location = CGPoint(x: point.x - drag.origin.x, y: point.y - drag.origin.y)
-      let start = CGPoint(x: drag.start.x - drag.origin.x, y: drag.start.y - drag.origin.y)
-      let dragVal = DragGesture.Value(
-        location: location, startLocation: start,
-        translation: CGSize(width: point.x - drag.start.x, height: point.y - drag.start.y),
-        time: Date())
-      if let node = find(drag.id, in: tree) {
-        if drag.isHighPriority {
-          node.highPriorityDragAction?(dragVal, event == 3)
-        } else {
-          node.dragAction?(dragVal, event == 3)
+    if event == 1 || event == 2 || event == 3, var drag = dragging {
+      if !drag.active {
+        if event == 1 {
+          let dist = hypot(Double(point.x - drag.start.x), Double(point.y - drag.start.y))
+          if dist >= drag.minDistance {
+            drag.active = true
+            dragging = drag
+            pointerDown = nil
+            pointerDownHighPriority = false
+            pointerDownSimultaneous.removeAll()
+          }
+        } else if event == 3 {
+          dragging = nil
         }
       }
-      for simID in drag.simultaneousIDs {
-        if let simNode = find(simID, in: tree) {
-          for handler in simNode.simultaneousDragActions {
-            handler(dragVal, event == 3)
+      if drag.active {
+        let location = CGPoint(x: point.x - drag.origin.x, y: point.y - drag.origin.y)
+        let start = CGPoint(x: drag.start.x - drag.origin.x, y: drag.start.y - drag.origin.y)
+        let dragVal = DragGesture.Value(
+          location: location, startLocation: start,
+          translation: CGSize(width: point.x - drag.start.x, height: point.y - drag.start.y),
+          time: Date())
+        if let node = find(drag.id, in: tree) {
+          if drag.isHighPriority {
+            node.highPriorityDragAction?(dragVal, event == 3)
+          } else {
+            node.dragAction?(dragVal, event == 3)
           }
         }
+        for simID in drag.simultaneousIDs {
+          if let simNode = find(simID, in: tree) {
+            for handler in simNode.simultaneousDragActions {
+              handler(dragVal, event == 3)
+            }
+          }
+        }
+        if event == 3 {
+          dragging = nil
+          pointerDown = nil
+          pointerDownHighPriority = false
+          pointerDownSimultaneous.removeAll()
+        }
+        return true
       }
-      if event == 3 {
-        dragging = nil
-        pointerDown = nil
-        pointerDownHighPriority = false
-        pointerDownSimultaneous.removeAll()
-      }
-      return true
     }
     if event == 3 {
       let simIDs = pointerDownSimultaneous

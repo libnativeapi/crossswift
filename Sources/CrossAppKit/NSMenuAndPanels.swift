@@ -32,6 +32,8 @@ open class NSMenuItem: NSObject {
   public var keyEquivalent: String {
     didSet { syncNativeAccelerator() }
   }
+  public var userKeyEquivalent: String { keyEquivalent }
+  public var allowsAutomaticKeyEquivalentLocalization: Bool = true
   public var keyEquivalentModifierMask: NSEvent.ModifierFlags = [.command] {
     didSet { syncNativeAccelerator() }
   }
@@ -182,6 +184,8 @@ open class NSMenuItem: NSObject {
 
 @MainActor
 open class NSMenu: NSObject {
+  public static let didBeginTrackingNotification = Notification.Name("NSMenuDidBeginTrackingNotification")
+  public static let didEndTrackingNotification = Notification.Name("NSMenuDidEndTrackingNotification")
   public var title: String
   public weak var delegate: (any NSMenuDelegate)?
   public var autoenablesItems: Bool = true
@@ -308,6 +312,7 @@ open class NSMenu: NSObject {
 
 open class NSStatusBarButton: NSButton {
   public var appearsDisabled: Bool = false
+  public var isHighlighted: Bool = false
   @MainActor internal weak var ownerStatusItem: NSStatusItem?
 
   private func _syncStatusItemAppearanceIfNeeded() {
@@ -338,12 +343,20 @@ open class NSStatusBarButton: NSButton {
 
 @MainActor
 open class NSStatusItem: NSObject {
+  public struct Behavior: OptionSet, Sendable {
+    public let rawValue: UInt
+    public init(rawValue: UInt) { self.rawValue = rawValue }
+    public static let removalAllowed = Behavior(rawValue: 1 << 1)
+    public static let terminationOnRemoval = Behavior(rawValue: 1 << 2)
+  }
+
   public static let variableLength: CGFloat = -1
   public static let squareLength: CGFloat = -2
 
   public let button: NSStatusBarButton? = NSStatusBarButton(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
   public var length: CGFloat
   public var autosaveName: String?
+  public var behavior: Behavior = []
   public var onLeftClick: (() -> Void)? {
     didSet {
       #if !os(macOS)
@@ -705,6 +718,14 @@ open class NSAlert: NSObject {
   public func addButton(withTitle title: String) -> NSButton {
     buttonTitles.append(title)
     return NSButton(title: title, target: nil, action: nil)
+  }
+
+  public func beginSheetModal(
+    for sheetWindow: NSWindow,
+    completionHandler handler: ((NSModalResponse) -> Void)? = nil
+  ) {
+    let response = runModal()
+    handler?(response)
   }
 
   public func runModal() -> NSModalResponse {

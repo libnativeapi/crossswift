@@ -2,6 +2,27 @@ import Foundation
 
 /// Environment writes are value copies scoped to evaluating a subtree.
 
+public enum ScenePhase: Int, Comparable, Hashable, Sendable {
+  case background = 0
+  case inactive = 1
+  case active = 2
+
+  public static func < (lhs: ScenePhase, rhs: ScenePhase) -> Bool {
+    lhs.rawValue < rhs.rawValue
+  }
+}
+
+private struct _ScenePhaseKey: EnvironmentKey {
+  static let defaultValue: ScenePhase = .active
+}
+
+extension EnvironmentValues {
+  public var scenePhase: ScenePhase {
+    get { self[_ScenePhaseKey.self] }
+    set { self[_ScenePhaseKey.self] = newValue }
+  }
+}
+
 public protocol EnvironmentKey {
   associatedtype Value
   static var defaultValue: Value { get }

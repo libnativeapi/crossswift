@@ -164,11 +164,72 @@ extension RunLoop: Scheduler {
   }
 }
 
+// MARK: - Subscription & Subscriber Protocols
+
+public protocol Subscription: Cancellable {
+  func request(_ demand: Subscribers.Demand)
+}
+
+public protocol Subscriber<Input, Failure> {
+  associatedtype Input
+  associatedtype Failure: Error
+
+  func receive(subscription: any Subscription)
+  func receive(_ input: Input) -> Subscribers.Demand
+  func receive(completion: Subscribers.Completion<Failure>)
+}
+
+private final class _ClosureSubscription: Subscription {
+  private var cancellable: AnyCancellable?
+  init(_ cancellable: AnyCancellable) { self.cancellable = cancellable }
+  func request(_ demand: Subscribers.Demand) {}
+  func cancel() {
+    cancellable?.cancel()
+    cancellable = nil
+  }
+}
+
+private final class _SinkSubscriber<Input, Failure: Error>: Subscriber {
+  private let receiveCompletion: (Subscribers.Completion<Failure>) -> Void
+  private let receiveValue: (Input) -> Void
+  private var subscription: (any Subscription)?
+
+  init(
+    receiveCompletion: @escaping (Subscribers.Completion<Failure>) -> Void,
+    receiveValue: @escaping (Input) -> Void
+  ) {
+    self.receiveCompletion = receiveCompletion
+    self.receiveValue = receiveValue
+  }
+
+  func receive(subscription: any Subscription) {
+    self.subscription = subscription
+    subscription.request(.unlimited)
+  }
+
+  func receive(_ input: Input) -> Subscribers.Demand {
+    receiveValue(input)
+    return .unlimited
+  }
+
+  func receive(completion: Subscribers.Completion<Failure>) {
+    receiveCompletion(completion)
+    subscription = nil
+  }
+
+  func cancel() {
+    subscription?.cancel()
+    subscription = nil
+  }
+}
+
 // MARK: - Publisher Protocol
 
 public protocol Publisher<Output, Failure> {
   associatedtype Output
   associatedtype Failure: Error
+
+  func receive<S: Subscriber>(subscriber: S) where S.Input == Output, S.Failure == Failure
 
   func sink(
     receiveCompletion: @escaping (Subscribers.Completion<Failure>) -> Void,
@@ -177,6 +238,26 @@ public protocol Publisher<Output, Failure> {
 }
 
 extension Publisher {
+  public func receive<S: Subscriber>(subscriber: S) where S.Input == Output, S.Failure == Failure {
+    let cancellable = sink(
+      receiveCompletion: { subscriber.receive(completion: $0) },
+      receiveValue: { _ = subscriber.receive($0) }
+    )
+    subscriber.receive(subscription: _ClosureSubscription(cancellable))
+  }
+
+  public func sink(
+    receiveCompletion: @escaping (Subscribers.Completion<Failure>) -> Void,
+    receiveValue: @escaping (Output) -> Void
+  ) -> AnyCancellable {
+    let sub = _SinkSubscriber<Output, Failure>(
+      receiveCompletion: receiveCompletion,
+      receiveValue: receiveValue
+    )
+    receive(subscriber: sub)
+    return AnyCancellable { sub.cancel() }
+  }
+
   public func sink(receiveValue: @escaping (Output) -> Void) -> AnyCancellable {
     sink(receiveCompletion: { _ in }, receiveValue: receiveValue)
   }

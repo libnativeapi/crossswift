@@ -390,6 +390,17 @@ public struct MenuBarExtra<Label: View, Content: View>: Scene, _MenuBarExtraScen
     self.labelBuilder = { Image(systemName: systemImage) }
   }
 
+  public init(
+    _ titleKey: String,
+    isInserted: Binding<Bool>,
+    @ViewBuilder content: @escaping () -> Content
+  ) where Label == Text {
+    self._title = titleKey
+    self._isInserted = isInserted
+    self.contentBuilder = content
+    self.labelBuilder = { Text(titleKey) }
+  }
+
   public var body: EmptyScene { EmptyScene() }
 
   public func menuBarExtraStyle(_ style: MenuBarExtraStyle) -> Self {

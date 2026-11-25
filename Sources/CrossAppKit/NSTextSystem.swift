@@ -120,10 +120,6 @@ open class NSTextStorage: NSMutableAttributedString {
     public override init() {
       super.init()
     }
-  #else
-    public convenience init() {
-      self.init(string: "")
-    }
   #endif
 
   public override init(string str: String) {

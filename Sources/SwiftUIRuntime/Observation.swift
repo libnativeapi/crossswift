@@ -136,7 +136,15 @@ extension ObservableObject {
     Binding(get: { wrappedValue[keyPath: key] }, set: { wrappedValue[keyPath: key] = $0 })
   }
 }
-@propertyWrapper public struct StateObject<Object: ObservableObject>: _StateProperty {
+public protocol DynamicProperty {
+  mutating func update()
+}
+
+extension DynamicProperty {
+  public mutating func update() {}
+}
+
+@propertyWrapper public struct StateObject<Object: ObservableObject>: _StateProperty, DynamicProperty {
   private final class Storage {
     let make: () -> Object
     var value: Object?

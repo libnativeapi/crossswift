@@ -12,6 +12,45 @@ private final class DynamicColorProvider: @unchecked Sendable {
 }
 
 public struct Color: Hashable, Sendable {
+  public struct Resolved: Equatable, Hashable, Sendable, Codable {
+    public var red: Float
+    public var green: Float
+    public var blue: Float
+    public var opacity: Float
+
+    public init(
+      colorSpace: RGBColorSpace = .sRGB,
+      red: Float,
+      green: Float,
+      blue: Float,
+      opacity: Float = 1
+    ) {
+      self.red = red
+      self.green = green
+      self.blue = blue
+      self.opacity = opacity
+    }
+  }
+
+  public init(_ resolved: Color.Resolved) {
+    self.init(
+      red: Double(resolved.red),
+      green: Double(resolved.green),
+      blue: Double(resolved.blue),
+      opacity: Double(resolved.opacity)
+    )
+  }
+
+  public func resolve(in environment: EnvironmentValues) -> Color.Resolved {
+    let r = resolved(in: environment.colorScheme)
+    return Color.Resolved(
+      red: Float(r.red),
+      green: Float(r.green),
+      blue: Float(r.blue),
+      opacity: Float(r.opacity)
+    )
+  }
+
   public var red: Double
   public var green: Double
   public var blue: Double

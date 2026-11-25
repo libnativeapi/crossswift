@@ -20,7 +20,7 @@ public typealias CAMediaTimingFunctionName = CrossAppKit.CAMediaTimingFunctionNa
 public typealias CACornerMask = CrossAppKit.CACornerMask
 public typealias CALayerCornerCurve = CrossAppKit.CALayerCornerCurve
 
-public typealias NSLayoutConstraint = CrossAppKit.NSLayoutConstraint
+@_exported import class CrossAppKit.NSLayoutConstraint
 public typealias NSLayoutAnchor = CrossAppKit.NSLayoutAnchor
 public typealias NSLayoutXAxisAnchor = CrossAppKit.NSLayoutXAxisAnchor
 public typealias NSLayoutYAxisAnchor = CrossAppKit.NSLayoutYAxisAnchor

@@ -65,6 +65,13 @@ public final class XcodeProjectLoader {
     "FoundationModels",
     "NaturalLanguage",
     "Translation",
+    "Cocoa",
+    "Sparkle",
+    "Vision",
+    "StoreKit",
+    "UserNotifications",
+    "AppIntents",
+    "SwiftData",
     "Combine",
     "CoreGraphics",
     "Carbon",
@@ -355,9 +362,9 @@ public final class XcodeProjectLoader {
         pkgNameLower == "sparkle" || dep.productName == "Sparkle"
 
       if isDarwinOnlyLocal
+        || looksLikeKnownDarwinBinaryPkg
         || (isOnlyConditionallyImported
-          && (looksLikeKnownDarwinBinaryPkg
-            || importAnalysis.hasDarwinGuard(for: dep.productName)))
+          && importAnalysis.hasDarwinGuard(for: dep.productName))
       {
         skippedDarwinProducts.append(dep.productName)
         continue

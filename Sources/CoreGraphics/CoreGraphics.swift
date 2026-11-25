@@ -2,6 +2,7 @@
 @_exported import CoreFoundation
 #if !os(macOS)
   import Carbon
+  @_exported import typealias Carbon.UniChar
 #endif
 #if os(Windows)
   import CAppKitWindows
@@ -10,7 +11,6 @@
 #if !os(macOS)
   public typealias CGDirectDisplayID = UInt32
   public typealias CGKeyCode = UInt16
-  public typealias UniChar = UInt16
 
   extension CGRect {
     public func equalTo(_ rect2: CGRect) -> Bool {
@@ -30,8 +30,9 @@
     public static let sRGB: NSString = "kCGColorSpaceSRGB"
     public static let extendedSRGB: NSString = "kCGColorSpaceExtendedSRGB"
     public static let displayP3: NSString = "kCGColorSpaceDisplayP3"
-    public init?(name: NSString) {}
-    public init?(name: String) {}
+    public let name: NSString?
+    public init?(name: NSString) { self.name = name }
+    public init?(name: String) { self.name = name as NSString }
   }
 
   public final class CGColor: @unchecked Sendable {
@@ -61,6 +62,32 @@
       self.alpha = alpha
     }
 
+    public init?(colorSpace space: CGColorSpace, components: [CGFloat]) {
+      guard !components.isEmpty else { return nil }
+      if components.count >= 4 {
+        self.red = components[0]
+        self.green = components[1]
+        self.blue = components[2]
+        self.alpha = components[3]
+      } else if components.count >= 3 {
+        self.red = components[0]
+        self.green = components[1]
+        self.blue = components[2]
+        self.alpha = 1
+      } else if components.count == 2 {
+        self.red = components[0]
+        self.green = components[0]
+        self.blue = components[0]
+        self.alpha = components[1]
+      } else {
+        self.red = components[0]
+        self.green = components[0]
+        self.blue = components[0]
+        self.alpha = 1
+      }
+    }
+
+    public var colorSpace: CGColorSpace? { CGColorSpace(name: CGColorSpace.sRGB) }
     public var components: [CGFloat]? { [red, green, blue, alpha] }
     public var numberOfComponents: Int { 4 }
 
@@ -245,11 +272,32 @@
     case hidSystemState = 1
   }
 
+  public struct CGEventFilterMask: OptionSet, Sendable {
+    public let rawValue: UInt32
+    public init(rawValue: UInt32) { self.rawValue = rawValue }
+    public static let permitLocalMouseEvents = CGEventFilterMask(rawValue: 0x00000001)
+    public static let permitLocalKeyboardEvents = CGEventFilterMask(rawValue: 0x00000002)
+    public static let permitSystemDefinedEvents = CGEventFilterMask(rawValue: 0x00000004)
+    public static let permitAllEvents: CGEventFilterMask = [
+      .permitLocalMouseEvents, .permitLocalKeyboardEvents, .permitSystemDefinedEvents,
+    ]
+  }
+
+  public enum CGEventSuppressionState: UInt32, Sendable {
+    case eventSuppressionStateSuppressionInterval = 0
+    case eventSuppressionStateRemoteMouseDrag = 1
+  }
+
   public final class CGEventSource: @unchecked Sendable {
     public let stateID: CGEventSourceStateID
+    public var localEventsSuppressionInterval: CFTimeInterval = 0.25
     public init?(stateID: CGEventSourceStateID) {
       self.stateID = stateID
     }
+    public func setLocalEventsFilterDuringSuppressionState(
+      _ filter: CGEventFilterMask,
+      state: CGEventSuppressionState
+    ) {}
     public static func secondsSinceLastEventType(
       _ stateID: CGEventSourceStateID,
       eventType: CGEventType

@@ -6,10 +6,10 @@ import Foundation
 public struct ViewDimensions {
   public let width: CGFloat, height: CGFloat
   public subscript(_ alignment: HorizontalAlignment) -> CGFloat {
-    alignment == .leading ? 0 : alignment == .trailing ? width : width / 2
+    alignment.defaultValue(in: self)
   }
   public subscript(_ alignment: VerticalAlignment) -> CGFloat {
-    alignment == .top ? 0 : alignment == .bottom ? height : height / 2
+    alignment.defaultValue(in: self)
   }
 }
 public enum LayoutDirection { case leftToRight, rightToLeft }
@@ -309,10 +309,10 @@ extension View {
   }
   public func alignmentGuide(
     _ guide: HorizontalAlignment, computeValue: @escaping (ViewDimensions) -> CGFloat
-  ) -> some View { TransformView(content: self) { $0.horizontalGuide = computeValue } }
+  ) -> some View { TransformView(content: self) { $0.horizontalGuides[guide] = computeValue } }
   public func alignmentGuide(
     _ guide: VerticalAlignment, computeValue: @escaping (ViewDimensions) -> CGFloat
-  ) -> some View { TransformView(content: self) { $0.verticalGuide = computeValue } }
+  ) -> some View { TransformView(content: self) { $0.verticalGuides[guide] = computeValue } }
   public func coordinateSpace<Name: Hashable>(name: Name) -> some View {
     TransformView(content: self) { $0.props.coordinateSpace = AnyHashable(name) }
   }
@@ -355,6 +355,22 @@ extension Animation {
     return animation
   }
 }
+public enum AnimationCompletionCriteria: Sendable, Hashable {
+  case logicallyComplete
+  case removed
+}
+
+public func withAnimation<Result>(
+  _ animation: Animation? = .default,
+  completionCriteria: AnimationCompletionCriteria = .logicallyComplete,
+  _ body: () throws -> Result,
+  completion: @escaping () -> Void
+) rethrows -> Result {
+  let result = try withAnimation(animation, body)
+  completion()
+  return result
+}
+
 public func withAnimation<Result>(_ animation: Animation? = .default, _ body: () throws -> Result)
   rethrows -> Result
 {

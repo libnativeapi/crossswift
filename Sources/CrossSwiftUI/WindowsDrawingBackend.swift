@@ -378,6 +378,11 @@
       sui_surface_flush_paint(surface)
     }
 
+    public func showOnTop(deferPaint: Bool = false) {
+      guard let surface else { return }
+      sui_surface_show_on_top(surface, deferPaint ? 1 : 0)
+    }
+
     public func beginPendingResize(width: Double, height: Double) {
       guard let surface else { return }
       sui_surface_begin_pending_resize(surface, width, height)
@@ -1390,6 +1395,29 @@
           surface, r.minX, r.minY, r.width, r.height, p.cornerRadius,
           (p.background ?? .clear).opacity(localAlpha).argb, p.borderColor.opacity(localAlpha).argb,
           p.borderWidth)
+      }
+      if node.kind == .hostedView,
+        let adapter = node.hostedViewAdapter as? any _HostedViewBackendBridge
+      {
+        if let mat = adapter.materialSurface() {
+          sui_surface_shape(
+            surface, r.minX, r.minY, r.width, r.height, mat.cornerRadius,
+            mat.fillColor.opacity(localAlpha).argb, mat.borderColor.opacity(localAlpha).argb, 1.0)
+        } else if let entry = hostedViews[node.id], let tf = adapter.textFieldDisplay(for: entry.mount) {
+          sui_surface_shape(
+            surface, r.minX, r.minY, r.width, r.height, 5.0,
+            tf.fillColor.opacity(localAlpha).argb, tf.borderColor.opacity(localAlpha).argb, 1.0)
+          if !tf.text.isEmpty {
+            let font = SwiftUIRuntime.Font.system(size: 12)
+            let m = Self.measureText(tf.text, font: font)
+            let tx = r.minX + max(6, (r.width - m.width) / 2)
+            let ty = r.minY + max(0, (r.height - m.height) / 2)
+            sui_surface_text(
+              surface, tx, ty, max(0, r.width - 12), max(r.height, m.height + 2),
+              tf.text, font.family, Double(font.size), font.weight.value, 0,
+              tf.textColor.opacity(localAlpha).argb)
+          }
+        }
       }
       if node.kind == .gradient, let gradient = p.gradient {
         let colors = gradient.colors.map { $0.opacity(localAlpha).argb }

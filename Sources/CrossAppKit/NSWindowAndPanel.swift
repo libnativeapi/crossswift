@@ -411,6 +411,7 @@ open class NSAnimationContext: NSObject {
   public var duration: TimeInterval = 0.2
   public var timingFunction: CAMediaTimingFunction?
   public var allowsImplicitAnimation: Bool = false
+  public var completionHandler: (() -> Void)?
 
   public static func runAnimationGroup(
     _ changes: (NSAnimationContext) -> Void,
@@ -418,6 +419,7 @@ open class NSAnimationContext: NSObject {
   ) {
     let ctx = NSAnimationContext()
     changes(ctx)
+    ctx.completionHandler?()
     completionHandler?()
   }
 
@@ -426,6 +428,7 @@ open class NSAnimationContext: NSObject {
 }
 
 open class NSWindow: NSResponder {
+  public typealias FrameAutosaveName = String
   public struct StyleMask: OptionSet, Sendable {
     public let rawValue: UInt
     public init(rawValue: UInt) { self.rawValue = rawValue }
@@ -475,6 +478,7 @@ open class NSWindow: NSResponder {
     public static let fullScreenPrimary = CollectionBehavior(rawValue: 1 << 7)
     public static let fullScreenAuxiliary = CollectionBehavior(rawValue: 1 << 8)
     public static let fullScreenNone = CollectionBehavior(rawValue: 1 << 9)
+    public static let auxiliary = CollectionBehavior(rawValue: 1 << 17)
   }
 
   public enum TitleVisibility: Int, Sendable {
@@ -567,7 +571,11 @@ open class NSWindow: NSResponder {
   public var titlebarAppearsTransparent: Bool = false
   public var toolbarStyle: ToolbarStyle = .automatic
   public var titlebarSeparatorStyle: TitlebarSeparatorStyle = .automatic
-  public var toolbar: NSToolbar?
+  public var toolbar: NSToolbar? {
+    didSet {
+      toolbar?.populateFromDelegateIfNeeded()
+    }
+  }
   public var animationBehavior: AnimationBehavior = .default
   public var isOpaque: Bool = true {
     didSet { syncBackgroundToNative() }
@@ -600,7 +608,8 @@ open class NSWindow: NSResponder {
     }
   }
   public var acceptsMouseMovedEvents: Bool = true
-  public var isMovable: Bool = true {
+  public var className: String { String(describing: type(of: self)) }
+  open var isMovable: Bool = true {
     didSet {
       #if !os(macOS)
         nativeWindow?.setMovable(isMovable)
@@ -845,23 +854,33 @@ open class NSWindow: NSResponder {
     #endif
   }
 
+  public static let _toolbarBarHeight: CGFloat = 61 // 60pt toolbar bar + 1pt divider
+
+  public var _visibleToolbarHeight: CGFloat {
+    guard let tb = toolbar, tb.isVisible else { return 0 }
+    tb.populateFromDelegateIfNeeded()
+    return tb.items.isEmpty ? 0 : Self._toolbarBarHeight
+  }
+
   open func frameRect(forContentRect contentRect: NSRect) -> NSRect {
     let insets = currentFrameInsets()
+    let toolbarH = _visibleToolbarHeight
     return NSRect(
       x: contentRect.origin.x - insets.left,
       y: contentRect.origin.y - insets.bottom,
       width: contentRect.width + insets.left + insets.right,
-      height: contentRect.height + insets.top + insets.bottom
+      height: contentRect.height + insets.top + insets.bottom + toolbarH
     )
   }
 
   open func contentRect(forFrameRect frameRect: NSRect) -> NSRect {
     let insets = currentFrameInsets()
+    let toolbarH = _visibleToolbarHeight
     return NSRect(
       x: frameRect.origin.x + insets.left,
       y: frameRect.origin.y + insets.bottom,
       width: max(0, frameRect.width - insets.left - insets.right),
-      height: max(0, frameRect.height - insets.top - insets.bottom)
+      height: max(0, frameRect.height - insets.top - insets.bottom - toolbarH)
     )
   }
 
@@ -888,8 +907,12 @@ open class NSWindow: NSResponder {
           )
         }
       }
-      let content = contentRect(forFrameRect: storedFrame)
-      return NSRect(x: insets.left, y: insets.bottom, width: content.width, height: content.height)
+      return NSRect(
+        x: insets.left,
+        y: insets.bottom,
+        width: max(0, storedFrame.width - insets.left - insets.right),
+        height: max(0, storedFrame.height - insets.top - insets.bottom)
+      )
     #else
       #if !os(macOS)
         if let nw = nativeWindow {
@@ -962,8 +985,36 @@ open class NSWindow: NSResponder {
     )
   }
 
+  #if !os(macOS)
+    nonisolated(unsafe) private static var pendingTransitionBoundsByWindow: [ObjectIdentifier: NativeAPI.Rectangle] = [:]
+
+    public final var _hasPendingTransitionFrame: Bool {
+      Self.pendingTransitionBoundsByWindow[ObjectIdentifier(self)] != nil
+    }
+
+    public final func _commitPendingTransitionFrameIfNeeded() {
+      guard let rect = Self.pendingTransitionBoundsByWindow.removeValue(forKey: ObjectIdentifier(self)) else {
+        return
+      }
+      hasPendingNativeBounds = false
+      let prevSuppress = suppressMoveCallbacks
+      let prevCommitting = isCommittingNativeBounds
+      suppressMoveCallbacks = true
+      isCommittingNativeBounds = true
+      defer {
+        suppressMoveCallbacks = prevSuppress
+        isCommittingNativeBounds = prevCommitting
+      }
+      nativeWindow?.setBounds(rect)
+    }
+  #else
+    public final var _hasPendingTransitionFrame: Bool { false }
+    public final func _commitPendingTransitionFrameIfNeeded() {}
+  #endif
+
   deinit {
     #if !os(macOS)
+      Self.pendingTransitionBoundsByWindow.removeValue(forKey: ObjectIdentifier(self))
       if let id = nativeListenerId {
         _ = nativeWindow?.removeListener(id)
       }
@@ -1337,6 +1388,20 @@ open class NSWindow: NSResponder {
         }
         hasPendingNativeBounds = false
       }
+      if !flag && isVisible && toolbar?._pendingSelectedItemIdentifier != nil, let nw = nativeWindow {
+        let top = CrossAppKitCoordinates.rectToNativeTopLeft(frameRect)
+        let r = NativeAPI.Rectangle(x: top.x, y: top.y, width: max(1, top.width), height: max(1, top.height))
+        let insets = currentFrameInsets()
+        let targetClientSize = NSSize(
+          width: max(1, frameRect.width - insets.left - insets.right),
+          height: max(1, frameRect.height - insets.top - insets.bottom)
+        )
+        hasPendingNativeBounds = true
+        pendingContentSize = targetClientSize
+        Self.pendingTransitionBoundsByWindow[ObjectIdentifier(self)] = r
+        contentView?.frame = NSRect(origin: .zero, size: targetClientSize)
+        return
+      }
     #endif
     suppressMoveCallbacks = true
     defer { suppressMoveCallbacks = false }
@@ -1373,14 +1438,16 @@ open class NSWindow: NSResponder {
         return
       }
     #endif
+    let toolbarH = _visibleToolbarHeight
+    let clientSize = NSSize(width: size.width, height: size.height + toolbarH)
     let frameSize = frameRect(forContentRect: NSRect(origin: .zero, size: size)).size
     storedFrame.size = frameSize
     #if CROSS_SWIFTUI_HARMONY
       HarmonyWindowBridge.syncFrame(for: self)
     #elseif !os(macOS)
-      nativeWindow?.setContentSize(NativeAPI.Size(width: Double(max(1, size.width)), height: Double(max(1, size.height))))
+      nativeWindow?.setContentSize(NativeAPI.Size(width: Double(max(1, clientSize.width)), height: Double(max(1, clientSize.height))))
     #endif
-    contentView?.frame = NSRect(origin: .zero, size: size)
+    contentView?.frame = NSRect(origin: .zero, size: clientSize)
   }
 
   open func center() {
@@ -1898,26 +1965,38 @@ open class NSWindow: NSResponder {
     0
   }
 
-  @discardableResult
-  public func setFrameUsingName(_ name: String) -> Bool {
+  private final func applySavedFrame(named name: String) -> Bool {
     let key = "NSWindow Frame \(name)"
     guard let str = UserDefaults.standard.string(forKey: key) else { return false }
     let parts = str.split(separator: " ").compactMap { Double($0) }
     guard parts.count == 4 && parts[2] > 50 && parts[3] > 50 else { return false }
-    setFrame(NSRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3]), display: false)
+    let targetRect: NSRect
+    if styleMask.contains(.resizable) {
+      targetRect = NSRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
+    } else {
+      // AppKit non-resizable windows restore position (top-left anchored) and preserve current size.
+      let savedTop = parts[1] + parts[3]
+      let currentSize = storedFrame.size
+      targetRect = NSRect(
+        x: parts[0],
+        y: savedTop - currentSize.height,
+        width: currentSize.width,
+        height: currentSize.height
+      )
+    }
+    setFrame(targetRect, display: false)
     return true
+  }
+
+  @discardableResult
+  public func setFrameUsingName(_ name: String) -> Bool {
+    applySavedFrame(named: name)
   }
 
   @discardableResult
   public func setFrameAutosaveName(_ name: String) -> Bool {
     autosaveName = name
-    let key = "NSWindow Frame \(name)"
-    if let str = UserDefaults.standard.string(forKey: key) {
-      let parts = str.split(separator: " ").compactMap { Double($0) }
-      if parts.count == 4 && parts[2] > 50 && parts[3] > 50 {
-        setFrame(NSRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3]), display: false)
-      }
-    }
+    _ = applySavedFrame(named: name)
     return true
   }
 
@@ -1962,7 +2041,7 @@ open class NSWindowController: NSResponder {
     super.init()
   }
 
-  public override init?(coder: NSCoder) {
+  public required override init?(coder: NSCoder) {
     super.init(coder: coder)
   }
 
@@ -1989,6 +2068,19 @@ open class NSWindowController: NSResponder {
 }
 
 open class NSViewController: NSResponder {
+  public struct TransitionOptions: OptionSet, Sendable {
+    public let rawValue: UInt
+    public init(rawValue: UInt) { self.rawValue = rawValue }
+    public static let crossfade = TransitionOptions(rawValue: 0x1)
+    public static let slideUp = TransitionOptions(rawValue: 0x10)
+    public static let slideDown = TransitionOptions(rawValue: 0x20)
+    public static let slideLeft = TransitionOptions(rawValue: 0x40)
+    public static let slideRight = TransitionOptions(rawValue: 0x80)
+    public static let slideForward = TransitionOptions(rawValue: 0x140)
+    public static let slideBackward = TransitionOptions(rawValue: 0x180)
+    public static let allowUserInteraction = TransitionOptions(rawValue: 0x1000)
+  }
+
   private var _view: NSView?
   open var view: NSView {
     get {
@@ -2003,7 +2095,7 @@ open class NSViewController: NSResponder {
   }
 
   public var title: String?
-  public private(set) var children: [NSViewController] = []
+  public var children: [NSViewController] = []
 
   public init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
     super.init()
@@ -2032,6 +2124,20 @@ open class NSViewController: NSResponder {
   }
 
   public func removeFromParent() {}
+
+  open func transition(
+    from fromViewController: NSViewController,
+    to toViewController: NSViewController,
+    options: TransitionOptions = [],
+    completionHandler completion: (() -> Void)? = nil
+  ) {
+    toViewController.view.frame = view.bounds
+    view.addSubview(toViewController.view)
+    view.window?._commitPendingTransitionFrameIfNeeded()
+    fromViewController.view.removeFromSuperview()
+    toViewController.view.flushNativeWindowPaint()
+    completion?()
+  }
 }
 
 @MainActor
@@ -2092,11 +2198,29 @@ open class NSSplitViewController: NSViewController {
   }
 }
 
-@MainActor
-public protocol NSToolbarDelegate: NSObjectProtocol {}
+public protocol NSToolbarDelegate: NSObjectProtocol {
+  func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier]
+  func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier]
+  func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier]
+  func toolbar(
+    _ toolbar: NSToolbar,
+    itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+    willBeInsertedIntoToolbar flag: Bool
+  ) -> NSToolbarItem?
+}
 
-@MainActor
-open class NSToolbarItem: NSObject {
+extension NSToolbarDelegate {
+  public func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [] }
+  public func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [] }
+  public func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [] }
+  public func toolbar(
+    _ toolbar: NSToolbar,
+    itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+    willBeInsertedIntoToolbar flag: Bool
+  ) -> NSToolbarItem? { nil }
+}
+
+open class NSToolbarItem: NSObject, @unchecked Sendable {
   public struct Identifier: RawRepresentable, Equatable, Hashable, Sendable {
     public let rawValue: String
     public init(_ rawValue: String) { self.rawValue = rawValue }
@@ -2114,13 +2238,23 @@ open class NSToolbarItem: NSObject {
   public var image: NSImage?
   public weak var target: AnyObject?
   public var action: Selector?
+  public var actionHandler: ((NSToolbarItem) -> Void)?
   public var isBordered: Bool = false
+
+  public func performAction() {
+    actionHandler?(self)
+  }
   public var isNavigational: Bool = false
+  public var menuFormRepresentation: NSMenuItem?
 
   public init(itemIdentifier: Identifier) {
     self.itemIdentifier = itemIdentifier
     super.init()
   }
+}
+
+open class NSToolbarItemGroup: NSToolbarItem, @unchecked Sendable {
+  public var subitems: [NSToolbarItem] = []
 }
 
 @MainActor
@@ -2132,17 +2266,26 @@ extension NSSearchFieldDelegate {
   public func searchFieldDidEndSearching(_ sender: NSSearchField) {}
 }
 
-open class NSSearchField: NSTextField {}
+open class NSSearchField: NSTextField {
+  public override init(frame frameRect: NSRect) {
+    super.init(frame: frameRect)
+    self.cell = NSSearchFieldCell()
+  }
 
-open class NSSearchToolbarItem: NSToolbarItem {
-  public var searchField: NSSearchField = NSSearchField(frame: .zero)
+  public required init?(coder: NSCoder) {
+    super.init(coder: coder)
+    self.cell = NSSearchFieldCell()
+  }
+}
+
+open class NSSearchToolbarItem: NSToolbarItem, @unchecked Sendable {
+  @MainActor public lazy var searchField: NSSearchField = NSSearchField(frame: .zero)
   public var resignsFirstResponderWithCancel: Bool = true
   public var preferredWidthForSearchField: CGFloat = 200
   public func beginSearchInteraction() {}
 }
 
-@MainActor
-open class NSToolbar: NSObject {
+open class NSToolbar: NSObject, @unchecked Sendable {
   public enum DisplayMode: UInt, Sendable {
     case `default` = 0
     case iconAndLabel = 1
@@ -2157,10 +2300,52 @@ open class NSToolbar: NSObject {
   public var showsBaselineSeparator: Bool = false
   public var allowsUserCustomization: Bool = false
   public var allowsDisplayModeCustomization: Bool = false
+  public var isVisible: Bool = true
+  public var onSelectionChanged: (() -> Void)?
+  public var _pendingSelectedItemIdentifier: NSToolbarItem.Identifier?
+  public var _effectiveSelectedItemIdentifier: NSToolbarItem.Identifier? {
+    _pendingSelectedItemIdentifier ?? selectedItemIdentifier
+  }
+  public var selectedItemIdentifier: NSToolbarItem.Identifier? {
+    didSet {
+      if oldValue != selectedItemIdentifier {
+        if _pendingSelectedItemIdentifier == selectedItemIdentifier {
+          _pendingSelectedItemIdentifier = nil
+        } else {
+          onSelectionChanged?()
+        }
+      }
+    }
+  }
+  public var items: [NSToolbarItem] = []
 
   public init(identifier: Identifier) {
     self.identifier = identifier
     super.init()
+  }
+
+  public func populateFromDelegateIfNeeded() {
+    guard items.isEmpty, let delegate else { return }
+    let ids = delegate.toolbarDefaultItemIdentifiers(self)
+    var built: [NSToolbarItem] = []
+    for id in ids {
+      if let item = delegate.toolbar(self, itemForItemIdentifier: id, willBeInsertedIntoToolbar: true) {
+        built.append(item)
+      }
+    }
+    items = built
+  }
+
+  public func insertItem(withItemIdentifier itemIdentifier: NSToolbarItem.Identifier, at index: Int) {
+    let item = delegate?.toolbar(self, itemForItemIdentifier: itemIdentifier, willBeInsertedIntoToolbar: true)
+      ?? NSToolbarItem(itemIdentifier: itemIdentifier)
+    let clamped = max(0, min(index, items.count))
+    items.insert(item, at: clamped)
+  }
+
+  public func removeItem(at index: Int) {
+    guard items.indices.contains(index) else { return }
+    items.remove(at: index)
   }
 }
 

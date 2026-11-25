@@ -415,9 +415,37 @@ import CoreGraphics
   public func AXValueGetType(_ value: AXValue) -> AXValueType { value.valueType }
 
   // Carbon HIToolbox Text Input Sources (TIS) shims
-  public final class TISInputSource: NSObject, @unchecked Sendable {}
+  public final class TISInputSource: NSObject, @unchecked Sendable {
+    fileprivate let properties: [String: AnyObject]
+
+    fileprivate init(properties: [String: AnyObject]) {
+      self.properties = properties
+      super.init()
+    }
+
+    fileprivate static let usLayoutData: NSData = {
+      var bytes: [UInt8] = [0, 0, 0, 0]
+      return NSData(bytes: &bytes, length: bytes.count)
+    }()
+
+    fileprivate static let defaultUS: TISInputSource = TISInputSource(properties: [
+      "TISPropertyInputSourceID": NSString(string: "com.apple.keylayout.US"),
+      "TISPropertyInputSourceIsASCIICapable": NSNumber(value: true),
+      "TISPropertyInputSourceIsEnableCapable": NSNumber(value: true),
+      "TISPropertyInputSourceIsSelectCapable": NSNumber(value: true),
+      "TISPropertyInputSourceIsEnabled": NSNumber(value: true),
+      "TISPropertyInputSourceIsSelected": NSNumber(value: true),
+      "TISPropertyLocalizedName": NSString(string: "U.S."),
+      "TISPropertyUnicodeKeyLayoutData": usLayoutData,
+    ])
+  }
+
+  public let kTISNotifySelectedKeyboardInputSourceChanged: CFString = "com.apple.Carbon.TISNotifySelectedKeyboardInputSourceChanged" as NSString
   public let kTISNotifyEnabledKeyboardInputSourcesChanged: CFString = "com.apple.Carbon.TISNotifyEnabledKeyboardInputSourcesChanged" as NSString
   public let kTISPropertyInputSourceIsASCIICapable: CFString = "TISPropertyInputSourceIsASCIICapable" as NSString
+  public let kTISPropertyInputSourceIsEnableCapable: CFString = "TISPropertyInputSourceIsEnableCapable" as NSString
+  public let kTISPropertyInputSourceIsEnabled: CFString = "TISPropertyInputSourceIsEnabled" as NSString
+  public let kTISPropertyInputSourceIsSelected: CFString = "TISPropertyInputSourceIsSelected" as NSString
   public let kTISPropertyInputModeID: CFString = "TISPropertyInputModeID" as NSString
   public let kTISPropertyLocalizedName: CFString = "TISPropertyLocalizedName" as NSString
   public let kTISPropertyInputSourceID: CFString = "TISPropertyInputSourceID" as NSString
@@ -426,11 +454,51 @@ import CoreGraphics
   public let kTISPropertyInputSourceIsSelectCapable: CFString = "TISPropertyInputSourceIsSelectCapable" as NSString
   public let kTISPropertyUnicodeKeyLayoutData: CFString = "TISPropertyUnicodeKeyLayoutData" as NSString
 
+  private let _tisInputSourceList: NSArray = NSArray(object: TISInputSource.defaultUS)
+
   @discardableResult
   public func TISSelectInputSource(_ inputSource: TISInputSource) -> Int32 { 0 }
-  public func TISCopyCurrentASCIICapableKeyboardInputSource() -> Unmanaged<TISInputSource>? { nil }
-  public func TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> Unmanaged<TISInputSource>? { nil }
-  public func TISCopyCurrentKeyboardInputSource() -> Unmanaged<TISInputSource>? { nil }
-  public func TISCreateInputSourceList(_ properties: CFDictionary?, _ includeAllInstalled: Bool) -> Unmanaged<CFArray>? { nil }
-  public func TISGetInputSourceProperty(_ inputSource: TISInputSource, _ propertyKey: CFString) -> UnsafeMutableRawPointer? { nil }
+
+  public func TISCopyCurrentKeyboardLayoutInputSource() -> Unmanaged<TISInputSource>! {
+    Unmanaged.passRetained(TISInputSource.defaultUS)
+  }
+
+  public func TISCopyCurrentASCIICapableKeyboardInputSource() -> Unmanaged<TISInputSource>! {
+    Unmanaged.passRetained(TISInputSource.defaultUS)
+  }
+
+  public func TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> Unmanaged<TISInputSource>! {
+    Unmanaged.passRetained(TISInputSource.defaultUS)
+  }
+
+  public func TISCopyCurrentKeyboardInputSource() -> Unmanaged<TISInputSource>! {
+    Unmanaged.passRetained(TISInputSource.defaultUS)
+  }
+
+  public func TISCreateInputSourceList(
+    _ properties: CFDictionary?,
+    _ includeAllInstalled: Bool
+  ) -> Unmanaged<CFArray>! {
+    Unmanaged.passRetained(_tisInputSourceList as CFArray)
+  }
+
+  public func TISGetInputSourceProperty(
+    _ inputSource: TISInputSource,
+    _ propertyKey: CFString
+  ) -> UnsafeMutableRawPointer? {
+    let key = propertyKey as String
+    guard let obj = inputSource.properties[key] else { return nil }
+    return Unmanaged.passUnretained(obj).toOpaque()
+  }
+
+  public let kHISymbolicHotKeyEnabled: String = "enabled"
+  public let kHISymbolicHotKeyCode: String = "key"
+  public let kHISymbolicHotKeyModifiers: String = "modifiers"
+
+  public func CopySymbolicHotKeys(
+    _ outSymbolicHotKeys: UnsafeMutablePointer<Unmanaged<CFArray>?>
+  ) -> Int32 {
+    outSymbolicHotKeys.pointee = Unmanaged.passRetained(NSArray() as CFArray)
+    return 0
+  }
 #endif

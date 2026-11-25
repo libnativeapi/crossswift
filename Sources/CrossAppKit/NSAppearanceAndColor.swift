@@ -93,7 +93,25 @@ open class NSColorSpace: NSObject, @unchecked Sendable {
   public static let deviceRGB = NSColorSpace()
 }
 
-open class NSColor: NSObject, @unchecked Sendable {
+open class NSColor: NSObject, NSSecureCoding, @unchecked Sendable {
+  public static var supportsSecureCoding: Bool { true }
+
+  public required convenience init?(coder: NSCoder) {
+    let r = coder.decodeDouble(forKey: "r")
+    let g = coder.decodeDouble(forKey: "g")
+    let b = coder.decodeDouble(forKey: "b")
+    let a = coder.decodeDouble(forKey: "a")
+    self.init(srgbRed: CGFloat(r), green: CGFloat(g), blue: CGFloat(b), alpha: CGFloat(a))
+  }
+
+  open func encode(with coder: NSCoder) {
+    let c = resolved()
+    coder.encode(Double(c.r), forKey: "r")
+    coder.encode(Double(c.g), forKey: "g")
+    coder.encode(Double(c.b), forKey: "b")
+    coder.encode(Double(c.a), forKey: "a")
+  }
+
   public typealias Name = String
 
   private let dynamicProvider: (@Sendable (NSAppearance) -> NSColor)?
@@ -103,6 +121,10 @@ open class NSColor: NSObject, @unchecked Sendable {
   private let fixedAlpha: CGFloat
 
   public var isDynamic: Bool { dynamicProvider != nil }
+
+  public convenience override init() {
+    self.init(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+  }
 
   public init(srgbRed red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) {
     self.dynamicProvider = nil
@@ -297,11 +319,22 @@ open class NSColor: NSObject, @unchecked Sendable {
   }
 
   public static let selectedContentBackgroundColor = systemBlue
+  public static let findHighlightColor = systemYellow
+  public static let tertiarySystemFill = NSColor(name: "tertiarySystemFill") {
+    $0.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+      ? NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.08)
+      : NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.05)
+  }
   public static let disabledControlTextColor = tertiaryLabelColor
   public static let textColor = labelColor
   public static let unemphasizedSelectedContentBackgroundColor = NSColor(name: nil) {
     $0.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
       ? NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.14)
       : NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.10)
+  }
+
+  public func drawSwatch(in rect: NSRect) {
+    setFill()
+    NSBezierPath(rect: rect).fill()
   }
 }

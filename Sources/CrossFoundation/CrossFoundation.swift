@@ -1,5 +1,7 @@
 @_exported import Foundation
 @_exported import CoreFoundation
+@_exported import CoreServices
+@_exported import ApplicationServices
 @_exported import Darwin
 @_exported import Observation
 import CoreGraphics
@@ -597,5 +599,519 @@ import Carbon
       }
       return nil
     }
+  }
+
+  // MARK: - os_unfair_lock & Objective-C Associated Objects Shims
+
+  public struct os_unfair_lock: @unchecked Sendable {
+    public var _os_unfair_lock_opaque: UInt32 = 0
+    public init() {}
+  }
+
+  public typealias os_unfair_lock_t = UnsafeMutablePointer<os_unfair_lock>
+
+  private final class _UnfairLockTable: @unchecked Sendable {
+    static let shared = _UnfairLockTable()
+    private let tableLock = NSLock()
+    private var locks: [UnsafeMutableRawPointer: NSLock] = [:]
+
+    func lock(for ptr: UnsafeMutableRawPointer) -> NSLock {
+      tableLock.lock()
+      defer { tableLock.unlock() }
+      if let existing = locks[ptr] { return existing }
+      let created = NSLock()
+      locks[ptr] = created
+      return created
+    }
+  }
+
+  public func os_unfair_lock_lock(_ lock: os_unfair_lock_t) {
+    _UnfairLockTable.shared.lock(for: UnsafeMutableRawPointer(lock)).lock()
+  }
+
+  public func os_unfair_lock_unlock(_ lock: os_unfair_lock_t) {
+    _UnfairLockTable.shared.lock(for: UnsafeMutableRawPointer(lock)).unlock()
+  }
+
+  public func os_unfair_lock_trylock(_ lock: os_unfair_lock_t) -> Bool {
+    _UnfairLockTable.shared.lock(for: UnsafeMutableRawPointer(lock)).try()
+  }
+
+  public enum objc_AssociationPolicy: UInt, Sendable {
+    case OBJC_ASSOCIATION_ASSIGN = 0
+    case OBJC_ASSOCIATION_RETAIN_NONATOMIC = 1
+    case OBJC_ASSOCIATION_COPY_NONATOMIC = 3
+    case OBJC_ASSOCIATION_RETAIN = 0o1401
+    case OBJC_ASSOCIATION_COPY = 0o1403
+  }
+
+  private final class _AssociatedObjectsStore: @unchecked Sendable {
+    static let shared = _AssociatedObjectsStore()
+    private let lock = NSLock()
+    private var table: [ObjectIdentifier: [UnsafeRawPointer: Any]] = [:]
+
+    func get(_ object: Any, key: UnsafeRawPointer) -> Any? {
+      let id = ObjectIdentifier(object as AnyObject)
+      lock.lock()
+      defer { lock.unlock() }
+      return table[id]?[key]
+    }
+
+    func set(_ object: Any, key: UnsafeRawPointer, value: Any?) {
+      let id = ObjectIdentifier(object as AnyObject)
+      lock.lock()
+      defer { lock.unlock() }
+      if let value {
+        var dict = table[id] ?? [:]
+        dict[key] = value
+        table[id] = dict
+      } else {
+        table[id]?.removeValue(forKey: key)
+        if table[id]?.isEmpty == true {
+          table.removeValue(forKey: id)
+        }
+      }
+    }
+  }
+
+  public func objc_getAssociatedObject(_ object: Any, _ key: UnsafeRawPointer) -> Any? {
+    _AssociatedObjectsStore.shared.get(object, key: key)
+  }
+
+  public func objc_setAssociatedObject(
+    _ object: Any,
+    _ key: UnsafeRawPointer,
+    _ value: Any?,
+    _ policy: objc_AssociationPolicy
+  ) {
+    _AssociatedObjectsStore.shared.set(object, key: key, value: value)
+  }
+
+  // MARK: - Key-Value Observing (KVO) Compatibility Shim
+
+  public struct NSKeyValueObservingOptions: OptionSet, Sendable {
+    public let rawValue: UInt
+    public init(rawValue: UInt) { self.rawValue = rawValue }
+
+    public static let new = NSKeyValueObservingOptions(rawValue: 0x01)
+    public static let old = NSKeyValueObservingOptions(rawValue: 0x02)
+    public static let initial = NSKeyValueObservingOptions(rawValue: 0x04)
+    public static let prior = NSKeyValueObservingOptions(rawValue: 0x08)
+  }
+
+  public enum NSKeyValueChange: UInt, Sendable {
+    case setting = 1
+    case insertion = 2
+    case removal = 3
+    case replacement = 4
+  }
+
+  public struct NSKeyValueChangeKey: Hashable, Equatable, RawRepresentable, Sendable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+
+    public static let kindKey = NSKeyValueChangeKey(rawValue: "kind")
+    public static let newKey = NSKeyValueChangeKey(rawValue: "new")
+    public static let oldKey = NSKeyValueChangeKey(rawValue: "old")
+    public static let indexesKey = NSKeyValueChangeKey(rawValue: "indexes")
+    public static let notificationIsPriorKey = NSKeyValueChangeKey(rawValue: "notificationIsPrior")
+  }
+
+  public struct NSKeyValueObservedChange<Value> {
+    public let kind: NSKeyValueChange
+    public let newValue: Value?
+    public let oldValue: Value?
+    public let indexes: IndexSet?
+    public let isPrior: Bool
+
+    public init(
+      kind: NSKeyValueChange = .setting,
+      newValue: Value? = nil,
+      oldValue: Value? = nil,
+      indexes: IndexSet? = nil,
+      isPrior: Bool = false
+    ) {
+      self.kind = kind
+      self.newValue = newValue
+      self.oldValue = oldValue
+      self.indexes = indexes
+      self.isPrior = isPrior
+    }
+  }
+
+  public final class NSKeyValueObservation: NSObject, @unchecked Sendable {
+    private var invalidator: (() -> Void)?
+
+    public init(_ cancel: @escaping () -> Void = {}) {
+      self.invalidator = cancel
+      super.init()
+    }
+
+    public func invalidate() {
+      invalidator?()
+      invalidator = nil
+    }
+
+    deinit {
+      invalidate()
+    }
+  }
+
+  open class CrossKVOObject: NSObject, @unchecked Sendable {
+    open func observeValue(
+      forKeyPath keyPath: String?,
+      of object: Any?,
+      change: [NSKeyValueChangeKey: Any]?,
+      context: UnsafeMutableRawPointer?
+    ) {}
+  }
+
+  private final class _UserDefaultsKVOHub: @unchecked Sendable {
+    static let shared = _UserDefaultsKVOHub()
+
+    private struct Entry {
+      let id: Foundation.UUID
+      weak var suite: UserDefaults?
+      weak var observer: NSObject?
+      let keyPath: String
+      let options: NSKeyValueObservingOptions
+      let context: UnsafeMutableRawPointer?
+      var lastValue: Any?
+    }
+
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+    private var isListening = false
+
+    private func ensureListeningLocked() {
+      guard !isListening else { return }
+      isListening = true
+      _ = NotificationCenter.default.addObserver(
+        forName: UserDefaults.didChangeNotification,
+        object: nil,
+        queue: nil
+      ) { [weak self] _ in
+        self?.handleDidChange()
+      }
+    }
+
+    func add(
+      suite: UserDefaults,
+      observer: NSObject,
+      keyPath: String,
+      options: NSKeyValueObservingOptions,
+      context: UnsafeMutableRawPointer?
+    ) {
+      let current = suite.object(forKey: keyPath)
+      lock.lock()
+      ensureListeningLocked()
+      entries.append(Entry(
+        id: Foundation.UUID(),
+        suite: suite,
+        observer: observer,
+        keyPath: keyPath,
+        options: options,
+        context: context,
+        lastValue: current
+      ))
+      lock.unlock()
+
+      if options.contains(.initial) {
+        var change: [NSKeyValueChangeKey: Any] = [
+          .kindKey: NSKeyValueChange.setting.rawValue
+        ]
+        if options.contains(.new) {
+          change[.newKey] = current ?? NSNull()
+        }
+        (observer as? CrossKVOObject)?.observeValue(
+          forKeyPath: keyPath,
+          of: suite,
+          change: change,
+          context: context
+        )
+      }
+    }
+
+    func remove(
+      suite: UserDefaults,
+      observer: NSObject,
+      keyPath: String,
+      context: UnsafeMutableRawPointer? = nil,
+      matchContext: Bool = false
+    ) {
+      lock.lock()
+      entries.removeAll { entry in
+        guard let s = entry.suite, let o = entry.observer else { return true }
+        let matchesObj = (s === suite) && (o === observer) && entry.keyPath == keyPath
+        if !matchesObj { return false }
+        return !matchContext || entry.context == context
+      }
+      lock.unlock()
+    }
+
+    private static func valuesEqual(_ a: Any?, _ b: Any?) -> Bool {
+      if a == nil && b == nil { return true }
+      guard let a, let b else { return false }
+      if let x = a as? NSObject, let y = b as? NSObject {
+        return x.isEqual(y)
+      }
+      return String(describing: a) == String(describing: b)
+    }
+
+    private func handleDidChange() {
+      var deliveries: [(CrossKVOObject, String, UserDefaults, [NSKeyValueChangeKey: Any], UnsafeMutableRawPointer?)] = []
+      lock.lock()
+      entries.removeAll { $0.suite == nil || $0.observer == nil }
+      for i in entries.indices {
+        guard let suite = entries[i].suite, let obs = entries[i].observer else { continue }
+        let keyPath = entries[i].keyPath
+        let newVal = suite.object(forKey: keyPath)
+        let oldVal = entries[i].lastValue
+        if !Self.valuesEqual(oldVal, newVal) {
+          entries[i].lastValue = newVal
+          if let kvoObs = obs as? CrossKVOObject {
+            var change: [NSKeyValueChangeKey: Any] = [
+              .kindKey: NSKeyValueChange.setting.rawValue
+            ]
+            if entries[i].options.contains(.old) {
+              change[.oldKey] = oldVal ?? NSNull()
+            }
+            if entries[i].options.contains(.new) {
+              change[.newKey] = newVal ?? NSNull()
+            }
+            deliveries.append((kvoObs, keyPath, suite, change, entries[i].context))
+          }
+        }
+      }
+      lock.unlock()
+
+      for (obs, keyPath, suite, change, ctx) in deliveries {
+        obs.observeValue(forKeyPath: keyPath, of: suite, change: change, context: ctx)
+      }
+    }
+  }
+
+  public protocol _KeyValueCodingAndObserving {}
+  extension NSObject: _KeyValueCodingAndObserving {}
+
+  public extension _KeyValueCodingAndObserving where Self: NSObject {
+    func observe<Value>(
+      _ keyPath: KeyPath<Self, Value>,
+      options: NSKeyValueObservingOptions = [],
+      changeHandler: @escaping (Self, NSKeyValueObservedChange<Value>) -> Void
+    ) -> NSKeyValueObservation {
+      if options.contains(.initial) {
+        let val = self[keyPath: keyPath]
+        let change = NSKeyValueObservedChange<Value>(
+          kind: .setting,
+          newValue: options.contains(.new) ? val : nil,
+          oldValue: nil
+        )
+        changeHandler(self, change)
+      }
+      return NSKeyValueObservation()
+    }
+  }
+
+  public extension NSObject {
+    func addObserver(
+      _ observer: NSObject,
+      forKeyPath keyPath: String,
+      options: NSKeyValueObservingOptions = [],
+      context: UnsafeMutableRawPointer?
+    ) {
+      if let defaults = self as? UserDefaults {
+        _UserDefaultsKVOHub.shared.add(
+          suite: defaults,
+          observer: observer,
+          keyPath: keyPath,
+          options: options,
+          context: context
+        )
+      }
+    }
+
+    func removeObserver(
+      _ observer: NSObject,
+      forKeyPath keyPath: String,
+      context: UnsafeMutableRawPointer?
+    ) {
+      if let defaults = self as? UserDefaults {
+        _UserDefaultsKVOHub.shared.remove(
+          suite: defaults,
+          observer: observer,
+          keyPath: keyPath,
+          context: context,
+          matchContext: true
+        )
+      }
+    }
+
+    func removeObserver(_ observer: NSObject, forKeyPath keyPath: String) {
+      if let defaults = self as? UserDefaults {
+        _UserDefaultsKVOHub.shared.remove(
+          suite: defaults,
+          observer: observer,
+          keyPath: keyPath
+        )
+      }
+    }
+  }
+
+  public extension Data.WritingOptions {
+    static let completeFileProtection: Data.WritingOptions = []
+    static let completeFileProtectionUnlessOpen: Data.WritingOptions = []
+    static let completeFileProtectionUntilFirstUserAuthentication: Data.WritingOptions = []
+    static let noFileProtection: Data.WritingOptions = []
+  }
+
+  // MARK: - DistributedNotificationCenter & Carbon TIS / CGKeyCode Shims
+
+  public typealias CGKeyCode = CoreGraphics.CGKeyCode
+
+  open class DistributedNotificationCenter: NotificationCenter, @unchecked Sendable {
+    public enum SuspensionBehavior: UInt, Sendable {
+      case drop = 1
+      case coalesce = 2
+      case hold = 3
+      case deliverImmediately = 4
+    }
+
+    private static let sharedDistributed = DistributedNotificationCenter()
+
+    public static func `default`() -> DistributedNotificationCenter {
+      sharedDistributed
+    }
+
+    public func addObserver(
+      _ observer: Any,
+      selector aSelector: Selector,
+      name aName: NSNotification.Name?,
+      object anObject: String?,
+      suspensionBehavior: SuspensionBehavior = .coalesce
+    ) {}
+  }
+
+  // MARK: - NSUbiquitousKeyValueStore & dyld Shims
+
+  public let NSUbiquitousKeyValueStoreChangeReasonKey: String = "NSUbiquitousKeyValueStoreChangeReasonKey"
+  public let NSUbiquitousKeyValueStoreChangedKeysKey: String = "NSUbiquitousKeyValueStoreChangedKeysKey"
+
+  open class NSUbiquitousKeyValueStore: NSObject, @unchecked Sendable {
+    public static let `default` = NSUbiquitousKeyValueStore()
+    public static let didChangeExternallyNotification = Notification.Name("NSUbiquitousKeyValueStoreDidChangeExternallyNotification")
+
+    private let lock = NSLock()
+    private var values: [String: Any] = [:]
+
+    open var dictionaryRepresentation: [String: Any] {
+      lock.lock()
+      defer { lock.unlock() }
+      return values
+    }
+
+    open func object(forKey aKey: String) -> Any? {
+      lock.lock()
+      defer { lock.unlock() }
+      return values[aKey]
+    }
+
+    open func set(_ anObject: Any?, forKey aKey: String) {
+      lock.lock()
+      if let anObject {
+        values[aKey] = anObject
+      } else {
+        values.removeValue(forKey: aKey)
+      }
+      lock.unlock()
+    }
+
+    open func removeObject(forKey aKey: String) {
+      lock.lock()
+      values.removeValue(forKey: aKey)
+      lock.unlock()
+    }
+
+    open func string(forKey aKey: String) -> String? { object(forKey: aKey) as? String }
+    open func array(forKey aKey: String) -> [Any]? { object(forKey: aKey) as? [Any] }
+    open func dictionary(forKey aKey: String) -> [String: Any]? { object(forKey: aKey) as? [String: Any] }
+    open func data(forKey aKey: String) -> Data? { object(forKey: aKey) as? Data }
+    open func longLong(forKey aKey: String) -> Int64 { (object(forKey: aKey) as? NSNumber)?.int64Value ?? 0 }
+    open func double(forKey aKey: String) -> Double { (object(forKey: aKey) as? NSNumber)?.doubleValue ?? 0 }
+    open func bool(forKey aKey: String) -> Bool { (object(forKey: aKey) as? NSNumber)?.boolValue ?? false }
+
+    open func set(_ aString: String?, forKey aKey: String) { set(aString as Any?, forKey: aKey) }
+    open func set(_ aData: Data?, forKey aKey: String) { set(aData as Any?, forKey: aKey) }
+    open func set(_ anArray: [Any]?, forKey aKey: String) { set(anArray as Any?, forKey: aKey) }
+    open func set(_ aDictionary: [String: Any]?, forKey aKey: String) { set(aDictionary as Any?, forKey: aKey) }
+    open func set(_ value: Int64, forKey aKey: String) { set(NSNumber(value: value), forKey: aKey) }
+    open func set(_ value: Double, forKey aKey: String) { set(NSNumber(value: value), forKey: aKey) }
+    open func set(_ value: Bool, forKey aKey: String) { set(NSNumber(value: value), forKey: aKey) }
+
+    @discardableResult
+    open func synchronize() -> Bool { true }
+  }
+
+  public func _dyld_image_count() -> UInt32 { 0 }
+  public func _dyld_get_image_name(_ imageIndex: UInt32) -> UnsafePointer<CChar>? { nil }
+  public func _dyld_get_image_header(_ imageIndex: UInt32) -> UnsafeRawPointer? { nil }
+
+  // MARK: - URL Standard Directories, CustomLocalizedStringResourceConvertible, Timer & Undo Notifications
+
+  public protocol CustomLocalizedStringResourceConvertible {
+    var localizedStringResource: LocalizedStringResource { get }
+  }
+
+  public extension URL {
+    static var applicationSupportDirectory: URL {
+      #if os(Windows)
+        if let appData = ProcessInfo.processInfo.environment["APPDATA"], !appData.isEmpty {
+          return URL(fileURLWithPath: appData, isDirectory: true)
+        }
+      #endif
+      return FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("AppData/Roaming", isDirectory: true)
+    }
+
+    static var documentsDirectory: URL {
+      FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Documents", isDirectory: true)
+    }
+
+    func startAccessingSecurityScopedResource() -> Bool { true }
+    func stopAccessingSecurityScopedResource() {}
+  }
+
+  public extension Notification.Name {
+    static let NSUndoManagerDidUndoChange = Notification.Name("NSUndoManagerDidUndoChangeNotification")
+    static let NSUndoManagerDidRedoChange = Notification.Name("NSUndoManagerDidRedoChangeNotification")
+  }
+
+  public extension Timer {
+    @discardableResult
+    class func scheduledTimer(
+      timeInterval ti: TimeInterval,
+      target aTarget: Any,
+      selector aSelector: Selector,
+      userInfo: Any?,
+      repeats yesOrNo: Bool
+    ) -> Timer {
+      Timer.scheduledTimer(withTimeInterval: ti, repeats: yesOrNo) { _ in }
+    }
+  }
+
+  public enum NSItemProviderRepresentationVisibility: Int, Sendable {
+    case all = 0
+    case team = 1
+    case group = 2
+    case ownProcess = 3
+  }
+
+  public extension NSItemProvider {
+    func registerDataRepresentation(
+      forTypeIdentifier typeIdentifier: String,
+      visibility: NSItemProviderRepresentationVisibility,
+      loadHandler: @escaping (@escaping (Data?, (any Error)?) -> Void) -> Progress?
+    ) {}
   }
 #endif

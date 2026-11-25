@@ -113,10 +113,24 @@ import Foundation
 
   public final class CFMachPort: @unchecked Sendable {}
   public final class CFRunLoopSource: @unchecked Sendable {}
+  public final class CFRunLoopObserver: @unchecked Sendable {}
   public final class CFRunLoop: @unchecked Sendable {}
+  public struct CFRunLoopActivity: OptionSet, Sendable {
+    public let rawValue: UInt
+    public init(rawValue: UInt) { self.rawValue = rawValue }
+    public static let entry = CFRunLoopActivity(rawValue: 1 << 0)
+    public static let beforeTimers = CFRunLoopActivity(rawValue: 1 << 1)
+    public static let beforeSources = CFRunLoopActivity(rawValue: 1 << 2)
+    public static let beforeWaiting = CFRunLoopActivity(rawValue: 1 << 5)
+    public static let afterWaiting = CFRunLoopActivity(rawValue: 1 << 6)
+    public static let exit = CFRunLoopActivity(rawValue: 1 << 7)
+    public static let allActivities = CFRunLoopActivity(rawValue: 0x0FFFFFFF)
+  }
   public struct CFRunLoopMode: RawRepresentable, Hashable, Sendable {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
+    public init(_ rawValue: CFString) { self.rawValue = rawValue as String }
+    public init(_ rawValue: String) { self.rawValue = rawValue }
     public static let commonModes = CFRunLoopMode(rawValue: "kCFRunLoopCommonModes")
     public static let defaultMode = CFRunLoopMode(rawValue: "kCFRunLoopDefaultMode")
   }
@@ -129,6 +143,22 @@ import Foundation
   public func CFRunLoopPerformBlock(_ rl: CFRunLoop?, _ mode: Any?, _ block: @escaping () -> Void) {}
   public func CFRunLoopAddSource(_ rl: CFRunLoop?, _ source: CFRunLoopSource?, _ mode: CFRunLoopMode?) {}
   public func CFRunLoopRemoveSource(_ rl: CFRunLoop?, _ source: CFRunLoopSource?, _ mode: CFRunLoopMode?) {}
+  public func CFRunLoopObserverCreateWithHandler(
+    _ allocator: CFAllocator?,
+    _ activities: UInt,
+    _ repeats: Bool,
+    _ order: CFIndex,
+    _ block: ((CFRunLoopObserver?, CFRunLoopActivity) -> Void)?
+  ) -> CFRunLoopObserver! {
+    CFRunLoopObserver()
+  }
+  public func CFRunLoopAddObserver(_ rl: CFRunLoop?, _ observer: CFRunLoopObserver?, _ mode: CFRunLoopMode?) {}
+  public func CFRunLoopRemoveObserver(_ rl: CFRunLoop?, _ observer: CFRunLoopObserver?, _ mode: CFRunLoopMode?) {}
+  public func CFRunLoopObserverInvalidate(_ observer: CFRunLoopObserver?) {}
+
+  public extension RunLoop {
+    func getCFRunLoop() -> CFRunLoop { CFRunLoop() }
+  }
   public func CFMachPortCreateRunLoopSource(_ allocator: CFAllocator?, _ port: CFMachPort?, _ order: CFIndex) -> CFRunLoopSource? { nil }
   public func CFMachPortInvalidate(_ port: CFMachPort?) {}
   public func CFRunLoopSourceIsValid(_ source: CFRunLoopSource?) -> Bool { false }

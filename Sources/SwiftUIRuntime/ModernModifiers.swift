@@ -1991,6 +1991,7 @@ extension View {
           el.highPriorityAction = cb
         }
       } else {
+        el.highPriorityDragMinimumDistance = Double((gesture as? DragGesture)?.minimumDistance ?? 0)
         el.highPriorityDragAction = { val, ended in
           if ended { gesture.ended?(val) } else { gesture.changed?(val) }
         }
@@ -2022,6 +2023,38 @@ extension View {
     self
   }
 
+  public func onDrop(
+    of supportedContentTypes: [Any],
+    delegate: any DropDelegate
+  ) -> some View {
+    self
+  }
+
+  public func onDrag(_ data: @escaping () -> NSItemProvider) -> some View { self }
+
+  public func onDrag<V: View>(
+    _ data: @escaping () -> NSItemProvider,
+    @ViewBuilder preview: () -> V
+  ) -> some View {
+    self
+  }
+
+  public func dragConfiguration(_ configuration: DragConfiguration) -> some View { self }
+
+  public func onDragSessionUpdated(_ action: @escaping (DragSession) -> Void) -> some View { self }
+
+  public func onDropSessionUpdated(_ action: @escaping (DropSession) -> Void) -> some View { self }
+
+  public func disableAutocorrection(_ disable: Bool?) -> some View { self }
+
+  public func fileDialogDefaultDirectory(_ defaultDirectory: URL?) -> some View { self }
+
+  public func dialogSuppressionToggle(isSuppressed: Binding<Bool>) -> some View { self }
+  public func dialogSuppressionToggle(_ label: Text, isSuppressed: Binding<Bool>) -> some View { self }
+  public func dialogSuppressionToggle(_ titleKey: LocalizedStringKey, isSuppressed: Binding<Bool>) -> some View { self }
+  @_disfavoredOverload
+  public func dialogSuppressionToggle<S: StringProtocol>(_ label: S, isSuppressed: Binding<Bool>) -> some View { self }
+
   public func accessibilityHint(_ hint: Text) -> some View { self }
   public func accessibilityHint(_ hintKey: LocalizedStringKey) -> some View { self }
   @_disfavoredOverload
@@ -2029,6 +2062,13 @@ extension View {
 
   public func accessibilityAction(
     _ actionKind: AccessibilityActionKind = .default,
+    _ handler: @escaping () -> Void
+  ) -> some View {
+    self
+  }
+
+  public func accessibilityAction(
+    named name: Text,
     _ handler: @escaping () -> Void
   ) -> some View {
     self
@@ -2048,6 +2088,100 @@ extension View {
   ) -> some View {
     self
   }
+}
+
+public enum DropOperation: Sendable, Hashable {
+  case cancel
+  case forbidden
+  case copy
+  case move
+}
+
+public struct DropProposal: Sendable, Hashable {
+  public let operation: DropOperation
+  public init(operation: DropOperation) {
+    self.operation = operation
+  }
+}
+
+public struct DropInfo: Sendable {
+  public let location: CGPoint
+  public init(location: CGPoint = .zero) {
+    self.location = location
+  }
+  public func hasItemsConforming(to contentTypes: [Any]) -> Bool { false }
+  public func itemProviders(for contentTypes: [Any]) -> [NSItemProvider] { [] }
+}
+
+public protocol DropDelegate {
+  func validateDrop(info: DropInfo) -> Bool
+  func performDrop(info: DropInfo) -> Bool
+  func dropEntered(info: DropInfo)
+  func dropUpdated(info: DropInfo) -> DropProposal?
+  func dropExited(info: DropInfo)
+}
+
+public extension DropDelegate {
+  func validateDrop(info: DropInfo) -> Bool { true }
+  func dropEntered(info: DropInfo) {}
+  func dropUpdated(info: DropInfo) -> DropProposal? { nil }
+  func dropExited(info: DropInfo) {}
+}
+
+public struct DragConfiguration: Sendable, Hashable {
+  public struct Operations: Sendable, Hashable {
+    public var allowCopy: Bool
+    public var allowMove: Bool
+    public var allowDelete: Bool
+    public init(allowCopy: Bool = true, allowMove: Bool = true, allowDelete: Bool = false) {
+      self.allowCopy = allowCopy
+      self.allowMove = allowMove
+      self.allowDelete = allowDelete
+    }
+  }
+  public var operationsWithinApp: Operations
+  public var operationsOutsideApp: Operations
+  public init(
+    operationsWithinApp: Operations = Operations(),
+    operationsOutsideApp: Operations = Operations()
+  ) {
+    self.operationsWithinApp = operationsWithinApp
+    self.operationsOutsideApp = operationsOutsideApp
+  }
+}
+
+public struct DragSession: Sendable {
+  public enum Phase: Sendable, Hashable {
+    case initial
+    case active
+    case ended
+  }
+  public let phase: Phase
+  public let location: CGPoint
+  public init(phase: Phase = .ended, location: CGPoint = .zero) {
+    self.phase = phase
+    self.location = location
+  }
+}
+
+public struct DropSession: Sendable {
+  public enum Phase: Sendable, Hashable {
+    case entering
+    case active
+    case exiting
+    case ended
+  }
+  public let phase: Phase
+  public let location: CGPoint
+  public let size: CGSize
+  public init(phase: Phase = .ended, location: CGPoint = .zero, size: CGSize = .zero) {
+    self.phase = phase
+    self.location = location
+    self.size = size
+  }
+}
+
+extension View {
 
   public func accessibilityRemoveTraits(_ traits: AccessibilityTraits) -> some View { self }
   public func accessibilityFocused(_ condition: AccessibilityFocusState<Bool>.Binding) -> some View { self }

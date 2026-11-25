@@ -54,7 +54,7 @@ enum CarbonHotKeyBridge {
         state.lock.unlock()
         if let hk {
           Task { @MainActor in
-            _crossswift_carbon_dispatch_hotkey(hk.signature, hk.id, kEventHotKeyReleased)
+            _crossswift_carbon_dispatch_hotkey(hk.signature, hk.id, UInt32(kEventHotKeyReleased))
           }
         }
       }
@@ -78,7 +78,7 @@ enum CarbonHotKeyBridge {
       accelerator,
       callback: {
         Task { @MainActor in
-          _crossswift_carbon_dispatch_hotkey(hotKeyID.signature, hotKeyID.id, kEventHotKeyPressed)
+          _crossswift_carbon_dispatch_hotkey(hotKeyID.signature, hotKeyID.id, UInt32(kEventHotKeyPressed))
         }
       }
     ) else {

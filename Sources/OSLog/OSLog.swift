@@ -154,3 +154,19 @@ public struct OSSignposter: Sendable {
     try task()
   }
 }
+
+public func os_log(
+  _ type: OSLogType,
+  dso: UnsafeRawPointer? = nil,
+  log: OSLog = .default,
+  _ message: StaticString,
+  _ args: Any...
+) {}
+
+public func os_log(
+  _ message: StaticString,
+  dso: UnsafeRawPointer? = nil,
+  log: OSLog = .default,
+  type: OSLogType = .default,
+  _ args: Any...
+) {}

@@ -229,7 +229,7 @@ public struct LayoutEngine {
     element.hasPresentation = presentation
     element.hasPreferences = preferences
     let opaqueLayout =
-      element.layout != nil || element.horizontalGuide != nil || element.verticalGuide != nil
+      element.layout != nil || !element.horizontalGuides.isEmpty || !element.verticalGuides.isEmpty
     if element.evaluationID != 0,
       let previous = cache.identities[element.evaluationID],
       !opaqueLayout || previous.revision == element.evaluationRevision,
@@ -631,10 +631,17 @@ public struct LayoutEngine {
         if flexIndices.contains(where: { children[$0].kind != .spacer }) {
           let nonFlexUsed = nonFlex.reduce(0.0) { $0 + measuredChildren[$1].width }
           var available = max(0, Double(offeredWidth) - spacings - spacerReserve - nonFlexUsed)
-          let distinctFlexPriorities = Array(Set(flexIndices.map { children[$0].props.layoutPriority })).sorted(by: >)
+          let effectivePriority: (Int) -> Double = { idx in
+            let c = children[idx]
+            if c.kind == .spacer && c.props.layoutPriority == 0 {
+              return -Double.greatestFiniteMagnitude
+            }
+            return c.props.layoutPriority
+          }
+          let distinctFlexPriorities = Array(Set(flexIndices.map(effectivePriority))).sorted(by: >)
           for tier in distinctFlexPriorities {
             guard available > 1e-6 else { break }
-            let tierIndices = flexIndices.filter { children[$0].props.layoutPriority == tier }
+            let tierIndices = flexIndices.filter { effectivePriority($0) == tier }
             let tierFlex = tierIndices.reduce(0.0) { $0 + max(1, children[$1].props.flex) }
             var used = 0.0
             for idx in tierIndices {
@@ -662,6 +669,34 @@ public struct LayoutEngine {
         }
         if main > Double(offeredWidth) || flexIndices.contains(where: { children[$0].kind != .spacer }) {
           main = min(Double(offeredWidth), measuredChildren.reduce(0) { $0 + $1.width } + spacings)
+        }
+      } else if !horizontal, let offeredWidth = offer.width, offeredWidth.isFinite {
+        let hAlign = p.horizontalAlignment
+        if hAlign.isCustom || children.contains(where: { !$0.horizontalGuides.isEmpty }) {
+          let resolvedGuides: [Double?] = children.indices.map { i in
+            resolveHorizontalGuide(children[i], size: measuredChildren[i], guide: hAlign)
+          }
+          if hAlign.isCustom || resolvedGuides.contains(where: { $0 != nil }) {
+            let guideVals: [Double] = children.indices.map { i in
+              if let g = resolvedGuides[i] { return g }
+              let dims = ViewDimensions(width: CGFloat(measuredChildren[i].width), height: CGFloat(measuredChildren[i].height))
+              return Double(hAlign.defaultValue(in: dims))
+            }
+            let anchorX = guideVals.max() ?? 0
+            var adjustedMain = spacings
+            for i in children.indices {
+              let shift = max(0, anchorX - guideVals[i])
+              if shift > 0.5 && children[i].kind != .spacer {
+                let availW = max(0, Double(offeredWidth) - shift)
+                if availW + 0.5 < Double(offeredWidth) {
+                  measuredChildren[i] = measure(
+                    children[i], ProposedViewSize(width: CGFloat(availW), height: nil))
+                }
+              }
+              adjustedMain += measuredChildren[i].height
+            }
+            main = adjustedMain
+          }
         }
       }
       let cross = measuredChildren.map { horizontal ? $0.height : $0.width }.max() ?? 0
@@ -840,23 +875,72 @@ public struct LayoutEngine {
     let natural = measure(e, ProposedViewSize(width: size.width, height: size.height))
     return Size(width: knownWidth ?? natural.width, height: knownHeight ?? natural.height)
   }
-  private func aligned(_ size: Size, in rect: Rect, alignment: Alignment, child: Element? = nil)
-    -> Rect
-  {
+  private func resolveHorizontalGuide(
+    _ element: Element, size: Size, guide: HorizontalAlignment
+  ) -> Double? {
+    if let compute = element.horizontalGuides[guide] {
+      let dims = ViewDimensions(width: CGFloat(size.width), height: CGFloat(size.height))
+      return Double(compute(dims))
+    }
+    switch element.kind {
+    case .container(.horizontal):
+      var x = 0.0
+      let spacing = element.props.spacing
+      for child in element.children {
+        let childSize: Size
+        if child.kind == .spacer {
+          childSize = Size(width: child.props.spacerMinLength, height: 0)
+        } else {
+          childSize = measure(child, ProposedViewSize(width: nil, height: CGFloat(size.height)))
+        }
+        if let childGuide = resolveHorizontalGuide(child, size: childSize, guide: guide) {
+          return x + childGuide
+        }
+        x += childSize.width + spacing
+      }
+      return nil
+    case .padding:
+      guard let first = element.children.first else { return nil }
+      let innerSize = Size(
+        width: max(0, size.width - element.props.padding.horizontal),
+        height: max(0, size.height - element.props.padding.vertical))
+      return resolveHorizontalGuide(first, size: innerSize, guide: guide)
+        .map { element.props.padding.leading + $0 }
+    case .frame, .layer, .fragment, .styledButton, .presentation:
+      guard let first = element.children.first else { return nil }
+      return resolveHorizontalGuide(first, size: size, guide: guide)
+    default:
+      return nil
+    }
+  }
+  private func aligned(
+    _ size: Size, in rect: Rect, alignment: Alignment, child: Element? = nil,
+    applyHorizontalGuide: Bool = true, applyVerticalGuide: Bool = true
+  ) -> Rect {
     let dx =
-      alignment.horizontal == .leading
+      alignment.horizontal == .leading || alignment.horizontal.isCustom
       ? 0
       : alignment.horizontal == .trailing ? rect.width - size.width : (rect.width - size.width) / 2
     let dy =
       alignment.vertical == .top
       ? 0
       : alignment.vertical == .bottom ? rect.height - size.height : (rect.height - size.height) / 2
-    let dimensions = ViewDimensions(width: size.width, height: size.height)
+    let dimensions = ViewDimensions(width: CGFloat(size.width), height: CGFloat(size.height))
+    let hAdjust: Double =
+      applyHorizontalGuide
+      ? (child?.horizontalGuides[alignment.horizontal].map {
+          Double(dimensions[alignment.horizontal] - $0(dimensions))
+        } ?? 0)
+      : 0
+    let vAdjust: Double =
+      applyVerticalGuide
+      ? (child?.verticalGuides[alignment.vertical].map {
+          Double(dimensions[alignment.vertical] - $0(dimensions))
+        } ?? 0)
+      : 0
     return Rect(
-      x: rect.minX + dx
-        + (child?.horizontalGuide.map { dimensions[alignment.horizontal] - $0(dimensions) } ?? 0),
-      y: rect.minY + dy
-        + (child?.verticalGuide.map { dimensions[alignment.vertical] - $0(dimensions) } ?? 0),
+      x: rect.minX + dx + hAdjust,
+      y: rect.minY + dy + vAdjust,
       width: size.width, height: size.height)
   }
   private func place(_ e: inout Element, in offered: Rect) {
@@ -1321,10 +1405,18 @@ public struct LayoutEngine {
     var flexShares = [Double](repeating: 0, count: sizes.count)
     let flexPositions = sizes.indices.filter { sizes[$0].flex > 0 }
     if !flexPositions.isEmpty && available > 0 {
-      let distinctFlexPriorities = Array(Set(flexPositions.map { sizes[$0].priority })).sorted(by: >)
+      var effectivePriorities = [Double](repeating: 0, count: sizes.count)
+      for pos in flexPositions {
+        let child = e.children[indices[pos]]
+        effectivePriorities[pos] =
+          (child.kind == .spacer && sizes[pos].priority == 0)
+          ? -Double.greatestFiniteMagnitude
+          : sizes[pos].priority
+      }
+      let distinctFlexPriorities = Array(Set(flexPositions.map { effectivePriorities[$0] })).sorted(by: >)
       for tier in distinctFlexPriorities {
         guard available > 1e-6 else { break }
-        let tierPositions = flexPositions.filter { sizes[$0].priority == tier }
+        let tierPositions = flexPositions.filter { effectivePriorities[$0] == tier }
         let tierFlex = tierPositions.reduce(0.0) { $0 + sizes[$1].flex }
         var used = 0.0
         for pos in tierPositions {
@@ -1343,6 +1435,35 @@ public struct LayoutEngine {
         available = max(0, available - used)
       }
     }
+    var customGuideShifts: [Double]? = nil
+    if vertical {
+      let hAlign = alignment.horizontal
+      let resolved: [Double?] = indices.enumerated().map { pos, i in
+        resolveHorizontalGuide(e.children[i], size: sizes[pos].natural, guide: hAlign)
+      }
+      if hAlign.isCustom || resolved.contains(where: { $0 != nil }) {
+        let guideVals: [Double] = indices.enumerated().map { pos, _ in
+          if let g = resolved[pos] { return g }
+          let nat = sizes[pos].natural
+          let dims = ViewDimensions(width: CGFloat(nat.width), height: CGFloat(nat.height))
+          return Double(hAlign.defaultValue(in: dims))
+        }
+        let anchorX = guideVals.max() ?? 0
+        var shifts = [Double](repeating: 0, count: indices.count)
+        for (pos, i) in indices.enumerated() {
+          let shift = max(0, anchorX - guideVals[pos])
+          shifts[pos] = shift
+          if shift > 0.5 && sizes[pos].flex == 0 && e.children[i].kind != .spacer {
+            let availW = max(0, crossExtent - shift)
+            if availW + 0.5 < crossExtent {
+              sizes[pos].natural = measure(
+                e.children[i], ProposedViewSize(width: CGFloat(availW), height: nil))
+            }
+          }
+        }
+        customGuideShifts = shifts
+      }
+    }
     for (pos, i) in indices.enumerated() {
       let child = e.children[i]
       let sizing = sizes[pos]
@@ -1358,14 +1479,24 @@ public struct LayoutEngine {
       } else {
         cross = min(crossExtent, vertical ? natural.width : natural.height)
       }
-      let size = vertical ? Size(width: cross, height: main) : Size(width: main, height: cross)
-      let slot =
-        vertical
-        ? Rect(x: rect.minX, y: cursor, width: crossExtent, height: main)
-        : Rect(x: cursor, y: rect.minY, width: main, height: crossExtent)
-      place(
-        &e.children[i],
-        in: aligned(size, in: slot, alignment: alignment, child: child))
+      if let shifts = customGuideShifts, vertical {
+        let shift = shifts[pos]
+        let availW = max(0, crossExtent - shift)
+        let placedW = min(cross, availW)
+        let childRect = Rect(x: rect.minX + shift, y: cursor, width: placedW, height: main)
+        place(&e.children[i], in: childRect)
+      } else {
+        let size = vertical ? Size(width: cross, height: main) : Size(width: main, height: cross)
+        let slot =
+          vertical
+          ? Rect(x: rect.minX, y: cursor, width: crossExtent, height: main)
+          : Rect(x: cursor, y: rect.minY, width: main, height: crossExtent)
+        place(
+          &e.children[i],
+          in: aligned(
+            size, in: slot, alignment: alignment, child: child,
+            applyHorizontalGuide: vertical, applyVerticalGuide: !vertical))
+      }
       if let stackKey = e.lazyCacheKey, let itemID = e.children[i].explicitID,
          !e.children[i].children.isEmpty
       {

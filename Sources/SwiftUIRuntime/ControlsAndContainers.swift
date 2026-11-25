@@ -1873,12 +1873,25 @@ private struct SelectableListBody<SelectionValue: Hashable, Content: View>: View
   }
 }
 
+public protocol DynamicViewContent: View {
+  associatedtype Data: Collection
+  var data: Data { get }
+}
+
 public struct List<SelectionValue: Hashable, Content: View>: View {
   let selection: Binding<SelectionValue?>?
   let content: Content
 
   public init(selection: Binding<SelectionValue?>?, @ViewBuilder content: () -> Content) {
     self.selection = selection
+    self.content = content()
+  }
+
+  public init(selection: Binding<SelectionValue>, @ViewBuilder content: () -> Content) {
+    self.selection = Binding<SelectionValue?>(
+      get: { selection.wrappedValue },
+      set: { if let v = $0 { selection.wrappedValue = v } }
+    )
     self.content = content()
   }
 

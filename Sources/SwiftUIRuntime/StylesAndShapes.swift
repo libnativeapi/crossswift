@@ -352,6 +352,48 @@ public struct ForegroundStyle: ShapeStyle, Sendable {
   }
 }
 
+public struct FillShapeStyle: ShapeStyle, Hashable, Sendable {
+  public let level: HierarchicalShapeStyle.Level
+  public init(level: HierarchicalShapeStyle.Level = .primary) { self.level = level }
+
+  public var primary: FillShapeStyle { FillShapeStyle(level: .primary) }
+  public var secondary: FillShapeStyle { FillShapeStyle(level: .secondary) }
+  public var tertiary: FillShapeStyle { FillShapeStyle(level: .tertiary) }
+  public var quaternary: FillShapeStyle { FillShapeStyle(level: .quaternary) }
+  public var quinary: FillShapeStyle { FillShapeStyle(level: .quinary) }
+
+  public func _resolvePrimaryColor(in env: EnvironmentValues) -> Color {
+    let alpha: Double
+    switch level {
+    case .primary: alpha = 0.20
+    case .secondary: alpha = 0.14
+    case .tertiary: alpha = 0.10
+    case .quaternary: alpha = 0.06
+    case .quinary: alpha = 0.04
+    }
+    return Color { scheme in
+      scheme == .dark ? (1.0, 1.0, 1.0, alpha) : (0.0, 0.0, 0.0, alpha)
+    }
+  }
+}
+
+extension ShapeStyle where Self == FillShapeStyle {
+  public static var fill: FillShapeStyle { FillShapeStyle() }
+}
+
+extension Color {
+  public static let findHighlightColor = Color(red: 1.0, green: 0.92, blue: 0.35, opacity: 1.0)
+}
+
+extension Shape where Self == UnevenRoundedRectangle {
+  public static func rect(
+    cornerRadii: RectangleCornerRadii,
+    style: RoundedCornerStyle = .continuous
+  ) -> UnevenRoundedRectangle {
+    UnevenRoundedRectangle(cornerRadii: cornerRadii, style: style)
+  }
+}
+
 public struct BackgroundStyle: ShapeStyle, Sendable {
   public init() {}
   public func _resolvePrimaryColor(in env: EnvironmentValues) -> Color {
@@ -669,11 +711,19 @@ extension Font {
     return copy
   }
 
-  public func bold(_ isActive: Bool = true) -> Font {
+  public func bold() -> Font {
+    weight(.bold)
+  }
+
+  public func bold(_ isActive: Bool) -> Font {
     isActive ? weight(.bold) : weight(.regular)
   }
 
-  public func italic(_ isActive: Bool = true) -> Font {
+  public func italic() -> Font {
+    self
+  }
+
+  public func italic(_ isActive: Bool) -> Font {
     self
   }
 

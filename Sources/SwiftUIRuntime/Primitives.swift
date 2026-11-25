@@ -35,6 +35,7 @@ public struct Text: View {
   var textTracking: Double = 0
   var textFont: Font?, textColor: Color?
   var localizedKey: LocalizedStringKey?
+  var localizedTableName: String?
   public let content: String
 
   nonisolated public init(verbatim content: String) {
@@ -58,7 +59,8 @@ public struct Text: View {
     comment: StaticString? = nil
   ) {
     self.localizedKey = key
-    self.content = key.resolved()
+    self.localizedTableName = tableName
+    self.content = key.resolved(tableName: tableName)
   }
 
   @_disfavoredOverload
@@ -107,7 +109,7 @@ public struct Text: View {
 extension Text: _PrimitiveView {
   func _makeElement(path: ViewPath) -> Element {
     var props = NodeProps()
-    let resolvedText = localizedKey?.resolved(locale: EnvironmentValues.current.locale) ?? content
+    let resolvedText = localizedKey?.resolved(tableName: localizedTableName, locale: EnvironmentValues.current.locale) ?? content
     props.text = resolvedText
     props.font = textFont ?? EnvironmentValues.current.font
     props.foreground = textColor
@@ -278,7 +280,10 @@ func flattenChildren(_ element: Element) -> [Element] {
       inheritedLineLimit: Int?,
       inheritedLineSpacing: Double,
       inheritedForeground: Color?,
-      inheritedFont: Font?
+      inheritedFont: Font?,
+      inheritedOpacity: Double,
+      inheritedVisible: Bool,
+      inheritedAccessibilityHidden: Bool
     ) {
       let tag = child.tagValue ?? inheritedTag
       let eid = child.explicitID ?? inheritedID
@@ -286,6 +291,9 @@ func flattenChildren(_ element: Element) -> [Element] {
       let lineSpacing = child.props.lineSpacing != 0 ? child.props.lineSpacing : inheritedLineSpacing
       let foreground = child.props.foreground ?? inheritedForeground
       let font = child.props.font ?? inheritedFont
+      let opacity = child.props.opacity * inheritedOpacity
+      let visible = child.props.visible && inheritedVisible
+      let accHidden = child.props.accessibilityHidden || inheritedAccessibilityHidden
       switch child.kind {
       case .fragment:
         let propagateID = child.children.count == 1 ? eid : nil
@@ -297,7 +305,10 @@ func flattenChildren(_ element: Element) -> [Element] {
             inheritedLineLimit: lineLimit,
             inheritedLineSpacing: lineSpacing,
             inheritedForeground: foreground,
-            inheritedFont: font)
+            inheritedFont: font,
+            inheritedOpacity: opacity,
+            inheritedVisible: visible,
+            inheritedAccessibilityHidden: accHidden)
         }
       case .empty: break
       default:
@@ -312,6 +323,9 @@ func flattenChildren(_ element: Element) -> [Element] {
           resolved.props.foreground = foreground
         }
         if resolved.props.font == nil, let font { resolved.props.font = font }
+        resolved.props.opacity = opacity
+        resolved.props.visible = visible
+        resolved.props.accessibilityHidden = accHidden
         children.append(resolved)
       }
     }
@@ -324,7 +338,10 @@ func flattenChildren(_ element: Element) -> [Element] {
         inheritedLineLimit: element.props.lineLimit,
         inheritedLineSpacing: element.props.lineSpacing,
         inheritedForeground: element.props.foreground,
-        inheritedFont: element.props.font)
+        inheritedFont: element.props.font,
+        inheritedOpacity: element.props.opacity,
+        inheritedVisible: element.props.visible,
+        inheritedAccessibilityHidden: element.props.accessibilityHidden)
     }
     return children
   }
@@ -384,7 +401,7 @@ extension Text {
     if !runs.isEmpty {
       return runs.map(\.text).joined()
     }
-    return localizedKey?.resolved(locale: environment.locale) ?? content
+    return localizedKey?.resolved(tableName: localizedTableName, locale: environment.locale) ?? content
   }
 
   public struct Layout: RandomAccessCollection, Sendable {

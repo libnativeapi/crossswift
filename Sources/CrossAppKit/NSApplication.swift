@@ -259,8 +259,50 @@ open class NSApplication: NSResponder, @unchecked Sendable {
     }
   }
 
+  public struct AboutPanelOptionKey: RawRepresentable, Equatable, Hashable, Sendable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static let credits = AboutPanelOptionKey(rawValue: "Credits")
+    public static let applicationName = AboutPanelOptionKey(rawValue: "ApplicationName")
+    public static let applicationIcon = AboutPanelOptionKey(rawValue: "ApplicationIcon")
+    public static let version = AboutPanelOptionKey(rawValue: "Version")
+    public static let applicationVersion = AboutPanelOptionKey(rawValue: "ApplicationVersion")
+  }
+
+  public func orderFrontStandardAboutPanel(_ sender: Any? = nil) {}
+  public func orderFrontStandardAboutPanel(options optionsDictionary: [AboutPanelOptionKey: Any] = [:]) {}
+
   public func registerForRemoteNotifications() {}
   public func unregisterForRemoteNotifications() {}
+
+  private var lastModalResponse: NSModalResponse = .OK
+
+  public func runModal(for theWindow: NSWindow) -> NSModalResponse {
+    lastModalResponse
+  }
+
+  public func stopModal(withCode returnCode: NSModalResponse) {
+    lastModalResponse = returnCode
+  }
+
+  public func stopModal() {
+    lastModalResponse = .stop
+  }
+
+  public func target(forAction action: Selector, to target: Any?, from sender: Any?) -> Any? {
+    target
+  }
+
+  public func nextEvent(
+    matching mask: NSEvent.EventTypeMask,
+    until expiration: Date?,
+    inMode mode: RunLoop.Mode,
+    dequeue deqFlag: Bool
+  ) -> NSEvent? {
+    nil
+  }
+
+  public func postEvent(_ event: NSEvent, atStart flag: Bool) {}
 
   nonisolated public static var _systemPreferredLanguages: [String] {
     #if os(Windows)

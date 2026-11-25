@@ -158,7 +158,9 @@ enum {
 typedef uint32_t OSType;
 typedef int32_t OSStatus;
 typedef uint32_t OptionBits;
+typedef uint16_t UniChar;
 static const OSStatus noErr = 0;
+static const OSStatus errSecAllocate = -108;
 enum {
   eventNotHandledErr = -9874
 };
@@ -186,18 +188,85 @@ static inline OSStatus UCKeyTranslate(
   size_t *actualStringLength,
   uint16_t *unicodeString
 ) {
-  (void)keyLayoutPtr; (void)virtualKeyCode; (void)keyAction;
-  (void)modifierKeyState; (void)keyboardType; (void)keyTranslateOptions;
-  (void)deadKeyState; (void)maxStringLength; (void)unicodeString;
+  (void)keyLayoutPtr; (void)keyAction; (void)keyboardType; (void)keyTranslateOptions;
+  if (deadKeyState) *deadKeyState = 0;
+  bool shift = ((modifierKeyState << 8) & shiftKey) != 0;
+  uint16_t ch = 0;
+  switch (virtualKeyCode) {
+    case kVK_ANSI_A: ch = shift ? 'A' : 'a'; break;
+    case kVK_ANSI_B: ch = shift ? 'B' : 'b'; break;
+    case kVK_ANSI_C: ch = shift ? 'C' : 'c'; break;
+    case kVK_ANSI_D: ch = shift ? 'D' : 'd'; break;
+    case kVK_ANSI_E: ch = shift ? 'E' : 'e'; break;
+    case kVK_ANSI_F: ch = shift ? 'F' : 'f'; break;
+    case kVK_ANSI_G: ch = shift ? 'G' : 'g'; break;
+    case kVK_ANSI_H: ch = shift ? 'H' : 'h'; break;
+    case kVK_ANSI_I: ch = shift ? 'I' : 'i'; break;
+    case kVK_ANSI_J: ch = shift ? 'J' : 'j'; break;
+    case kVK_ANSI_K: ch = shift ? 'K' : 'k'; break;
+    case kVK_ANSI_L: ch = shift ? 'L' : 'l'; break;
+    case kVK_ANSI_M: ch = shift ? 'M' : 'm'; break;
+    case kVK_ANSI_N: ch = shift ? 'N' : 'n'; break;
+    case kVK_ANSI_O: ch = shift ? 'O' : 'o'; break;
+    case kVK_ANSI_P: ch = shift ? 'P' : 'p'; break;
+    case kVK_ANSI_Q: ch = shift ? 'Q' : 'q'; break;
+    case kVK_ANSI_R: ch = shift ? 'R' : 'r'; break;
+    case kVK_ANSI_S: ch = shift ? 'S' : 's'; break;
+    case kVK_ANSI_T: ch = shift ? 'T' : 't'; break;
+    case kVK_ANSI_U: ch = shift ? 'U' : 'u'; break;
+    case kVK_ANSI_V: ch = shift ? 'V' : 'v'; break;
+    case kVK_ANSI_W: ch = shift ? 'W' : 'w'; break;
+    case kVK_ANSI_X: ch = shift ? 'X' : 'x'; break;
+    case kVK_ANSI_Y: ch = shift ? 'Y' : 'y'; break;
+    case kVK_ANSI_Z: ch = shift ? 'Z' : 'z'; break;
+    case kVK_ANSI_0: ch = shift ? ')' : '0'; break;
+    case kVK_ANSI_1: ch = shift ? '!' : '1'; break;
+    case kVK_ANSI_2: ch = shift ? '@' : '2'; break;
+    case kVK_ANSI_3: ch = shift ? '#' : '3'; break;
+    case kVK_ANSI_4: ch = shift ? '$' : '4'; break;
+    case kVK_ANSI_5: ch = shift ? '%' : '5'; break;
+    case kVK_ANSI_6: ch = shift ? '^' : '6'; break;
+    case kVK_ANSI_7: ch = shift ? '&' : '7'; break;
+    case kVK_ANSI_8: ch = shift ? '*' : '8'; break;
+    case kVK_ANSI_9: ch = shift ? '(' : '9'; break;
+    case kVK_ANSI_Minus: ch = shift ? '_' : '-'; break;
+    case kVK_ANSI_Equal: ch = shift ? '+' : '='; break;
+    case kVK_ANSI_LeftBracket: ch = shift ? '{' : '['; break;
+    case kVK_ANSI_RightBracket: ch = shift ? '}' : ']'; break;
+    case kVK_ANSI_Backslash: ch = shift ? '|' : '\\'; break;
+    case kVK_ANSI_Semicolon: ch = shift ? ':' : ';'; break;
+    case kVK_ANSI_Quote: ch = shift ? '"' : '\''; break;
+    case kVK_ANSI_Comma: ch = shift ? '<' : ','; break;
+    case kVK_ANSI_Period: ch = shift ? '>' : '.'; break;
+    case kVK_ANSI_Slash: ch = shift ? '?' : '/'; break;
+    case kVK_ANSI_Grave: ch = shift ? '~' : '`'; break;
+    case kVK_Space: ch = ' '; break;
+    default: break;
+  }
+  if (ch != 0 && maxStringLength >= 1 && unicodeString) {
+    unicodeString[0] = ch;
+    if (actualStringLength) *actualStringLength = 1;
+    return noErr;
+  }
   if (actualStringLength) *actualStringLength = 0;
   return -1;
 }
 
-static const uint32_t kEventParamDirectObject = 0x2D2D2D2D; // '----'
-static const uint32_t typeEventHotKeyID       = 0x686B6964; // 'hkid'
-static const uint32_t kEventClassKeyboard     = 0x6B657962; // 'keyb'
-static const uint32_t kEventHotKeyPressed     = 5;
-static const uint32_t kEventHotKeyReleased    = 6;
+enum {
+  kEventParamDirectObject = 0x2D2D2D2D, // '----'
+  kEventParamKeyCode      = 0x6B636F64, // 'kcod'
+  kEventParamKeyModifiers = 0x6B6D6F64, // 'kmod'
+  kEventClassKeyboard     = 0x6B657962, // 'keyb'
+  kEventRawKeyDown        = 1,
+  kEventRawKeyRepeat      = 2,
+  kEventRawKeyUp          = 3,
+  kEventRawKeyModifiersChanged = 4,
+  kEventHotKeyPressed     = 5,
+  kEventHotKeyReleased    = 6
+};
+
+static const uint32_t typeEventHotKeyID = 0x686B6964; // 'hkid'
+static const uint32_t typeUInt32        = 0x6D61676E; // 'magn'
 
 typedef struct OpaqueEventTargetRef *EventTargetRef;
 typedef struct OpaqueEventHandlerCallRef *EventHandlerCallRef;
@@ -232,6 +301,24 @@ OSStatus InstallEventHandler(
   void *inUserData,
   EventHandlerRef *outRef
 );
+
+static inline OSStatus AddEventTypesToHandler(
+  EventHandlerRef inHandlerRef,
+  intptr_t inNumTypes,
+  const EventTypeSpec *inList
+) {
+  (void)inHandlerRef; (void)inNumTypes; (void)inList;
+  return noErr;
+}
+
+static inline OSStatus RemoveEventTypesFromHandler(
+  EventHandlerRef inHandlerRef,
+  intptr_t inNumTypes,
+  const EventTypeSpec *inList
+) {
+  (void)inHandlerRef; (void)inNumTypes; (void)inList;
+  return noErr;
+}
 
 OSStatus RegisterEventHotKey(
   uint32_t inHotKeyCode,

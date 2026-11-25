@@ -268,16 +268,20 @@ public final class NativeViewBackend: RenderBackend {
     let alignment: NativeAPI.ViewAlignment?
     switch parentKind {
     case .container(.vertical):
-      switch parentProps.horizontalAlignment {
-      case .leading: alignment = .start
-      case .center: alignment = .center
-      case .trailing: alignment = .end
+      if parentProps.horizontalAlignment == .leading {
+        alignment = .start
+      } else if parentProps.horizontalAlignment == .trailing {
+        alignment = .end
+      } else {
+        alignment = .center
       }
     case .container(.horizontal):
-      switch parentProps.verticalAlignment {
-      case .top: alignment = .start
-      case .center: alignment = .center
-      case .bottom: alignment = .end
+      if parentProps.verticalAlignment == .top {
+        alignment = .start
+      } else if parentProps.verticalAlignment == .bottom {
+        alignment = .end
+      } else {
+        alignment = .center
       }
     case .padding:
       alignment = .stretch

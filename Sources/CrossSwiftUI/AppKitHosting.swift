@@ -49,14 +49,32 @@ protocol _HostedViewMount: AnyObject {
   func dismantle()
 }
 
+struct _HostedMaterialSurface {
+  let fillColor: SwiftUIRuntime.Color
+  let borderColor: SwiftUIRuntime.Color
+  let cornerRadius: Double
+}
+
+struct _HostedTextFieldDisplay {
+  let text: String
+  let isPlaceholder: Bool
+  let fillColor: SwiftUIRuntime.Color
+  let borderColor: SwiftUIRuntime.Color
+  let textColor: SwiftUIRuntime.Color
+}
+
 protocol _HostedViewBackendBridge: AnyObject {
   func createMount(frame: CGRect) -> (mount: any _HostedViewMount, nativeView: NativeAPI.View?)
   func updateMount(_ mount: any _HostedViewMount, frame: CGRect)
   func editorDescriptor(for mount: any _HostedViewMount) -> _HostedEditorDescriptor?
+  func materialSurface() -> _HostedMaterialSurface?
+  func textFieldDisplay(for mount: any _HostedViewMount) -> _HostedTextFieldDisplay?
 }
 
 extension _HostedViewBackendBridge {
   func editorDescriptor(for mount: any _HostedViewMount) -> _HostedEditorDescriptor? { nil }
+  func materialSurface() -> _HostedMaterialSurface? { nil }
+  func textFieldDisplay(for mount: any _HostedViewMount) -> _HostedTextFieldDisplay? { nil }
 }
 
 // MARK: - Color / Font / Image AppKit Interop
@@ -78,6 +96,31 @@ extension SwiftUIRuntime.Color {
   public init(_ nsColor: CrossAppKit.NSColor) {
     self.init(nsColor: nsColor)
   }
+
+  #if !os(macOS)
+    public init(cgColor: CGColor) {
+      self.init(
+        red: Double(cgColor.red),
+        green: Double(cgColor.green),
+        blue: Double(cgColor.blue),
+        opacity: Double(cgColor.alpha)
+      )
+    }
+
+    public init(_ cgColor: CGColor) {
+      self.init(cgColor: cgColor)
+    }
+
+    public var cgColor: CGColor? {
+      let r = resolved(in: .light)
+      return CGColor(
+        red: CGFloat(r.red),
+        green: CGFloat(r.green),
+        blue: CGFloat(r.blue),
+        alpha: CGFloat(r.opacity)
+      )
+    }
+  #endif
 }
 
 extension CrossAppKit.NSColor {
@@ -451,6 +494,59 @@ private final class HostedViewBridge<R: NSViewRepresentable>: _HostedViewBackend
     )
   }
 
+  func materialSurface() -> _HostedMaterialSurface? {
+    guard R.NSViewType.self is NSGlassEffectView.Type || R.NSViewType.self is NSVisualEffectView.Type else {
+      return nil
+    }
+    let isDark = environment.colorScheme == .dark
+    let hostRadius = MainActor.assumeIsolated {
+      Double(hostContainer?.layer?.cornerRadius ?? hostContainer?.superview?.layer?.cornerRadius ?? 0)
+    }
+    let radius = hostRadius > 0 ? hostRadius : 12.0
+    let fill = isDark
+      ? SwiftUIRuntime.Color(red: 0.145, green: 0.145, blue: 0.16, opacity: 0.96)
+      : SwiftUIRuntime.Color(red: 0.965, green: 0.965, blue: 0.975, opacity: 0.96)
+    let border = isDark
+      ? SwiftUIRuntime.Color(red: 1.0, green: 1.0, blue: 1.0, opacity: 0.14)
+      : SwiftUIRuntime.Color(red: 0.0, green: 0.0, blue: 0.0, opacity: 0.12)
+    return _HostedMaterialSurface(fillColor: fill, borderColor: border, cornerRadius: radius)
+  }
+
+  func textFieldDisplay(for mount: any _HostedViewMount) -> _HostedTextFieldDisplay? {
+    MainActor.assumeIsolated {
+      guard let typed = mount as? HostedMountInstance<R>,
+            let tf = typed.typedView as? NSTextField,
+            tf.ownedNativeView == nil
+      else { return nil }
+      let isDark = environment.colorScheme == .dark
+      let val = tf.stringValue
+      let placeholder = tf.placeholderString ?? tf.placeholderAttributedString?.string ?? ""
+      let isPlaceholder = val.isEmpty
+      let display = isPlaceholder ? placeholder : val
+      let fill = isDark
+        ? SwiftUIRuntime.Color(red: 0.22, green: 0.22, blue: 0.24, opacity: 1.0)
+        : SwiftUIRuntime.Color(red: 1.0, green: 1.0, blue: 1.0, opacity: 1.0)
+      let border = isDark
+        ? SwiftUIRuntime.Color(red: 1.0, green: 1.0, blue: 1.0, opacity: 0.22)
+        : SwiftUIRuntime.Color(red: 0.0, green: 0.0, blue: 0.0, opacity: 0.22)
+      let fg: SwiftUIRuntime.Color
+      if isPlaceholder {
+        fg = isDark
+          ? SwiftUIRuntime.Color(red: 1.0, green: 1.0, blue: 1.0, opacity: 0.45)
+          : SwiftUIRuntime.Color(red: 0.0, green: 0.0, blue: 0.0, opacity: 0.42)
+      } else {
+        fg = isDark ? .white : SwiftUIRuntime.Color(red: 0.1, green: 0.1, blue: 0.12, opacity: 1.0)
+      }
+      return _HostedTextFieldDisplay(
+        text: display,
+        isPlaceholder: isPlaceholder,
+        fillColor: fill,
+        borderColor: border,
+        textColor: fg
+      )
+    }
+  }
+
   func hitTest(key: AnyHashable, event: Int, rootPoint: CGPoint, modifiers: EventModifiers) -> Bool {
     guard event == 2 || event == 3 || event == 4 || event == 9 else { return false }
     return MainActor.assumeIsolated {
@@ -558,6 +654,10 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
     private var pendingWindowBoundsCommit: (() -> Void)?
     private var surfaceContentOffset: NSPoint = .zero
     private var usesEnvelopeSizing = false
+    private var usesRetainedChildSurface = false
+    private weak var retainedWindow: NSWindow?
+    private var lastRenderedToolbarSelection: NSToolbarItem.Identifier?
+    private var lastSyncedDarkMode: Bool?
   #elseif os(Linux) && !CROSS_SWIFTUI_HARMONY
     private var backend: LinuxDrawingBackend?
   #else
@@ -577,14 +677,32 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
   }
 
   open override var intrinsicContentSize: NSSize {
+    #if os(Windows)
+      let activeWin = window ?? retainedWindow
+      let isRetained = usesRetainedChildSurface
+    #else
+      let activeWin = window
+      let isRetained = false
+    #endif
+    let toolbarH: CGFloat = {
+      guard let win = activeWin else { return 0 }
+      let isRootHost = (win.contentView === self)
+        || (superview === win.contentView && superview?.ownedNativeView == nil)
+        || isRetained
+      return isRootHost ? win._visibleToolbarHeight : 0
+    }()
     if let renderer {
+      let proposedWidth: CGFloat? = (toolbarH > 0 || frame.width <= 0) ? nil : frame.width
       let measured = renderer.sizeThatFits(
         ProposedViewSize(
-          width: frame.width > 0 ? frame.width : nil,
+          width: proposedWidth,
           height: nil
         )
       )
-      return NSSize(width: CGFloat(measured.width), height: CGFloat(measured.height))
+      return NSSize(
+        width: CGFloat(measured.width),
+        height: max(0, CGFloat(measured.height) - toolbarH)
+      )
     }
     let proposedWidth: CGFloat? = (sizingOptions == [.intrinsicContentSize] || frame.width <= 0) ? nil : frame.width
     return measureDetached(proposal: ProposedViewSize(width: proposedWidth, height: nil))
@@ -604,18 +722,66 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
     let dummy = _HeadlessRenderBackend()
     let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     dummy.environment.colorScheme = isDark ? SwiftUIRuntime.ColorScheme.dark : SwiftUIRuntime.ColorScheme.light
-    let temp = Renderer(backend: dummy, root: AnyView(rootView), size: SwiftUIRuntime.Size(width: Double(proposal.width ?? 420), height: Double(proposal.height ?? 800)), layoutEngine: engine)
+    let temp = Renderer(backend: dummy, root: AnyView(HostingScopeView(host: self, content: rootView, includeToolbar: false)), size: SwiftUIRuntime.Size(width: Double(proposal.width ?? 420), height: Double(proposal.height ?? 800)), layoutEngine: engine)
     let sz = temp.sizeThatFits(proposal)
     return NSSize(width: CGFloat(sz.width), height: CGFloat(sz.height))
   }
 
   open override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
-    if window != nil {
-      attachIfPossible()
-    } else {
-      teardownRenderer()
-    }
+    #if os(Windows)
+      if let win = window {
+        if usesRetainedChildSurface, let renderer {
+          if retainedWindow === win {
+            let targetSize = frame.width > 0 && frame.height > 0 ? frame.size : win.contentLayoutRect.size
+            if targetSize.width > 0 && targetSize.height > 0 {
+              if frame.size != targetSize || frame.origin != .zero {
+                frame = NSRect(origin: .zero, size: targetSize)
+              } else {
+                ownedNativeView?.setFrame(NativeAPI.Rectangle(
+                  x: 0, y: 0, width: Double(targetSize.width), height: Double(targetSize.height)
+                ))
+              }
+              renderer.resize(to: SwiftUIRuntime.Size(width: Double(targetSize.width), height: Double(targetSize.height)))
+            }
+            let isDark = win.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            if lastSyncedDarkMode != isDark {
+              syncAppearanceAndBackground()
+              renderer.setNeedsRender()
+            }
+            let desiredSelection = win.toolbar?._effectiveSelectedItemIdentifier
+            if lastRenderedToolbarSelection != desiredSelection {
+              lastRenderedToolbarSelection = desiredSelection
+              renderer.setNeedsRender()
+            }
+            win.toolbar?.onSelectionChanged = { [weak self, weak renderer, weak win] in
+              self?.lastRenderedToolbarSelection = win?.toolbar?._effectiveSelectedItemIdentifier
+              renderer?.setNeedsRender()
+            }
+            ActiveHostingContext.currentHostingView = self
+            renderer.renderIfNeeded()
+            ActiveHostingContext.currentHostingView = nil
+            backend?.showOnTop(deferPaint: win._hasPendingTransitionFrame)
+            return
+          } else {
+            teardownRenderer()
+          }
+        }
+        attachIfPossible()
+      } else {
+        if usesRetainedChildSurface, retainedWindow != nil {
+          ownedNativeView?.setVisible(false)
+        } else {
+          teardownRenderer()
+        }
+      }
+    #else
+      if window != nil {
+        attachIfPossible()
+      } else {
+        teardownRenderer()
+      }
+    #endif
   }
 
   private var isFlushingLayout = false
@@ -767,6 +933,7 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
     guard let win = window else { return }
     let isDark = win.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     #if os(Windows)
+      lastSyncedDarkMode = isDark
       backend?.environmentTransform = { env in
         env.colorScheme = isDark ? SwiftUIRuntime.ColorScheme.dark : SwiftUIRuntime.ColorScheme.light
       }
@@ -807,24 +974,56 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
       return
     #else
     guard renderer == nil, let win = window, let nativeWin = win.nativeWindow else { return }
-    let targetView: NativeAPI.View
-    let isWindowRootHost = (win.contentView === self)
-      || (superview === win.contentView && superview?.ownedNativeView == nil && superview?.subviews.count == 1)
-    if isWindowRootHost, let cv = nativeWin.contentView {
-      self.ownedNativeView = cv
-      targetView = cv
-    } else if let subNV = ensureNativeView() {
-      if let parentNV = superview?.ownedNativeView ?? nativeWin.contentView {
-        parentNV.addSubview(subNV)
-      }
-      targetView = subNV
-    } else {
-      return
-    }
-
     let initialSize = frame.width > 0 && frame.height > 0 ? frame.size : win.contentLayoutRect.size
     let w = Double(max(1, initialSize.width))
     let h = Double(max(1, initialSize.height))
+
+    let targetView: NativeAPI.View
+    let isDirectWindowContent = (win.contentView === self)
+    let isContainerTabChild = !isDirectWindowContent
+      && (superview === win.contentView && superview?.ownedNativeView == nil)
+    #if os(Windows)
+      if isDirectWindowContent, let cv = nativeWin.contentView {
+        self.ownedNativeView = cv
+        self.usesRetainedChildSurface = false
+        self.retainedWindow = nil
+        targetView = cv
+      } else if let subNV = ensureNativeView() {
+        // Hide container tab surfaces BEFORE reparenting/sizing so the newly created
+        // WS_VISIBLE HWND never flashes unpainted over the active tab on first visit.
+        if isContainerTabChild {
+          subNV.setVisible(false)
+        }
+        if let parentNV = superview?.ownedNativeView ?? nativeWin.contentView {
+          parentNV.addSubview(subNV)
+        }
+        subNV.setFrame(NativeAPI.Rectangle(
+          x: Double(frame.origin.x), y: Double(frame.origin.y), width: w, height: h
+        ))
+        if !isContainerTabChild {
+          subNV.setVisible(true)
+        }
+        self.usesRetainedChildSurface = isContainerTabChild
+        self.retainedWindow = isContainerTabChild ? win : nil
+        targetView = subNV
+      } else {
+        return
+      }
+    #else
+      let isWindowRootHost = isDirectWindowContent
+        || (isContainerTabChild && superview?.subviews.count == 1)
+      if isWindowRootHost, let cv = nativeWin.contentView {
+        self.ownedNativeView = cv
+        targetView = cv
+      } else if let subNV = ensureNativeView() {
+        if let parentNV = superview?.ownedNativeView ?? nativeWin.contentView {
+          parentNV.addSubview(subNV)
+        }
+        targetView = subNV
+      } else {
+        return
+      }
+    #endif
 
     #if os(Windows)
       WindowsDrawingBackend.prepareApplication()
@@ -944,6 +1143,15 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
         createdRenderer?.interact(id, interaction)
       }
       createdRenderer.mount()
+      if isContainerTabChild {
+        createdBackend.showOnTop(deferPaint: win._hasPendingTransitionFrame)
+      }
+      lastRenderedToolbarSelection = win.toolbar?._effectiveSelectedItemIdentifier
+      lastSyncedDarkMode = win.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+      win.toolbar?.onSelectionChanged = { [weak self, weak createdRenderer, weak win] in
+        self?.lastRenderedToolbarSelection = win?.toolbar?._effectiveSelectedItemIdentifier
+        createdRenderer?.setNeedsRender()
+      }
       ActiveHostingContext.currentHostingView = nil
     #elseif os(Linux) && !CROSS_SWIFTUI_HARMONY
       guard let createdBackend = LinuxDrawingBackend(window: nativeWin) else { return }
@@ -1005,6 +1213,14 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
         NotificationCenter.default.removeObserver(obs)
         keyWindowObserver = nil
       }
+      if usesRetainedChildSurface, let nv = ownedNativeView {
+        _ = retainedWindow?.nativeWindow?.contentView?.removeSubview(nv)
+        ownedNativeView = nil
+      }
+      usesRetainedChildSurface = false
+      retainedWindow = nil
+      lastRenderedToolbarSelection = nil
+      lastSyncedDarkMode = nil
     #endif
     ActiveHostingContext.mountsByHost.removeValue(forKey: ObjectIdentifier(self))
     renderer = nil
@@ -1148,13 +1364,107 @@ open class NSHostingView<Content: SwiftUIRuntime.View>: NSView {
   }
 }
 
+private struct WindowToolbarBarView: SwiftUIRuntime.View {
+  let toolbar: NSToolbar
+  @Environment(\.colorScheme) private var colorScheme
+
+  var body: some SwiftUIRuntime.View {
+    let items: [NSToolbarItem] = MainActor.assumeIsolated {
+      toolbar.populateFromDelegateIfNeeded()
+      return toolbar.items.filter {
+        $0.itemIdentifier != .flexibleSpace && $0.itemIdentifier != .space
+      }
+    }
+    let selectedID: NSToolbarItem.Identifier? = MainActor.assumeIsolated {
+      toolbar._effectiveSelectedItemIdentifier
+    }
+    let isDark = colorScheme == .dark
+    let barBg = isDark
+      ? SwiftUIRuntime.Color(red: 0.16, green: 0.16, blue: 0.175, opacity: 1.0)
+      : SwiftUIRuntime.Color(red: 0.94, green: 0.94, blue: 0.955, opacity: 1.0)
+    let selectedBg = isDark
+      ? SwiftUIRuntime.Color(red: 1.0, green: 1.0, blue: 1.0, opacity: 0.14)
+      : SwiftUIRuntime.Color(red: 0.0, green: 0.0, blue: 0.0, opacity: 0.08)
+
+    HStack(spacing: 4) {
+      Spacer(minLength: 0)
+      ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+        let isSelected = item.itemIdentifier == selectedID
+        VStack(spacing: 3) {
+          if let sym = item.image?.symbolName {
+            Image(systemName: sym)
+              .font(.system(size: 18, weight: .regular))
+              .frame(width: 22, height: 22)
+          }
+          if !item.label.isEmpty {
+            Text(verbatim: item.label)
+              .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+              .lineLimit(1)
+          }
+        }
+        .foregroundStyle(isSelected ? SwiftUIRuntime.Color.accentColor : SwiftUIRuntime.Color.primary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(isSelected ? selectedBg : SwiftUIRuntime.Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture {
+          DispatchQueue.main.async {
+            toolbar._pendingSelectedItemIdentifier = item.itemIdentifier
+            item.performAction()
+            toolbar._pendingSelectedItemIdentifier = nil
+            if let win = NSApplication.shared.windows.first(where: { $0.toolbar === toolbar }) {
+              win._commitPendingTransitionFrameIfNeeded()
+              win.contentView?.flushNativeWindowPaint()
+            }
+          }
+        }
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(.horizontal, 12)
+    .frame(maxWidth: .infinity, minHeight: 60, maxHeight: 60)
+    .background(barBg)
+  }
+}
+
 private struct HostingScopeView<Content: SwiftUIRuntime.View>: SwiftUIRuntime.View {
   weak var host: NSView?
   let content: Content
+  let includeToolbar: Bool
+
+  init(host: NSView?, content: Content, includeToolbar: Bool = true) {
+    self.host = host
+    self.content = content
+    self.includeToolbar = includeToolbar
+  }
 
   var body: some SwiftUIRuntime.View {
     let _ = { ActiveHostingContext.currentHostingView = host }()
-    content.environment(\._currentHostingView, WeakHostingView(view: host))
+    let activeToolbar: NSToolbar? = MainActor.assumeIsolated {
+      guard includeToolbar, let host, let win = host.window, let tb = win.toolbar, tb.isVisible else {
+        return nil
+      }
+      let isRootHost = (win.contentView === host)
+        || (host.superview === win.contentView && host.superview?.ownedNativeView == nil)
+      guard isRootHost else { return nil }
+      tb.populateFromDelegateIfNeeded()
+      return tb.items.isEmpty ? nil : tb
+    }
+    Group {
+      if let toolbar = activeToolbar {
+        VStack(spacing: 0) {
+          WindowToolbarBarView(toolbar: toolbar)
+          Divider()
+          content
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .clipped()
+        }
+      } else {
+        content
+      }
+    }
+    .environment(\._currentHostingView, WeakHostingView(view: host))
   }
 }
 
