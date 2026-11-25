@@ -149,42 +149,115 @@ public final class XcodeProjectLoader {
     throw XcodeProjectLoaderError.projectNotFound(stdCwd.path)
   }
 
+  private enum ProjectDescriptor {
+    case pbxproj(URL)
+    case xcproj(URL)
+  }
+
+  private static func locateProjectDescriptor(in projectURL: URL) throws -> ProjectDescriptor {
+    let fm = FileManager.default
+    let xcprojURL = projectURL.appendingPathComponent("project.xcproj")
+    let pbxprojURL = projectURL.appendingPathComponent("project.pbxproj")
+    if fm.fileExists(atPath: xcprojURL.path) {
+      return .xcproj(xcprojURL)
+    }
+    if fm.fileExists(atPath: pbxprojURL.path) {
+      return .pbxproj(pbxprojURL)
+    }
+    throw XcodeProjectLoaderError.invalidProjectStructure(
+      "Missing project.pbxproj or project.xcproj at \(projectURL.path)"
+    )
+  }
+
   public func inspectMetadata(from inputURL: URL) throws -> XcodeProjectMetadata {
     let projectURL = try Self.resolveProjectBundleURL(from: inputURL)
     let projectName = projectURL.deletingPathExtension().lastPathComponent
-    let pbxprojURL = projectURL.appendingPathComponent("project.pbxproj")
-    guard FileManager.default.fileExists(atPath: pbxprojURL.path) else {
-      throw XcodeProjectLoaderError.invalidProjectStructure("Missing project.pbxproj at \(pbxprojURL.path)")
+    switch try Self.locateProjectDescriptor(in: projectURL) {
+    case .xcproj(let xcprojURL):
+      return try inspectXCProjMetadata(projectURL: projectURL, projectName: projectName, xcprojURL: xcprojURL)
+    case .pbxproj(let pbxprojURL):
+      let rawRoot = try OpenStepPlistParser.parse(fileAt: pbxprojURL)
+      guard let plist = rawRoot as? [String: Any],
+            let objects = plist["objects"] as? [String: [String: Any]],
+            let rootObjectID = plist["rootObject"] as? String,
+            let projectObject = objects[rootObjectID]
+      else {
+        throw XcodeProjectLoaderError.invalidProjectStructure("Missing rootObject or objects map in project.pbxproj")
+      }
+
+      let targetIDs = projectObject["targets"] as? [String] ?? []
+      let targetNames = targetIDs.compactMap { objects[$0]?["name"] as? String }
+
+      var configurations: [String] = []
+      var defaultConfigName = "Release"
+      if let configListID = projectObject["buildConfigurationList"] as? String,
+         let configList = objects[configListID]
+      {
+        if let defName = configList["defaultConfigurationName"] as? String, !defName.isEmpty {
+          defaultConfigName = defName
+        }
+        for cid in configList["buildConfigurations"] as? [String] ?? [] {
+          if let cname = objects[cid]?["name"] as? String, !configurations.contains(cname) {
+            configurations.append(cname)
+          }
+        }
+      }
+      if configurations.isEmpty {
+        configurations = ["Debug", "Release"]
+      }
+
+      let discoveredSchemes = Self.discoverSchemeNames(in: projectURL)
+      let schemes = discoveredSchemes.isEmpty ? targetNames : discoveredSchemes
+
+      return XcodeProjectMetadata(
+        name: projectName,
+        projectURL: projectURL,
+        configurations: configurations,
+        targets: targetNames,
+        schemes: schemes,
+        defaultConfigurationName: defaultConfigName
+      )
+    }
+  }
+
+  private func inspectXCProjMetadata(
+    projectURL: URL,
+    projectName: String,
+    xcprojURL: URL
+  ) throws -> XcodeProjectMetadata {
+    let rawRoot = try XCProjParser.parse(fileAt: xcprojURL)
+    guard let root = rawRoot as? [String: Any] else {
+      throw XcodeProjectLoaderError.invalidProjectStructure("Expected root object in project.xcproj")
     }
 
-    let rawRoot = try OpenStepPlistParser.parse(fileAt: pbxprojURL)
-    guard let plist = rawRoot as? [String: Any],
-          let objects = plist["objects"] as? [String: [String: Any]],
-          let rootObjectID = plist["rootObject"] as? String,
-          let projectObject = objects[rootObjectID]
-    else {
-      throw XcodeProjectLoaderError.invalidProjectStructure("Missing rootObject or objects map in project.pbxproj")
-    }
-
-    let targetIDs = projectObject["targets"] as? [String] ?? []
-    let targetNames = targetIDs.compactMap { objects[$0]?["name"] as? String }
+    let rawTargets = (root["targets"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }
+    let targetNames = rawTargets.compactMap { $0["name"] as? String }
 
     var configurations: [String] = []
-    var defaultConfigName = "Release"
-    if let configListID = projectObject["buildConfigurationList"] as? String,
-       let configList = objects[configListID]
-    {
-      if let defName = configList["defaultConfigurationName"] as? String, !defName.isEmpty {
-        defaultConfigName = defName
-      }
-      for cid in configList["buildConfigurations"] as? [String] ?? [] {
-        if let cname = objects[cid]?["name"] as? String, !configurations.contains(cname) {
-          configurations.append(cname)
+    if let rawConfigs = root["configurations"] as? [Any] {
+      for entry in rawConfigs {
+        if let name = entry as? String, !name.isEmpty, !configurations.contains(name) {
+          configurations.append(name)
+        } else if let dict = entry as? [String: Any],
+                  let name = dict["name"] as? String,
+                  !name.isEmpty,
+                  !configurations.contains(name)
+        {
+          configurations.append(name)
         }
       }
     }
     if configurations.isEmpty {
       configurations = ["Debug", "Release"]
+    }
+
+    let defaultConfigName: String
+    if let def = root["default-configuration"] as? String, !def.isEmpty {
+      defaultConfigName = def
+    } else if let def = root["defaultConfiguration"] as? String, !def.isEmpty {
+      defaultConfigName = def
+    } else {
+      defaultConfigName = configurations.contains("Release") ? "Release" : (configurations.first ?? "Release")
     }
 
     let discoveredSchemes = Self.discoverSchemeNames(in: projectURL)
@@ -211,11 +284,42 @@ public final class XcodeProjectLoader {
     let projectRootURL = projectURL.deletingLastPathComponent().standardizedFileURL
     let projectName = projectURL.deletingPathExtension().lastPathComponent
 
-    let pbxprojURL = projectURL.appendingPathComponent("project.pbxproj")
-    guard FileManager.default.fileExists(atPath: pbxprojURL.path) else {
-      throw XcodeProjectLoaderError.invalidProjectStructure("Missing project.pbxproj at \(pbxprojURL.path)")
+    switch try Self.locateProjectDescriptor(in: projectURL) {
+    case .xcproj(let xcprojURL):
+      return try loadXCProj(
+        projectURL: projectURL,
+        projectRootURL: projectRootURL,
+        projectName: projectName,
+        xcprojURL: xcprojURL,
+        configuration: configuration,
+        targetName: targetName,
+        schemeName: schemeName,
+        buildSettingOverrides: buildSettingOverrides
+      )
+    case .pbxproj(let pbxprojURL):
+      return try loadPbxproj(
+        projectURL: projectURL,
+        projectRootURL: projectRootURL,
+        projectName: projectName,
+        pbxprojURL: pbxprojURL,
+        configuration: configuration,
+        targetName: targetName,
+        schemeName: schemeName,
+        buildSettingOverrides: buildSettingOverrides
+      )
     }
+  }
 
+  private func loadPbxproj(
+    projectURL: URL,
+    projectRootURL: URL,
+    projectName: String,
+    pbxprojURL: URL,
+    configuration: BuildConfiguration,
+    targetName: String?,
+    schemeName: String?,
+    buildSettingOverrides: [String: String]
+  ) throws -> ResolvedXcodeProject {
     let rawRoot = try OpenStepPlistParser.parse(fileAt: pbxprojURL)
     guard let plist = rawRoot as? [String: Any],
           let objects = plist["objects"] as? [String: [String: Any]],
@@ -325,6 +429,32 @@ public final class XcodeProjectLoader {
       pins: resolvedPins
     )
 
+    return Self.finalizeResolvedProject(
+      projectURL: projectURL,
+      projectRootURL: projectRootURL,
+      projectName: projectName,
+      configuration: configuration,
+      mainTarget: mainTarget,
+      internalTargets: internalTargets,
+      remotePackages: remotePackages,
+      localPackages: localPackages,
+      productDependencies: productDependencies,
+      resolvedPins: resolvedPins
+    )
+  }
+
+  internal static func finalizeResolvedProject(
+    projectURL: URL,
+    projectRootURL: URL,
+    projectName: String,
+    configuration: BuildConfiguration,
+    mainTarget: ResolvedTarget,
+    internalTargets: [ResolvedTarget],
+    remotePackages: [RemotePackageDependency],
+    localPackages: [LocalPackageDependency],
+    productDependencies: [PackageProductDependency],
+    resolvedPins: [PackageResolvedPin]
+  ) -> ResolvedXcodeProject {
     let allTargets = internalTargets + [mainTarget]
     let allSwiftSources = allTargets.flatMap(\.swiftSources)
     let importAnalysis = Self.analyzeSwiftImports(in: allSwiftSources)
@@ -376,6 +506,90 @@ public final class XcodeProjectLoader {
                 !filteredRemotes.contains(remotePkg)
       {
         filteredRemotes.append(remotePkg)
+      }
+    }
+
+    // Resolve transitive remote package products declared by local SwiftPM packages
+    // when an app or internal target directly imports them (e.g., an Xcode project
+    // linking local package `DazzUI` while target Swift files `import FluentIcons`).
+    if !filteredLocals.isEmpty {
+      let transitive = Self.discoverTransitiveRemoteDependencies(
+        in: filteredLocals,
+        pins: resolvedPins
+      )
+      if !transitive.remotes.isEmpty {
+        let internalTargetNames = Set(allTargets.map(\.name))
+        let skippedSet = Set(skippedDarwinProducts)
+        let standardModules: Set<String> = [
+          "Swift", "Foundation", "Observation", "Dispatch", "Glibc", "WinSDK", "ucrt",
+          "JavaScriptKit", "NativeAPI", "CNativeAPI", "CrossSwiftUI", "SwiftUIRuntime",
+        ]
+        var remoteByLowerKey: [String: RemotePackageDependency] = [:]
+        for r in transitive.remotes {
+          remoteByLowerKey[r.packageName.lowercased()] = r
+          let urlSlug = Self.packageNameFromURL(r.repositoryURL).lowercased()
+          remoteByLowerKey[urlSlug] = r
+        }
+
+        for target in allTargets {
+          let existingTargetProducts = Set(
+            filteredProducts
+              .filter { $0.targetName == target.name }
+              .map(\.productName)
+          )
+          for mod in target.importedModules {
+            if existingTargetProducts.contains(mod)
+              || skippedSet.contains(mod)
+              || internalTargetNames.contains(mod)
+              || Self.crossSwiftProvidedModules.contains(mod)
+              || standardModules.contains(mod)
+            {
+              continue
+            }
+            let isOnlyDarwinGuarded =
+              !importAnalysis.unconditionalImports.contains(mod)
+              && importAnalysis.hasDarwinGuard(for: mod)
+            if isOnlyDarwinGuarded {
+              continue
+            }
+            let matchedRemote: RemotePackageDependency?
+            if let pkgKey = transitive.productToPackageKey[mod],
+               let remote = remoteByLowerKey[pkgKey]
+            {
+              matchedRemote = remote
+            } else if let direct = remoteByLowerKey[mod.lowercased()] {
+              matchedRemote = direct
+            } else {
+              matchedRemote = nil
+            }
+            guard let remote = matchedRemote else { continue }
+
+            let alreadyHasRemote = filteredRemotes.contains {
+              Self.normalizeGitURL($0.repositoryURL) == Self.normalizeGitURL(remote.repositoryURL)
+                || $0.packageName.caseInsensitiveCompare(remote.packageName) == .orderedSame
+            }
+            let resolvedRemote: RemotePackageDependency
+            if alreadyHasRemote,
+               let existing = filteredRemotes.first(where: {
+                 Self.normalizeGitURL($0.repositoryURL) == Self.normalizeGitURL(remote.repositoryURL)
+                   || $0.packageName.caseInsensitiveCompare(remote.packageName) == .orderedSame
+               })
+            {
+              resolvedRemote = existing
+            } else {
+              filteredRemotes.append(remote)
+              resolvedRemote = remote
+            }
+
+            filteredProducts.append(
+              PackageProductDependency(
+                productName: mod,
+                packageName: resolvedRemote.packageName,
+                targetName: target.name
+              )
+            )
+          }
+        }
       }
     }
 
@@ -606,16 +820,17 @@ public final class XcodeProjectLoader {
     return expandVariables(in: result)
   }
 
-  private static func stringifySettingValue(_ value: Any) -> String {
+  internal static func stringifySettingValue(_ value: Any) -> String {
     if let s = value as? String { return s }
     if let arr = value as? [Any] {
       return arr.compactMap { $0 as? String }.joined(separator: " ")
     }
+    if let b = value as? Bool { return b ? "YES" : "NO" }
     if let num = value as? NSNumber { return num.stringValue }
     return String(describing: value)
   }
 
-  private static func mergeSettings(base: [String: String], overlay: [String: String]) -> [String: String] {
+  internal static func mergeSettings(base: [String: String], overlay: [String: String]) -> [String: String] {
     var merged = base
     for (key, value) in overlay {
       if value.contains("$(inherited)") || value.contains("${inherited}") {
@@ -764,60 +979,7 @@ public final class XcodeProjectLoader {
       parentGroups: parentGroups
     )
 
-    let productName = (settings["PRODUCT_NAME"].flatMap { $0.isEmpty ? nil : $0 }) ?? name
-    let executableName = (settings["EXECUTABLE_NAME"].flatMap { $0.isEmpty ? nil : $0 }) ?? productName
-    let bundleIdentifier =
-      (settings["PRODUCT_BUNDLE_IDENTIFIER"].flatMap { $0.isEmpty ? nil : $0 })
-      ?? "dev.crossswift.\(productName.lowercased())"
-    let marketingVersion =
-      (settings["MARKETING_VERSION"].flatMap { $0.isEmpty ? nil : $0 }) ?? "1.0.0"
-    let buildVersion =
-      (settings["CURRENT_PROJECT_VERSION"].flatMap { $0.isEmpty ? nil : $0 }) ?? "1"
-    let swiftVersion =
-      (settings["SWIFT_VERSION"].flatMap { $0.isEmpty ? nil : $0 }) ?? "5.0"
-    let defaultActorIsolation = settings["SWIFT_DEFAULT_ACTOR_ISOLATION"].flatMap {
-      $0.isEmpty ? nil : $0
-    }
-    let activeConditions = Self.splitFlags(settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"])
-    let preprocessorDefs = Self.splitFlags(settings["GCC_PREPROCESSOR_DEFINITIONS"])
-
-    var infoPlistFile: URL?
-    if let rawPlist = settings["INFOPLIST_FILE"], !rawPlist.isEmpty {
-      let candidate = URL(fileURLWithPath: rawPlist, relativeTo: projectRootURL).standardizedFileURL
-      if FileManager.default.fileExists(atPath: candidate.path) {
-        infoPlistFile = candidate
-      }
-    }
-
-    var infoPlistKeys: [String: String] = [:]
-    for (k, v) in settings where k.hasPrefix("INFOPLIST_KEY_") {
-      let plistKey = String(k.dropFirst("INFOPLIST_KEY_".count))
-      infoPlistKeys[plistKey] = v
-    }
-
-    let copyright = infoPlistKeys["NSHumanReadableCopyright"]
-    let categoryType = infoPlistKeys["LSApplicationCategoryType"]
-    let rawLSUI = infoPlistKeys["LSUIElement"]?.lowercased()
-    var isAccessoryApp = rawLSUI == "yes" || rawLSUI == "true" || rawLSUI == "1"
-    if !isAccessoryApp, let infoPlistFile,
-      let data = try? Data(contentsOf: infoPlistFile),
-      let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
-    {
-      if let flag = plist["LSUIElement"] as? Bool {
-        isAccessoryApp = flag
-      } else if let str = plist["LSUIElement"] as? String {
-        let lower = str.lowercased()
-        isAccessoryApp = lower == "yes" || lower == "true" || lower == "1"
-      } else if let num = plist["LSUIElement"] as? NSNumber {
-        isAccessoryApp = num.boolValue
-      }
-    }
-    let genSymbolsSetting = settings["ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS"]?
-      .uppercased()
-    let generateAssetSymbols = genSymbolsSetting != "NO" && genSymbolsSetting != "FALSE"
-    let appIconName =
-      (settings["ASSETCATALOG_COMPILER_APPICON_NAME"].flatMap { $0.isEmpty ? nil : $0 })
-      ?? "AppIcon"
+    let infoPlistFile = Self.resolveInfoPlistFile(from: settings, projectRootURL: projectRootURL)
 
     var swiftSources: [URL] = []
     var cSources: [URL] = []
@@ -827,27 +989,17 @@ public final class XcodeProjectLoader {
     var seenPaths = Set<String>()
 
     func appendClassified(_ url: URL, isResource: Bool = false) {
-      let std = url.standardizedFileURL
-      guard seenPaths.insert(std.path).inserted else { return }
-      if let infoPlistFile, std.path == infoPlistFile.path { return }
-
-      let ext = std.pathExtension.lowercased()
-      switch ext {
-      case "swift":
-        if !isResource { swiftSources.append(std) }
-      case "c", "cpp", "cc", "cxx", "h", "hpp":
-        if !isResource { cSources.append(std) }
-      case "xcassets":
-        assetCatalogs.append(std)
-      case "xcstrings":
-        stringCatalogs.append(std)
-      case "entitlements", "storyboard", "xib", "metal", "sdef", "xcprivacy", "m", "mm":
-        break
-      default:
-        if FileManager.default.fileExists(atPath: std.path) {
-          otherResources.append(std)
-        }
-      }
+      Self.classifyTargetFile(
+        url,
+        isResource: isResource,
+        infoPlistFile: infoPlistFile,
+        seenPaths: &seenPaths,
+        swiftSources: &swiftSources,
+        cSources: &cSources,
+        assetCatalogs: &assetCatalogs,
+        stringCatalogs: &stringCatalogs,
+        otherResources: &otherResources
+      )
     }
 
     // 1. Classic build phases (PBXSourcesBuildPhase / PBXResourcesBuildPhase)
@@ -902,52 +1054,194 @@ public final class XcodeProjectLoader {
         }
       }
 
-      let fm = FileManager.default
-      if let enumerator = fm.enumerator(
+      Self.enumerateSynchronizedFolder(
         at: rootDir,
+        excludedRelativePaths: excludedRelativePaths,
+        onFile: { url, isResource in
+          appendClassified(url, isResource: isResource)
+        }
+      )
+    }
+
+    return Self.makeResolvedTarget(
+      name: name,
+      productType: productType,
+      settings: settings,
+      projectRootURL: projectRootURL,
+      infoPlistFile: infoPlistFile,
+      swiftSources: swiftSources,
+      cSources: cSources,
+      assetCatalogs: assetCatalogs,
+      stringCatalogs: stringCatalogs,
+      otherResources: otherResources
+    )
+  }
+
+  internal static func classifyTargetFile(
+    _ url: URL,
+    isResource: Bool = false,
+    infoPlistFile: URL?,
+    seenPaths: inout Set<String>,
+    swiftSources: inout [URL],
+    cSources: inout [URL],
+    assetCatalogs: inout [URL],
+    stringCatalogs: inout [URL],
+    otherResources: inout [URL]
+  ) {
+    let std = url.standardizedFileURL
+    guard seenPaths.insert(std.path).inserted else { return }
+    if let infoPlistFile, std.path == infoPlistFile.path { return }
+
+    let ext = std.pathExtension.lowercased()
+    switch ext {
+    case "swift":
+      if !isResource { swiftSources.append(std) }
+    case "c", "cpp", "cc", "cxx", "h", "hpp":
+      if !isResource { cSources.append(std) }
+    case "xcassets":
+      assetCatalogs.append(std)
+    case "xcstrings":
+      stringCatalogs.append(std)
+    case "entitlements", "storyboard", "xib", "metal", "sdef", "xcprivacy", "m", "mm":
+      break
+    default:
+      if FileManager.default.fileExists(atPath: std.path) {
+        otherResources.append(std)
+      }
+    }
+  }
+
+  internal static func enumerateSynchronizedFolder(
+    at rootDir: URL,
+    excludedRelativePaths: Set<String>,
+    onFile: (URL, Bool) -> Void
+  ) {
+    let fm = FileManager.default
+    // Use explicit recursive `contentsOfDirectory` instead of `FileManager.enumerator` +
+    // `skipDescendants()`, because Windows `swift-foundation` has a bug where calling
+    // `skipDescendants()` on a bundle directory (e.g. `Assets.xcassets`) skips the
+    // descendants of the next sibling directory (e.g. `App/`).
+    func walk(directory: URL, relativePrefix: String) {
+      guard let entries = try? fm.contentsOfDirectory(
+        at: directory,
         includingPropertiesForKeys: [.isDirectoryKey],
         options: [.skipsHiddenFiles]
-      ) {
-        let basePrefix = rootDir.standardizedFileURL.path + "/"
-        for case let fileURL as URL in enumerator {
-          let std = fileURL.standardizedFileURL
-          let relPath: String
-          if std.path.hasPrefix(basePrefix) {
-            relPath = String(std.path.dropFirst(basePrefix.count))
-          } else {
-            relPath = std.lastPathComponent
-          }
+      ) else {
+        return
+      }
+      let sortedEntries = entries.sorted { $0.lastPathComponent < $1.lastPathComponent }
+      for entry in sortedEntries {
+        let name = entry.lastPathComponent
+        if name.hasPrefix(".") { continue }
+        let std = entry.standardizedFileURL
+        let relPath = relativePrefix.isEmpty ? name : "\(relativePrefix)/\(name)"
 
-          if excludedRelativePaths.contains(relPath) {
-            let isDir = (try? std.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            if isDir { enumerator.skipDescendants() }
-            continue
-          }
+        if excludedRelativePaths.contains(relPath) {
+          continue
+        }
 
-          let ext = std.pathExtension.lowercased()
-          if ext == "xcodeproj" || ext == "xcworkspace" {
-            enumerator.skipDescendants()
-            continue
-          }
-          if ext == "xcassets" || ext == "icon" {
-            appendClassified(std, isResource: true)
-            enumerator.skipDescendants()
-            continue
-          }
-          let isDir = (try? std.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-          if isDir { continue }
-          appendClassified(std)
+        let ext = std.pathExtension.lowercased()
+        if ext == "xcodeproj" || ext == "xcworkspace" {
+          continue
+        }
+        if ext == "xcassets" || ext == "icon" {
+          onFile(std, true)
+          continue
+        }
+
+        let isDir: Bool
+        if let dirValue = try? std.resourceValues(forKeys: [.isDirectoryKey]).isDirectory {
+          isDir = dirValue
+        } else {
+          var objBool: ObjCBool = false
+          isDir = fm.fileExists(atPath: std.path, isDirectory: &objBool) && objBool.boolValue
+        }
+        if isDir {
+          walk(directory: std, relativePrefix: relPath)
+        } else {
+          onFile(std, false)
         }
       }
     }
 
-    swiftSources.sort { $0.path < $1.path }
-    cSources.sort { $0.path < $1.path }
-    assetCatalogs.sort { $0.path < $1.path }
-    stringCatalogs.sort { $0.path < $1.path }
-    otherResources.sort { $0.path < $1.path }
+    walk(directory: rootDir.standardizedFileURL, relativePrefix: "")
+  }
 
-    let imports = analyzeSwiftImports(in: swiftSources)
+  internal static func resolveInfoPlistFile(
+    from settings: [String: String],
+    projectRootURL: URL
+  ) -> URL? {
+    guard let rawPlist = settings["INFOPLIST_FILE"], !rawPlist.isEmpty else { return nil }
+    let candidate = URL(fileURLWithPath: rawPlist, relativeTo: projectRootURL).standardizedFileURL
+    return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
+  }
+
+  internal static func makeResolvedTarget(
+    name: String,
+    productType: String,
+    settings: [String: String],
+    projectRootURL: URL,
+    infoPlistFile: URL?,
+    swiftSources: [URL],
+    cSources: [URL],
+    assetCatalogs: [URL],
+    stringCatalogs: [URL],
+    otherResources: [URL]
+  ) -> ResolvedTarget {
+    let productName = (settings["PRODUCT_NAME"].flatMap { $0.isEmpty ? nil : $0 }) ?? name
+    let executableName = (settings["EXECUTABLE_NAME"].flatMap { $0.isEmpty ? nil : $0 }) ?? productName
+    let bundleIdentifier =
+      (settings["PRODUCT_BUNDLE_IDENTIFIER"].flatMap { $0.isEmpty ? nil : $0 })
+      ?? "dev.crossswift.\(productName.lowercased())"
+    let marketingVersion =
+      (settings["MARKETING_VERSION"].flatMap { $0.isEmpty ? nil : $0 }) ?? "1.0.0"
+    let buildVersion =
+      (settings["CURRENT_PROJECT_VERSION"].flatMap { $0.isEmpty ? nil : $0 }) ?? "1"
+    let swiftVersion =
+      (settings["SWIFT_VERSION"].flatMap { $0.isEmpty ? nil : $0 }) ?? "5.0"
+    let defaultActorIsolation = settings["SWIFT_DEFAULT_ACTOR_ISOLATION"].flatMap {
+      $0.isEmpty ? nil : $0
+    }
+    let activeConditions = Self.splitFlags(settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"])
+    let preprocessorDefs = Self.splitFlags(settings["GCC_PREPROCESSOR_DEFINITIONS"])
+
+    var infoPlistKeys: [String: String] = [:]
+    for (k, v) in settings where k.hasPrefix("INFOPLIST_KEY_") {
+      let plistKey = String(k.dropFirst("INFOPLIST_KEY_".count))
+      infoPlistKeys[plistKey] = v
+    }
+
+    let copyright = infoPlistKeys["NSHumanReadableCopyright"]
+    let categoryType = infoPlistKeys["LSApplicationCategoryType"]
+    let rawLSUI = infoPlistKeys["LSUIElement"]?.lowercased()
+    var isAccessoryApp = rawLSUI == "yes" || rawLSUI == "true" || rawLSUI == "1"
+    if !isAccessoryApp, let infoPlistFile,
+      let data = try? Data(contentsOf: infoPlistFile),
+      let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+    {
+      if let flag = plist["LSUIElement"] as? Bool {
+        isAccessoryApp = flag
+      } else if let str = plist["LSUIElement"] as? String {
+        let lower = str.lowercased()
+        isAccessoryApp = lower == "yes" || lower == "true" || lower == "1"
+      } else if let num = plist["LSUIElement"] as? NSNumber {
+        isAccessoryApp = num.boolValue
+      }
+    }
+    let genSymbolsSetting = settings["ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS"]?
+      .uppercased()
+    let generateAssetSymbols = genSymbolsSetting != "NO" && genSymbolsSetting != "FALSE"
+    let appIconName =
+      (settings["ASSETCATALOG_COMPILER_APPICON_NAME"].flatMap { $0.isEmpty ? nil : $0 })
+      ?? "AppIcon"
+
+    let sortedSwift = swiftSources.sorted { $0.path < $1.path }
+    let sortedC = cSources.sorted { $0.path < $1.path }
+    let sortedAssets = assetCatalogs.sorted { $0.path < $1.path }
+    let sortedStrings = stringCatalogs.sorted { $0.path < $1.path }
+    let sortedOther = otherResources.sorted { $0.path < $1.path }
+
+    let imports = analyzeSwiftImports(in: sortedSwift)
     let allImported = Array(imports.unconditionalImports.union(imports.conditionalImports)).sorted()
 
     return ResolvedTarget(
@@ -969,11 +1263,11 @@ public final class XcodeProjectLoader {
       isAccessoryApp: isAccessoryApp,
       generateAssetSymbols: generateAssetSymbols,
       appIconName: appIconName,
-      swiftSources: swiftSources,
-      cSources: cSources,
-      assetCatalogs: assetCatalogs,
-      stringCatalogs: stringCatalogs,
-      otherResources: otherResources,
+      swiftSources: sortedSwift,
+      cSources: sortedC,
+      assetCatalogs: sortedAssets,
+      stringCatalogs: sortedStrings,
+      otherResources: sortedOther,
       buildSettings: settings,
       importedModules: allImported
     )
@@ -993,7 +1287,7 @@ public final class XcodeProjectLoader {
     let version: String?
   }
 
-  private static func loadPackageResolvedPins(
+  internal static func loadPackageResolvedPins(
     projectURL: URL,
     projectRootURL: URL
   ) -> [PackageResolvedPin] {
@@ -1119,42 +1413,60 @@ public final class XcodeProjectLoader {
     )
   }
 
-  private static func parseRequirement(_ dict: [String: Any]) -> PackageRequirement {
-    let kind = dict["kind"] as? String ?? ""
-    switch kind {
-    case "upToNextMajorVersion":
-      return .upToNextMajor(dict["minimumVersion"] as? String ?? "1.0.0")
-    case "upToNextMinorVersion":
-      return .upToNextMinor(dict["minimumVersion"] as? String ?? "1.0.0")
-    case "exactVersion":
-      return .exact(dict["version"] as? String ?? "1.0.0")
-    case "versionRange":
+  internal static func parseRequirement(_ dict: [String: Any]) -> PackageRequirement {
+    let rawKind = (dict["kind"] as? String ?? "").lowercased().replacingOccurrences(of: "-", with: "")
+    let minVersion = (dict["minimumVersion"] as? String) ?? (dict["minimum-version"] as? String) ?? (dict["from"] as? String)
+    let maxVersion = (dict["maximumVersion"] as? String) ?? (dict["maximum-version"] as? String) ?? (dict["to"] as? String)
+    let exactVersion = (dict["version"] as? String) ?? (dict["exact"] as? String)
+    switch rawKind {
+    case "uptonextmajorversion", "uptonextmajor":
+      return .upToNextMajor(minVersion ?? "1.0.0")
+    case "uptonextminorversion", "uptonextminor":
+      return .upToNextMinor(minVersion ?? "1.0.0")
+    case "exactversion", "exact":
+      return .exact(exactVersion ?? "1.0.0")
+    case "versionrange", "range":
       return .range(
-        from: dict["minimumVersion"] as? String ?? "1.0.0",
-        to: dict["maximumVersion"] as? String ?? "2.0.0"
+        from: minVersion ?? "1.0.0",
+        to: maxVersion ?? "2.0.0"
       )
     case "branch":
       return .branch(dict["branch"] as? String ?? "main")
     case "revision":
       return .revision(dict["revision"] as? String ?? "")
     default:
-      return .upToNextMajor(dict["minimumVersion"] as? String ?? "1.0.0")
+      if let rev = dict["revision"] as? String, !rev.isEmpty {
+        return .revision(rev)
+      }
+      if let branch = dict["branch"] as? String, !branch.isEmpty {
+        return .branch(branch)
+      }
+      if let exact = exactVersion, !exact.isEmpty {
+        return .exact(exact)
+      }
+      if let upMajor = (dict["up-to-next-major"] as? String) ?? (dict["upToNextMajor"] as? String) {
+        return .upToNextMajor(upMajor)
+      }
+      if let upMinor = (dict["up-to-next-minor"] as? String) ?? (dict["upToNextMinor"] as? String) {
+        return .upToNextMinor(upMinor)
+      }
+      return .upToNextMajor(minVersion ?? "1.0.0")
     }
   }
 
-  private static func packageNameFromURL(_ rawURL: String) -> String {
+  internal static func packageNameFromURL(_ rawURL: String) -> String {
     let trimmed = rawURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     let last = trimmed.split(separator: "/").last.map(String.init) ?? trimmed
     return last.hasSuffix(".git") ? String(last.dropLast(4)) : last
   }
 
-  private static func normalizeGitURL(_ rawURL: String) -> String {
+  internal static func normalizeGitURL(_ rawURL: String) -> String {
     var s = rawURL.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     if s.hasSuffix(".git") { s = String(s.dropLast(4)) }
     return s
   }
 
-  private static func readPackageName(at directory: URL) -> String? {
+  internal static func readPackageName(at directory: URL) -> String? {
     let manifestURL = directory.appendingPathComponent("Package.swift")
     guard let text = try? String(contentsOf: manifestURL, encoding: .utf8) else { return nil }
     let pattern = "name\\s*:\\s*\"([^\"]+)\""
@@ -1167,7 +1479,7 @@ public final class XcodeProjectLoader {
     return String(text[r])
   }
 
-  private static func packageProvidesProduct(_ directory: URL, productName: String) -> Bool {
+  internal static func packageProvidesProduct(_ directory: URL, productName: String) -> Bool {
     let manifestURL = directory.appendingPathComponent("Package.swift")
     guard let text = try? String(contentsOf: manifestURL, encoding: .utf8) else { return false }
     return text.contains("\"\(productName)\"")

@@ -113,6 +113,10 @@ final class WasmHotReloadTests: XCTestCase {
       .projectConfig
     )
     XCTAssertEqual(
+      ProjectChangeClassifier.classify(path: "/repo/App.xcodeproj/project.xcproj"),
+      .projectConfig
+    )
+    XCTAssertEqual(
       ProjectChangeClassifier.classify(path: "/repo/Config/Debug.xcconfig"),
       .projectConfig
     )

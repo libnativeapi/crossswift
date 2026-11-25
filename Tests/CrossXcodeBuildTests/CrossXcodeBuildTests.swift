@@ -1395,6 +1395,296 @@ final class CrossXcodeBuildTests: XCTestCase {
   }
   #endif
 
+  func testXCProjParserHandlesTrailingCommasCommentsAndEscapes() throws {
+    let source = "\u{FEFF}" + """
+    // Xcode 27 relaxed JSON
+    {
+      "default-configuration": "Release",
+      /* block comment */
+      "configurations": [
+        "Debug",
+        "Release",
+      ],
+      "nested": {
+        "escaped": "line1\\n\\"quoted\\"\\u0020\\uD83D\\uDE80",
+        "flag": false,
+        "count": 42,
+        "ratio": -3.5,
+        "empty": null,
+      },
+    }
+    """
+    let parsed = try XCProjParser.parse(data: Data(source.utf8))
+    let root = try XCTUnwrap(parsed as? [String: Any])
+    XCTAssertEqual(root["default-configuration"] as? String, "Release")
+    XCTAssertEqual(root["configurations"] as? [String], ["Debug", "Release"])
+
+    let nested = try XCTUnwrap(root["nested"] as? [String: Any])
+    XCTAssertEqual(nested["escaped"] as? String, "line1\n\"quoted\" 🚀")
+    XCTAssertEqual(nested["flag"] as? Bool, false)
+    XCTAssertEqual(nested["count"] as? Int, 42)
+    XCTAssertEqual(nested["ratio"] as? Double, -3.5)
+    XCTAssertTrue(nested["empty"] is NSNull)
+  }
+
+  func testXCProjLoaderHandlesFolderMembershipConditionalSettingsLocalPackagesAndTransitiveProducts() throws {
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory
+      .appendingPathComponent("crossswift-xcproj-\(UUID().uuidString)")
+    try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: tmp) }
+
+    // Create a local SwiftPM package that depends on a transitive remote icon package.
+    let uiPkgDir = tmp.appendingPathComponent("LocalUI")
+    try fm.createDirectory(at: uiPkgDir.appendingPathComponent("Sources/LocalUI"), withIntermediateDirectories: true)
+    try """
+    // swift-tools-version: 5.9
+    import PackageDescription
+    let package = Package(
+      name: "LocalUI",
+      products: [.library(name: "LocalUI", targets: ["LocalUI"])],
+      dependencies: [
+        // Commented-out package should be ignored:
+        // .package(url: "https://github.com/example/ignored.git", from: "1.0.0"),
+        .package(
+          url: "https://github.com/example/icon-pack.git",
+          revision: "abcdef0123456789"
+        ),
+      ],
+      targets: [
+        .target(
+          name: "LocalUI",
+          dependencies: [
+            .product(name: "IconPack", package: "icon-pack"),
+          ]
+        ),
+      ]
+    )
+    """.write(to: uiPkgDir.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+    try "import SwiftUI\npublic struct LocalButton: View { public var body: some View { Text(\"OK\") } }\n"
+      .write(to: uiPkgDir.appendingPathComponent("Sources/LocalUI/LocalButton.swift"), atomically: true, encoding: .utf8)
+
+    // Create synchronized app folder + nested assets + sibling subfolder + excluded file + regular group file + internal framework folder.
+    let appDir = tmp.appendingPathComponent("MyApp")
+    let assetsDir = appDir.appendingPathComponent("Assets.xcassets")
+    let nestedAppDir = appDir.appendingPathComponent("App")
+    let extraDir = tmp.appendingPathComponent("SharedFiles")
+    let kitDir = tmp.appendingPathComponent("AppCore")
+    try fm.createDirectory(at: assetsDir, withIntermediateDirectories: true)
+    try fm.createDirectory(at: nestedAppDir, withIntermediateDirectories: true)
+    try fm.createDirectory(at: extraDir, withIntermediateDirectories: true)
+    try fm.createDirectory(at: kitDir, withIntermediateDirectories: true)
+
+    try """
+    import SwiftUI
+    import AppKit
+    import LocalUI
+    import IconPack
+    import AppCore
+
+    @main
+    struct MyAppMain: App {
+      var body: some Scene {
+        WindowGroup("MyApp") { LocalButton() }
+      }
+    }
+    """.write(to: nestedAppDir.appendingPathComponent("MyApp.swift"), atomically: true, encoding: .utf8)
+    try "// excluded file\n".write(to: appDir.appendingPathComponent("Excluded.swift"), atomically: true, encoding: .utf8)
+    try "{\"info\":{\"author\":\"xcode\",\"version\":1}}".write(
+      to: assetsDir.appendingPathComponent("Contents.json"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try "import Foundation\npublic let extraHelper = 1\n".write(
+      to: extraDir.appendingPathComponent("ExtraHelper.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try "import Foundation\npublic struct CoreModel {}\n".write(
+      to: kitDir.appendingPathComponent("CoreModel.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+
+    let projDir = tmp.appendingPathComponent("MyApp.xcodeproj")
+    let swiftpmDir = projDir.appendingPathComponent("project.xcworkspace/xcshareddata/swiftpm")
+    try fm.createDirectory(at: swiftpmDir, withIntermediateDirectories: true)
+    try """
+    {
+      "pins": [
+        {
+          "identity": "icon-pack",
+          "kind": "remoteSourceControl",
+          "location": "https://github.com/example/icon-pack.git",
+          "state": { "revision": "abcdef0123456789" }
+        }
+      ],
+      "version": 3
+    }
+    """.write(to: swiftpmDir.appendingPathComponent("Package.resolved"), atomically: true, encoding: .utf8)
+
+    try """
+    {
+      "default-configuration": "Release",
+      "configurations": [
+        "Debug",
+        "Release",
+      ],
+      "packages": [
+        {
+          "kind": "local",
+          "path": "LocalUI",
+        },
+      ],
+      "files": [
+        {
+          "kind": "folder",
+          "path": "MyApp",
+          "target-membership": [ "MyApp" ],
+          "exceptions": [
+            { "target": "MyApp", "membership-exceptions": [ "Excluded.swift" ] },
+          ],
+        },
+        {
+          "kind": "folder",
+          "path": "AppCore",
+          "target-membership": [ "AppCore" ],
+        },
+        {
+          "kind": "group",
+          "name": "Shared",
+          "path": "SharedFiles",
+          "children": [
+            { "path": "ExtraHelper.swift", "target-membership": [ "MyApp" ] },
+          ],
+        },
+        {
+          "kind": "group",
+          "name": "Products",
+          "children": [
+            { "path": "<PRODUCTS>/MyApp.app", "id": "APP01", "type": "wrapper.application", "index": false },
+          ],
+        },
+      ],
+      "targets": [
+        {
+          "name": "AppCore",
+          "id": "CORE01",
+          "product-type": "framework",
+          "build-settings": {
+            "SWIFT_VERSION": "5.0",
+          },
+        },
+        {
+          "name": "MyApp",
+          "id": "TARGET01",
+          "product": "Products/MyApp.app",
+          "product-type": "application",
+          "dependencies": [ "AppCore" ],
+          "build-phases": [
+            "compile-sources",
+            "frameworks",
+            "resources",
+          ],
+          "package-product-members": [
+            {
+              "package": "LocalUI",
+              "product-name": "LocalUI",
+              "build-phase": { "build-phase": "frameworks" },
+            },
+          ],
+          "build-settings": {
+            "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
+            "CURRENT_PROJECT_VERSION": "7",
+            "INFOPLIST_KEY_NSHumanReadableCopyright": "Copyright Example",
+            "MARKETING_VERSION": "2.1",
+            "PRODUCT_BUNDLE_IDENTIFIER": "io.example.myapp",
+            "PRODUCT_NAME": "$(TARGET_NAME)",
+            "SWIFT_DEFAULT_ACTOR_ISOLATION": "MainActor",
+            "SWIFT_VERSION": "5.0",
+          },
+        },
+      ],
+      "build-settings": {
+        "ENABLE_NS_ASSERTIONS[config=Release]": "NO",
+        "GCC_PREPROCESSOR_DEFINITIONS[config=Debug]": [
+          "DEBUG=1",
+          "$(inherited)",
+        ],
+        "SDKROOT": "macosx",
+        "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "BASE_FLAG",
+        "SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=Debug]": "DEBUG $(inherited)",
+        "SWIFT_COMPILATION_MODE[config=Release]": "wholemodule",
+      },
+    }
+    """.write(to: projDir.appendingPathComponent("project.xcproj"), atomically: true, encoding: .utf8)
+
+    let loader = XcodeProjectLoader()
+    let metadata = try loader.inspectMetadata(from: projDir)
+    XCTAssertEqual(metadata.name, "MyApp")
+    XCTAssertEqual(metadata.configurations, ["Debug", "Release"])
+    XCTAssertEqual(metadata.defaultConfigurationName, "Release")
+    XCTAssertEqual(metadata.targets, ["AppCore", "MyApp"])
+    XCTAssertEqual(metadata.schemes, ["AppCore", "MyApp"])
+
+    let debugProject = try loader.load(from: projDir, configuration: .debug)
+    XCTAssertEqual(debugProject.mainTarget.name, "MyApp")
+    XCTAssertEqual(debugProject.mainTarget.productName, "MyApp")
+    XCTAssertEqual(debugProject.mainTarget.productType, "com.apple.product-type.application")
+    XCTAssertEqual(debugProject.mainTarget.bundleIdentifier, "io.example.myapp")
+    XCTAssertEqual(debugProject.mainTarget.marketingVersion, "2.1")
+    XCTAssertEqual(debugProject.mainTarget.buildVersion, "7")
+    XCTAssertEqual(debugProject.mainTarget.defaultActorIsolation, "MainActor")
+    XCTAssertEqual(debugProject.mainTarget.copyright, "Copyright Example")
+    XCTAssertEqual(debugProject.mainTarget.activeCompilationConditions, ["DEBUG", "BASE_FLAG"])
+    XCTAssertEqual(debugProject.mainTarget.preprocessorDefinitions, ["DEBUG=1"])
+    XCTAssertNil(debugProject.mainTarget.buildSettings["ENABLE_NS_ASSERTIONS"])
+
+    let mainSwiftNames = Set(debugProject.mainTarget.swiftSources.map(\.lastPathComponent))
+    XCTAssertEqual(mainSwiftNames, ["MyApp.swift", "ExtraHelper.swift"])
+    XCTAssertFalse(mainSwiftNames.contains("Excluded.swift"))
+    XCTAssertEqual(debugProject.mainTarget.assetCatalogs.map(\.lastPathComponent), ["Assets.xcassets"])
+    XCTAssertEqual(debugProject.internalTargets.map(\.name), ["AppCore"])
+    XCTAssertEqual(debugProject.internalTargets.first?.swiftSources.map(\.lastPathComponent), ["CoreModel.swift"])
+
+    XCTAssertEqual(debugProject.localPackages.map(\.name), ["LocalUI"])
+    XCTAssertEqual(debugProject.remotePackages.map(\.packageName), ["icon-pack"])
+    XCTAssertEqual(debugProject.remotePackages.first?.pinnedRevision, "abcdef0123456789")
+    XCTAssertEqual(
+      Set(debugProject.productDependencies.map(\.productName)),
+      Set(["LocalUI", "IconPack"])
+    )
+    XCTAssertTrue(debugProject.inferredCrossSwiftModules.contains("SwiftUI"))
+    XCTAssertTrue(debugProject.inferredCrossSwiftModules.contains("AppKit"))
+
+    // Verify Release configuration drops [config=Debug] settings and keeps [config=Release].
+    let releaseProject = try loader.load(from: projDir, configuration: .release)
+    XCTAssertEqual(releaseProject.mainTarget.activeCompilationConditions, ["BASE_FLAG"])
+    XCTAssertEqual(releaseProject.mainTarget.preprocessorDefinitions, [])
+    XCTAssertEqual(releaseProject.mainTarget.buildSettings["ENABLE_NS_ASSERTIONS"], "NO")
+    XCTAssertEqual(releaseProject.mainTarget.buildSettings["SWIFT_COMPILATION_MODE"], "wholemodule")
+
+    // Verify generated SwiftPM manifest wires both LocalUI and transitive IconPack cleanly.
+    let synthesizer = SwiftPMBackend()
+    let nativeAPIRoot = repositoryRoot
+      .deletingLastPathComponent()
+      .appendingPathComponent("nativeapi/bindings/swift")
+    let manifest = synthesizer.generatePackageManifest(
+      project: releaseProject,
+      platform: .windows,
+      configuration: .release,
+      consoleSubsystem: false,
+      crossSwiftRoot: repositoryRoot,
+      nativeAPISwiftRoot: nativeAPIRoot,
+      compiledResourceURL: nil
+    )
+    XCTAssertTrue(manifest.contains(".package(path: \"\(uiPkgDir.path)\")"))
+    XCTAssertTrue(manifest.contains(".package(url: \"https://github.com/example/icon-pack.git\", revision: \"abcdef0123456789\")"))
+    XCTAssertTrue(manifest.contains(".product(name: \"LocalUI\", package: \"localui\")"))
+    XCTAssertTrue(manifest.contains(".product(name: \"IconPack\", package: \"icon-pack\")"))
+    XCTAssertTrue(manifest.contains("-default-isolation"))
+  }
+
   private func makeMinimalPNG(width: Int, height: Int) -> Data {
     var data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
     data.append(contentsOf: [0, 0, 0, 13]) // IHDR length

@@ -102,6 +102,7 @@ public enum ProjectChangeClassifier {
 
     // Project/package configuration files require reloading the project graph + rebuilding.
     if fileName == "project.pbxproj"
+      || fileName == "project.xcproj"
       || fileName == "Package.swift"
       || fileName == "Package.resolved"
       || ext == "xcconfig"

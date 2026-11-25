@@ -141,6 +141,11 @@ public final class SwiftPMBackend {
           }
         }
       }
+      for adaptedURL in adaptedPackages.remote.values {
+        if seenRoots.insert(adaptedURL.standardizedFileURL.path).inserted {
+          dependencyRoots.append(adaptedURL)
+        }
+      }
       for local in project.localPackages {
         let root = adaptedPackages.local[local.id] ?? local.path
         if seenRoots.insert(root.standardizedFileURL.path).inserted {
@@ -1468,8 +1473,30 @@ public final class SwiftPMBackend {
       ? nil
       : PackageDependencyAdapter.ConsumerReferences.scan(project: project)
 
+    var remotesToAdapt = project.remotePackages
+    if !project.localPackages.isEmpty {
+      let pins = XcodeProjectLoader.loadPackageResolvedPins(
+        projectURL: project.projectURL,
+        projectRootURL: project.projectRootURL
+      )
+      let transitive = XcodeProjectLoader.discoverTransitiveRemoteDependencies(
+        in: project.localPackages,
+        pins: pins
+      )
+      for candidate in transitive.remotes {
+        let alreadyPresent = remotesToAdapt.contains {
+          XcodeProjectLoader.normalizeGitURL($0.repositoryURL)
+            == XcodeProjectLoader.normalizeGitURL(candidate.repositoryURL)
+            || $0.packageName.caseInsensitiveCompare(candidate.packageName) == .orderedSame
+        }
+        if !alreadyPresent {
+          remotesToAdapt.append(candidate)
+        }
+      }
+    }
+
     var remoteOverrides: [String: URL] = [:]
-    for remote in project.remotePackages {
+    for remote in remotesToAdapt {
       let checkoutDir: URL
       do {
         checkoutDir = try PackageDependencyAdapter.checkoutRemotePackage(
