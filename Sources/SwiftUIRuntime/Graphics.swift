@@ -698,6 +698,57 @@ public struct GraphicsContext {
     public static let inverse = ClipOptions(rawValue: 1 << 0)
   }
 
+  public struct DrawingOptions: OptionSet, Sendable {
+    public let rawValue: Int
+    public init(rawValue: Int) { self.rawValue = rawValue }
+    public static let disablesSubpixelQuantization = DrawingOptions(rawValue: 1 << 0)
+  }
+
+  public struct FilterOptions: OptionSet, Sendable {
+    public let rawValue: Int
+    public init(rawValue: Int) { self.rawValue = rawValue }
+    public static let linearColor = FilterOptions(rawValue: 1 << 0)
+  }
+
+  public struct Filter: Sendable {
+    public static func blur(
+      radius: CGFloat,
+      options: BlurOptions = BlurOptions()
+    ) -> Filter {
+      Filter()
+    }
+    public static func shadow(
+      color: Color = Color(red: 0, green: 0, blue: 0, opacity: 0.33),
+      radius: CGFloat,
+      x: CGFloat = 0,
+      y: CGFloat = 0,
+      blendMode: GraphicsContext.BlendMode = .normal,
+      options: ShadowOptions = ShadowOptions()
+    ) -> Filter {
+      Filter()
+    }
+  }
+
+  public struct BlurOptions: OptionSet, Sendable {
+    public let rawValue: Int
+    public init(rawValue: Int) { self.rawValue = rawValue }
+    public static let opaque = BlurOptions(rawValue: 1 << 0)
+    public static let dithersResult = BlurOptions(rawValue: 1 << 1)
+  }
+
+  public struct ShadowOptions: OptionSet, Sendable {
+    public let rawValue: Int
+    public init(rawValue: Int) { self.rawValue = rawValue }
+    public static let shadowAbove = ShadowOptions(rawValue: 1 << 0)
+    public static let shadowOnly = ShadowOptions(rawValue: 1 << 1)
+    public static let invertsAlpha = ShadowOptions(rawValue: 1 << 2)
+    public static let disablesGroup = ShadowOptions(rawValue: 1 << 3)
+  }
+
+  public enum BlendMode: Sendable {
+    case normal, multiply, screen, overlay, darken, lighten
+  }
+
   public enum Shading {
     case color(Color)
     case linearGradient(Gradient, startPoint: CGPoint, endPoint: CGPoint)
@@ -983,6 +1034,25 @@ public struct GraphicsContext {
     to path: Path, style: FillStyle = FillStyle(), options: ClipOptions = ClipOptions()
   ) {
     clipPath = path.transformed(a: ma, b: mb, c: mc, d: md, tx: tx, ty: ty)
+  }
+
+  public mutating func addFilter(_ filter: Filter, options: FilterOptions = FilterOptions()) {}
+
+  public mutating func draw(_ slice: Text.Layout.RunSlice, options: DrawingOptions = []) {
+    guard !slice.text.isEmpty else { return }
+    draw(Text(verbatim: slice.text), in: slice.typographicBounds)
+  }
+
+  public mutating func draw(_ run: Text.Layout.Run, options: DrawingOptions = []) {
+    for slice in run {
+      draw(slice, options: options)
+    }
+  }
+
+  public mutating func draw(_ line: Text.Layout.Line, options: DrawingOptions = []) {
+    for run in line {
+      draw(run, options: options)
+    }
   }
 }
 public struct Canvas: View, _PrimitiveView {

@@ -27,6 +27,10 @@ public enum PackageDependencyAdapter {
     "CryptoKit",
     "UniformTypeIdentifiers",
     "OSLog",
+    "os",
+    "CoreText",
+    "PDFKit",
+    "CoreFoundation",
     "ServiceManagement",
     "ImageIO",
     "QuickLookThumbnailing",
@@ -126,6 +130,7 @@ public enum PackageDependencyAdapter {
     public let undeclaredAssetCatalogs: [String]
     public let largeAssetCatalogs: [String]
     public let hasObjCAttributes: Bool
+    public let hasRedundantCTFontConformance: Bool
     public let importsJavaScriptKit: Bool
 
     public init(
@@ -135,6 +140,7 @@ public enum PackageDependencyAdapter {
       undeclaredAssetCatalogs: [String],
       largeAssetCatalogs: [String],
       hasObjCAttributes: Bool,
+      hasRedundantCTFontConformance: Bool = false,
       importsJavaScriptKit: Bool = false
     ) {
       self.name = name
@@ -143,6 +149,7 @@ public enum PackageDependencyAdapter {
       self.undeclaredAssetCatalogs = undeclaredAssetCatalogs
       self.largeAssetCatalogs = largeAssetCatalogs
       self.hasObjCAttributes = hasObjCAttributes
+      self.hasRedundantCTFontConformance = hasRedundantCTFontConformance
       self.importsJavaScriptKit = importsJavaScriptKit
     }
   }
@@ -155,6 +162,7 @@ public enum PackageDependencyAdapter {
           || !$0.undeclaredAssetCatalogs.isEmpty
           || !$0.largeAssetCatalogs.isEmpty
           || $0.hasObjCAttributes
+          || $0.hasRedundantCTFontConformance
           || $0.importsJavaScriptKit
       }
     }
@@ -197,11 +205,20 @@ public enum PackageDependencyAdapter {
       let targetDir = packageRoot.appendingPathComponent(relPath)
       guard fm.fileExists(atPath: targetDir.path) else { continue }
 
-      let (imports, hasObjC) = scanSwiftSources(in: targetDir)
-      let crossSwiftImports = imports
-        .filter { allowedCrossSwiftModules.contains($0) }
-        .sorted()
-      let importsJSKit = includeJavaScriptKit && imports.contains("JavaScriptKit")
+      let scan = scanSwiftSources(in: targetDir)
+      var filteredImports = scan.modules.filter { allowedCrossSwiftModules.contains($0) }
+      // On desktop, AppKit and UIKit are mutually exclusive in cross-Apple packages
+      // (e.g. `#if canImport(UIKit) ... #elseif canImport(AppKit)`). When a target
+      // supports AppKit and only imports UIKit conditionally, prefer AppKit so
+      // desktop code paths and toll-free CTFont == NSFont semantics stay consistent.
+      if filteredImports.contains("AppKit")
+        && filteredImports.contains("UIKit")
+        && !scan.unconditionalModules.contains("UIKit")
+      {
+        filteredImports.remove("UIKit")
+      }
+      let crossSwiftImports = filteredImports.sorted()
+      let importsJSKit = includeJavaScriptKit && scan.modules.contains("JavaScriptKit")
 
       let allCatalogs = findAssetCatalogs(in: targetDir)
         .filter { relCatalog in
@@ -229,7 +246,8 @@ public enum PackageDependencyAdapter {
         importedCrossSwiftModules: crossSwiftImports,
         undeclaredAssetCatalogs: smallCatalogs,
         largeAssetCatalogs: largeCatalogs,
-        hasObjCAttributes: hasObjC,
+        hasObjCAttributes: scan.hasObjC,
+        hasRedundantCTFontConformance: scan.hasRedundantCTFontConformance,
         importsJavaScriptKit: importsJSKit
       ))
     }
@@ -509,7 +527,7 @@ public enum PackageDependencyAdapter {
     let stampSummary = prunedImagesetsByCatalogKey.keys.sorted().map { key in
       "\(key)=\(prunedImagesetsByCatalogKey[key]?.joined(separator: ",") ?? "")"
     }.joined(separator: "\n")
-    let stampText = patchedManifest + "\n// PRUNED-V2:\n" + stampSummary
+    let stampText = patchedManifest + "\n// PRUNED-V3:\n" + stampSummary
     let stampURL = outputDirectory.appendingPathComponent(".crossswift-adapt-stamp")
     let dstManifestURL = outputDirectory.appendingPathComponent("Package.swift")
     if let existingStamp = try? String(contentsOf: stampURL, encoding: .utf8),
@@ -526,7 +544,9 @@ public enum PackageDependencyAdapter {
 
     // Only stage the directories actually referenced by declared targets (plus Package.swift),
     // avoiding unrelated repository trees (such as web/android assets or docs).
-    let needsSwiftRewrite = inspection.targets.contains { $0.hasObjCAttributes }
+    let needsObjCStrip = inspection.targets.contains { $0.hasObjCAttributes }
+    let needsCTFontDedupe = inspection.targets.contains { $0.hasRedundantCTFontConformance }
+    let needsSwiftRewrite = needsObjCStrip || needsCTFontDedupe
     for target in inspection.targets {
       let rel = target.relativePath
       let srcTarget = sourceRoot.appendingPathComponent(rel)
@@ -557,7 +577,8 @@ public enum PackageDependencyAdapter {
           from: srcTarget,
           to: dstTarget,
           skipNames: Set(target.largeAssetCatalogs.map { URL(fileURLWithPath: $0).lastPathComponent }),
-          stripObjCInSwiftFiles: needsSwiftRewrite,
+          stripObjCInSwiftFiles: needsObjCStrip,
+          dedupeCTFontConformances: needsCTFontDedupe,
           pruneEnumCases: keptEnumCases
         )
       }
@@ -709,6 +730,7 @@ public enum PackageDependencyAdapter {
     to dst: URL,
     skipNames: Set<String> = [],
     stripObjCInSwiftFiles: Bool,
+    dedupeCTFontConformances: Bool = false,
     pruneEnumCases: Set<String>? = nil
   ) throws {
     let fm = FileManager.default
@@ -721,7 +743,7 @@ public enum PackageDependencyAdapter {
       var isDir: ObjCBool = false
       guard fm.fileExists(atPath: srcItem.path, isDirectory: &isDir) else { continue }
       if isDir.boolValue {
-        let needsSwiftProcessing = stripObjCInSwiftFiles || pruneEnumCases != nil
+        let needsSwiftProcessing = stripObjCInSwiftFiles || dedupeCTFontConformances || pruneEnumCases != nil
         if !needsSwiftProcessing
           || item.lowercased().hasSuffix(".xcassets")
           || (!directoryContainsSwiftFiles(srcItem) && !directoryContainsAnyName(srcItem, names: skipNames))
@@ -733,14 +755,18 @@ public enum PackageDependencyAdapter {
             to: dstItem,
             skipNames: skipNames,
             stripObjCInSwiftFiles: stripObjCInSwiftFiles,
+            dedupeCTFontConformances: dedupeCTFontConformances,
             pruneEnumCases: pruneEnumCases
           )
         }
-      } else if (stripObjCInSwiftFiles || pruneEnumCases != nil) && srcItem.pathExtension.lowercased() == "swift",
+      } else if (stripObjCInSwiftFiles || dedupeCTFontConformances || pruneEnumCases != nil) && srcItem.pathExtension.lowercased() == "swift",
                 var text = try? String(contentsOf: srcItem, encoding: .utf8)
       {
         if stripObjCInSwiftFiles {
           text = stripObjCAttributes(text)
+        }
+        if dedupeCTFontConformances {
+          text = guardRedundantCTFontExtensions(text)
         }
         if let keptCases = pruneEnumCases {
           text = pruneOversizedAssetEnumSource(text, keepingCases: keptCases)
@@ -857,6 +883,46 @@ public enum PackageDependencyAdapter {
       range: NSRange(location: 0, length: ns.length),
       withTemplate: ""
     )
+  }
+
+  /// On non-Apple platforms `CoreText.CTFont` is a `typealias` for `NSFont`, so a
+  /// file that conforms both `NSFont`/`PlatformFont` and `CTFont` to the same
+  /// protocol triggers a redundant-conformance error. Guard duplicate
+  /// `extension CTFont: <Proto> { ... }` blocks to Apple platforms only.
+  private static func guardRedundantCTFontExtensions(_ source: String) -> String {
+    guard source.contains("extension CTFont") else { return source }
+    guard let fontExtRegex = try? NSRegularExpression(
+      pattern: #"(?m)^\s*extension\s+(?:PlatformFont|NSFont)\s*:\s*([A-Za-z_][A-Za-z0-9_.]*)"#
+    ),
+    let ctExtRegex = try? NSRegularExpression(
+      pattern: #"(?m)^[ \t]*extension\s+CTFont\s*:\s*([A-Za-z_][A-Za-z0-9_.]*)[^{]*\{"#
+    ) else { return source }
+
+    let ns = source as NSString
+    let fullRange = NSRange(location: 0, length: ns.length)
+    var conformedProtos = Set<String>()
+    for m in fontExtRegex.matches(in: source, range: fullRange) {
+      if let r = Range(m.range(at: 1), in: source) {
+        conformedProtos.insert(String(source[r]))
+      }
+    }
+    guard !conformedProtos.isEmpty else { return source }
+
+    var out = source
+    let matches = ctExtRegex.matches(in: out, range: NSRange(location: 0, length: (out as NSString).length))
+    for m in matches.reversed() {
+      guard let protoRange = Range(m.range(at: 1), in: out),
+            conformedProtos.contains(String(out[protoRange]))
+      else { continue }
+      let openBrace = m.range.location + m.range.length - 1
+      guard let closeBrace = findMatchingDelimiter(in: out, openIndex: openBrace, open: "{", close: "}")
+      else { continue }
+      let blockRange = NSRange(location: m.range.location, length: closeBrace - m.range.location + 1)
+      let block = (out as NSString).substring(with: blockRange)
+      let guarded = "#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)\n\(block)\n#endif"
+      out = (out as NSString).replacingCharacters(in: blockRange, with: guarded)
+    }
+    return out
   }
 
   /// Shallow-clones (or reuses a cached checkout of) a remote package dependency.
@@ -1020,21 +1086,30 @@ public enum PackageDependencyAdapter {
     return findMatchingDelimiter(in: text, openIndex: openIndex, open: UInt16(o), close: UInt16(c))
   }
 
-  private static func scanSwiftSources(in directory: URL) -> (modules: Set<String>, hasObjC: Bool) {
+  private static func scanSwiftSources(
+    in directory: URL
+  ) -> (
+    modules: Set<String>,
+    unconditionalModules: Set<String>,
+    hasObjC: Bool,
+    hasRedundantCTFontConformance: Bool
+  ) {
     let fm = FileManager.default
     guard let enumerator = fm.enumerator(
       at: directory,
       includingPropertiesForKeys: [.isDirectoryKey],
       options: [.skipsHiddenFiles]
-    ) else { return ([], false) }
+    ) else { return ([], [], false, false) }
 
     guard let importRegex = try? NSRegularExpression(
-      pattern: "(?m)^\\s*(?:@\\w+\\s+)*import\\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\\s+)?([A-Za-z_][A-Za-z0-9_]*)"
-    ) else { return ([], false) }
+      pattern: "^\\s*(?:@\\w+\\s+)*import\\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\\s+)?([A-Za-z_][A-Za-z0-9_]*)"
+    ) else { return ([], [], false, false) }
     let objcRegex = try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9_])@objc(?:\([^)]*\))?"#)
 
     var modules = Set<String>()
+    var unconditionalModules = Set<String>()
     var hasObjC = false
+    var hasRedundantCTFont = false
     for case let fileURL as URL in enumerator {
       let name = fileURL.lastPathComponent
       if name.lowercased().hasSuffix(".xcassets") || name == ".build" || name == ".git" {
@@ -1044,17 +1119,38 @@ public enum PackageDependencyAdapter {
       guard fileURL.pathExtension.lowercased() == "swift",
             let text = try? String(contentsOf: fileURL, encoding: .utf8)
       else { continue }
-      let range = NSRange(text.startIndex..., in: text)
-      for match in importRegex.matches(in: text, range: range) {
-        if let r = Range(match.range(at: 1), in: text) {
-          modules.insert(String(text[r]))
+      var condDepth = 0
+      text.enumerateLines { line, _ in
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("#if ") || trimmed.hasPrefix("#if(") {
+          condDepth += 1
+        } else if trimmed.hasPrefix("#endif") {
+          condDepth = max(0, condDepth - 1)
+        } else if trimmed.contains("import ") {
+          let lineRange = NSRange(line.startIndex..., in: line)
+          if let match = importRegex.firstMatch(in: line, range: lineRange),
+             let r = Range(match.range(at: 1), in: line)
+          {
+            let mod = String(line[r])
+            modules.insert(mod)
+            if condDepth == 0 {
+              unconditionalModules.insert(mod)
+            }
+          }
         }
       }
+      let range = NSRange(text.startIndex..., in: text)
       if !hasObjC, let objcRegex, objcRegex.firstMatch(in: text, range: range) != nil {
         hasObjC = true
       }
+      if !hasRedundantCTFont,
+         text.contains("extension CTFont"),
+         guardRedundantCTFontExtensions(text) != text
+      {
+        hasRedundantCTFont = true
+      }
     }
-    return (modules, hasObjC)
+    return (modules, unconditionalModules, hasObjC, hasRedundantCTFont)
   }
 
   private static func findAssetCatalogs(in targetDir: URL) -> [String] {
@@ -1082,24 +1178,59 @@ public enum PackageDependencyAdapter {
   }
 
   private static func stripSwiftComments(_ text: String) -> String {
-    var out = text
-    if let blockRegex = try? NSRegularExpression(pattern: "/\\*[\\s\\S]*?\\*/") {
-      let ns = out as NSString
-      out = blockRegex.stringByReplacingMatches(
-        in: out,
-        range: NSRange(location: 0, length: ns.length),
-        withTemplate: ""
-      )
+    let chars = Array(text)
+    let count = chars.count
+    var out: [Character] = []
+    out.reserveCapacity(count)
+    var i = 0
+    while i < count {
+      // Preserve string literals intact so URLs like "https://..." aren't treated as comments.
+      if chars[i] == "\"" {
+        out.append(chars[i])
+        i += 1
+        while i < count {
+          if chars[i] == "\\" && i + 1 < count {
+            out.append(chars[i])
+            out.append(chars[i + 1])
+            i += 2
+            continue
+          }
+          out.append(chars[i])
+          if chars[i] == "\"" {
+            i += 1
+            break
+          }
+          i += 1
+        }
+        continue
+      }
+      // Line comment
+      if chars[i] == "/" && i + 1 < count && chars[i + 1] == "/" {
+        i += 2
+        while i < count && !chars[i].isNewline { i += 1 }
+        continue
+      }
+      // Block comment (supports nesting)
+      if chars[i] == "/" && i + 1 < count && chars[i + 1] == "*" {
+        var depth = 1
+        i += 2
+        while i < count && depth > 0 {
+          if chars[i] == "/" && i + 1 < count && chars[i + 1] == "*" {
+            depth += 1
+            i += 2
+          } else if chars[i] == "*" && i + 1 < count && chars[i + 1] == "/" {
+            depth -= 1
+            i += 2
+          } else {
+            i += 1
+          }
+        }
+        continue
+      }
+      out.append(chars[i])
+      i += 1
     }
-    if let lineRegex = try? NSRegularExpression(pattern: "(?m)//.*$") {
-      let ns = out as NSString
-      out = lineRegex.stringByReplacingMatches(
-        in: out,
-        range: NSRange(location: 0, length: ns.length),
-        withTemplate: ""
-      )
-    }
-    return out
+    return String(out)
   }
 
   /// Finds the index of a top-level argument label (e.g. `dependencies` or `targets`)

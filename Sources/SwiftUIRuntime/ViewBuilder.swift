@@ -16,7 +16,6 @@
 /// The fragment produced by a `for` loop in a builder block.
 
 @resultBuilder
-@MainActor @preconcurrency
 public enum ViewBuilder {
   public static func buildExpression<V: View>(_ expression: V) -> V {
     expression
@@ -200,13 +199,17 @@ public enum ViewBuilder {
   public static func buildArray<C: View>(_ components: [C]) -> ArrayView<C> {
     ArrayView(components)
   }
+
+  public static func buildLimitedAvailability<C: View>(_ component: C) -> AnyView {
+    AnyView(component)
+  }
 }
 public struct TupleView: View {
   public typealias Body = Never
 
   private let builder: @MainActor (ViewPath) -> [Element]
 
-  init(_ builder: @escaping @MainActor (ViewPath) -> [Element]) {
+  nonisolated init(_ builder: @escaping @MainActor (ViewPath) -> [Element]) {
     self.builder = builder
   }
 
@@ -222,7 +225,7 @@ public struct OptionalView<Content: View>: View {
 
   private let content: Content?
 
-  init(_ content: Content?) {
+  nonisolated init(_ content: Content?) {
     self.content = content
   }
 
@@ -259,7 +262,7 @@ public struct ArrayView<Content: View>: View {
 
   private let content: [Content]
 
-  init(_ content: [Content]) {
+  nonisolated init(_ content: [Content]) {
     self.content = content
   }
 

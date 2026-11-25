@@ -20,6 +20,10 @@ public macro Preview<V: View>(
   _ name: String? = nil,
   @ViewBuilder body: @escaping () -> V
 ) = #externalMacro(module: "SwiftUIRuntimeMacros", type: "PreviewMacro")
+
+@attached(peer)
+public macro Previewable() =
+  #externalMacro(module: "SwiftUIRuntimeMacros", type: "PreviewableMacro")
 public enum ColorScheme: Sendable { case light, dark }
 public struct EnvironmentValues {
   var objects: [ObjectIdentifier: AnyObject] = [:]
@@ -38,6 +42,7 @@ public struct EnvironmentValues {
     set { self[OpenURLKey.self] = newValue }
   }
   public var font: Font? = nil
+  public var fontResolutionContext: Font.Context { Font.Context() }
   public var accessibilityReduceMotion = false
   public init(foregroundColor: Color? = nil, isEnabled: Bool = true) {
     self.foregroundColor = foregroundColor
@@ -109,7 +114,7 @@ extension Optional: _OptionalEnvironmentValue {
     return wrapped as AnyObject
   }
 }
-@propertyWrapper public struct Environment<Value>: _EnvironmentProperty {
+@propertyWrapper public struct Environment<Value>: _EnvironmentProperty, @unchecked Sendable {
   private final class Storage { var value: Value? }
   private enum Source {
     case keyPath(KeyPath<EnvironmentValues, Value>)
@@ -118,11 +123,11 @@ extension Optional: _OptionalEnvironmentValue {
   private let storage = Storage()
   private let source: Source
 
-  public init(_ keyPath: KeyPath<EnvironmentValues, Value>) {
+  nonisolated public init(_ keyPath: KeyPath<EnvironmentValues, Value>) {
     self.source = .keyPath(keyPath)
   }
 
-  public init(_ objectType: Value.Type) where Value: AnyObject & Observable {
+  nonisolated public init(_ objectType: Value.Type) where Value: AnyObject & Observable {
     self.source = .resolver { env in
       guard let object = env.objects[ObjectIdentifier(Value.self)] as? Value else {
         preconditionFailure("No Observable object of type \(Value.self) found in environment.")
@@ -131,7 +136,7 @@ extension Optional: _OptionalEnvironmentValue {
     }
   }
 
-  public init<T: AnyObject & Observable>(_ objectType: T.Type) where Value == T? {
+  nonisolated public init<T: AnyObject & Observable>(_ objectType: T.Type) where Value == T? {
     self.source = .resolver { env in
       env.objects[ObjectIdentifier(T.self)] as? T
     }
@@ -149,9 +154,14 @@ extension Optional: _OptionalEnvironmentValue {
 }
 struct EnvironmentView<Content: View, Value>: View, _PrimitiveView {
   typealias Body = Never
-  let content: Content
-  let keyPath: WritableKeyPath<EnvironmentValues, Value>
-  let value: Value
+  nonisolated let content: Content
+  nonisolated let keyPath: WritableKeyPath<EnvironmentValues, Value>
+  nonisolated let value: Value
+  nonisolated init(content: Content, keyPath: WritableKeyPath<EnvironmentValues, Value>, value: Value) {
+    self.content = content
+    self.keyPath = keyPath
+    self.value = value
+  }
   var body: Never { fatalError("EnvironmentView is primitive") }
   func _makeElement(path: ViewPath) -> Element {
     let saved = EnvironmentValues.current
@@ -166,11 +176,48 @@ struct EnvironmentView<Content: View, Value>: View, _PrimitiveView {
     return element
   }
 }
+struct TransformEnvironmentView<Content: View, Value>: View, _PrimitiveView {
+  typealias Body = Never
+  nonisolated let content: Content
+  nonisolated let keyPath: WritableKeyPath<EnvironmentValues, Value>
+  nonisolated let transform: (inout Value) -> Void
+  nonisolated init(
+    content: Content,
+    keyPath: WritableKeyPath<EnvironmentValues, Value>,
+    transform: @escaping (inout Value) -> Void
+  ) {
+    self.content = content
+    self.keyPath = keyPath
+    self.transform = transform
+  }
+  var body: Never { fatalError("TransformEnvironmentView is primitive") }
+  func _makeElement(path: ViewPath) -> Element {
+    let saved = EnvironmentValues.current
+    var scoped = saved
+    transform(&scoped[keyPath: keyPath])
+    EnvironmentValues.current = scoped
+    defer { EnvironmentValues.current = saved }
+    var element = _render(content, path: path)
+    if keyPath == \EnvironmentValues.colorScheme,
+      let scheme = scoped[keyPath: keyPath] as? ColorScheme
+    {
+      element.props.colorSchemeOverride = scheme
+    }
+    return element
+  }
+}
 extension View {
-  public func environment<Value>(
+  nonisolated public func environment<Value>(
     _ keyPath: WritableKeyPath<EnvironmentValues, Value>, _ value: Value
   ) -> some View {
     EnvironmentView(content: self, keyPath: keyPath, value: value)
+  }
+
+  nonisolated public func transformEnvironment<V>(
+    _ keyPath: WritableKeyPath<EnvironmentValues, V>,
+    transform: @escaping (inout V) -> Void
+  ) -> some View {
+    TransformEnvironmentView(content: self, keyPath: keyPath, transform: transform)
   }
 }
 

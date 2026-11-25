@@ -24,6 +24,48 @@ import CrossAppKit
     public init(rawValue: UInt32) { self.rawValue = rawValue }
     public static let noOptions = CTFontTableOptions([])
   }
+  public struct CTFontSymbolicTraits: OptionSet, Sendable {
+    public let rawValue: UInt32
+    public init(rawValue: UInt32) { self.rawValue = rawValue }
+    public static let traitItalic = CTFontSymbolicTraits(rawValue: 1 << 0)
+    public static let traitBold = CTFontSymbolicTraits(rawValue: 1 << 1)
+    public static let traitExpanded = CTFontSymbolicTraits(rawValue: 1 << 5)
+    public static let traitCondensed = CTFontSymbolicTraits(rawValue: 1 << 6)
+    public static let traitMonoSpace = CTFontSymbolicTraits(rawValue: 1 << 10)
+    public static let traitVertical = CTFontSymbolicTraits(rawValue: 1 << 11)
+    public static let traitUIOptimized = CTFontSymbolicTraits(rawValue: 1 << 12)
+    public static let traitColorGlyphs = CTFontSymbolicTraits(rawValue: 1 << 13)
+    public static let traitComposite = CTFontSymbolicTraits(rawValue: 1 << 14)
+  }
+  public func CTFontCreateCopyWithSymbolicTraits(
+    _ font: CTFont,
+    _ size: CGFloat,
+    _ matrix: UnsafePointer<CGAffineTransform>?,
+    _ symTraitValue: CTFontSymbolicTraits,
+    _ symTraitMask: CTFontSymbolicTraits
+  ) -> CTFont? {
+    let targetSize = size > 0 ? size : font.pointSize
+    var traits = font.fontDescriptor.symbolicTraits
+    if symTraitMask.contains(.traitBold) {
+      if symTraitValue.contains(.traitBold) { traits.insert(.bold) } else { traits.remove(.bold) }
+    }
+    if symTraitMask.contains(.traitItalic) {
+      if symTraitValue.contains(.traitItalic) { traits.insert(.italic) } else { traits.remove(.italic) }
+    }
+    if symTraitMask.contains(.traitMonoSpace) {
+      if symTraitValue.contains(.traitMonoSpace) {
+        traits.insert(.monoSpace)
+        let desc = font.fontDescriptor.withDesign(.monospaced)?.withSymbolicTraits(traits)
+          ?? font.fontDescriptor.withSymbolicTraits(traits)
+        return NSFont(descriptor: desc, size: targetSize)
+          ?? NSFont.monospacedSystemFont(ofSize: targetSize, weight: traits.contains(.bold) ? .bold : font.fontDescriptor.weight)
+      } else {
+        traits.remove(.monoSpace)
+      }
+    }
+    let desc = font.fontDescriptor.withSymbolicTraits(traits)
+    return NSFont(descriptor: desc, size: targetSize) ?? font
+  }
   public struct CTLineBoundsOptions: OptionSet, Sendable {
     public let rawValue: UInt
     public init(rawValue: UInt) { self.rawValue = rawValue }

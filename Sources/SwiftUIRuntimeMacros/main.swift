@@ -248,6 +248,9 @@ private func parseEntryDecl(_ source: String) -> ParsedEntryDecl? {
 private func handleExpandAttachedMacro(_ req: [String: Any]) -> [String: Any] {
   let macroInfo = req["macro"] as? [String: Any]
   let typeName = macroInfo?["typeName"] as? String ?? ""
+  if typeName == "PreviewableMacro" {
+    return ["expandMacroResult": ["diagnostics": []]]
+  }
   let role = req["macroRole"] as? String ?? ""
   let declSyntax = req["declSyntax"] as? [String: Any]
   let source = declSyntax?["source"] as? String ?? ""

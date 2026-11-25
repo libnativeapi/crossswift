@@ -258,7 +258,7 @@ extension Spacer: _PrimitiveView {
 public struct EmptyView: View {
   public typealias Body = Never
 
-  public init() {}
+  nonisolated public init() {}
 
   public var body: Never { fatalError("EmptyView is a primitive view") }
 }
@@ -339,32 +339,32 @@ extension Text {
     self
   }
 
-  public func kerning(_ spacing: CGFloat) -> Text {
+  nonisolated public func kerning(_ spacing: CGFloat) -> Text {
     var text = self
     text.textTracking = Double(spacing)
     for index in text.runs.indices { text.runs[index].tracking = Double(spacing) }
     return text
   }
 
-  public func font(_ font: Font?) -> Text {
+  nonisolated public func font(_ font: Font?) -> Text {
     var text = self
     text.textFont = font
     return text
   }
-  public func fontWeight(_ weight: Font.Weight?) -> Text {
+  nonisolated public func fontWeight(_ weight: Font.Weight?) -> Text {
     font((textFont ?? .body).weight(weight ?? .regular))
   }
-  public func foregroundColor(_ color: Color) -> Text {
+  nonisolated public func foregroundColor(_ color: Color) -> Text {
     var text = self
     text.textColor = color
     return text
   }
-  public func foregroundColor(_ color: Color?) -> Text {
+  nonisolated public func foregroundColor(_ color: Color?) -> Text {
     var text = self
     text.textColor = color
     return text
   }
-  public static func + (lhs: Text, rhs: Text) -> Text {
+  nonisolated public static func + (lhs: Text, rhs: Text) -> Text {
     var text = Text(lhs.content + rhs.content)
     text.runs =
       (lhs.runs.isEmpty
@@ -378,5 +378,76 @@ extension Text {
             text: rhs.content, font: rhs.textFont, color: rhs.textColor, tracking: rhs.textTracking)
         ] : rhs.runs)
     return text
+  }
+
+  nonisolated public func _resolveText(in environment: EnvironmentValues) -> String {
+    if !runs.isEmpty {
+      return runs.map(\.text).joined()
+    }
+    return localizedKey?.resolved(locale: environment.locale) ?? content
+  }
+
+  public struct Layout: RandomAccessCollection, Sendable {
+    public struct RunSlice: Sendable {
+      public let text: String
+      public let characterIndices: Range<Int>
+      public let typographicBounds: CGRect
+
+      public init(text: String = "", characterIndices: Range<Int> = 0..<0, typographicBounds: CGRect = .zero) {
+        self.text = text
+        self.characterIndices = characterIndices
+        self.typographicBounds = typographicBounds
+      }
+    }
+
+    public struct Run: RandomAccessCollection, Sendable {
+      public let slices: [RunSlice]
+      public init(slices: [RunSlice] = []) { self.slices = slices }
+      public var startIndex: Int { slices.startIndex }
+      public var endIndex: Int { slices.endIndex }
+      public subscript(index: Int) -> RunSlice { slices[index] }
+    }
+
+    public struct Line: RandomAccessCollection, Sendable {
+      public let runs: [Run]
+      public let typographicBounds: CGRect
+      public init(runs: [Run] = [], typographicBounds: CGRect = .zero) {
+        self.runs = runs
+        self.typographicBounds = typographicBounds
+      }
+      public var startIndex: Int { runs.startIndex }
+      public var endIndex: Int { runs.endIndex }
+      public subscript(index: Int) -> Run { runs[index] }
+    }
+
+    public let lines: [Line]
+    public init(lines: [Line] = []) { self.lines = lines }
+    public var startIndex: Int { lines.startIndex }
+    public var endIndex: Int { lines.endIndex }
+    public subscript(index: Int) -> Line { lines[index] }
+  }
+}
+
+public protocol TextRenderer: Animatable {
+  func draw(layout: Text.Layout, in ctx: inout GraphicsContext)
+  func sizeThatFits(proposal: ProposedViewSize, text: TextProxy) -> CGSize
+}
+
+public struct TextProxy: Sendable {
+  public init() {}
+  public func sizeThatFits(_ proposal: ProposedViewSize) -> CGSize {
+    CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+  }
+}
+
+extension TextRenderer {
+  public func sizeThatFits(proposal: ProposedViewSize, text: TextProxy) -> CGSize {
+    text.sizeThatFits(proposal)
+  }
+}
+
+extension View {
+  public func textRenderer<T: TextRenderer>(_ renderer: T) -> some View {
+    self
   }
 }

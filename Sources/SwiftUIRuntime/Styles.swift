@@ -30,6 +30,26 @@ public struct Font: Hashable, Sendable {
     Font(size: size, weight: .regular, family: name)
   }
   public static let body = Font.system(size: 14)
+
+  public struct Context: Hashable, Sendable {
+    public init() {}
+  }
+
+  public struct Resolved: Hashable, Sendable {
+    public let pointSize: CGFloat
+    public let weight: Weight
+    public let family: String
+
+    public init(pointSize: CGFloat, weight: Weight = .regular, family: String = "Segoe UI") {
+      self.pointSize = pointSize
+      self.weight = weight
+      self.family = family
+    }
+  }
+
+  public func resolve(in context: Context) -> Resolved {
+    Resolved(pointSize: size, weight: weight, family: family)
+  }
 }
 public struct Animation: Equatable, Sendable {
   public let duration: Double
@@ -134,8 +154,12 @@ private struct _ModifierStoredContent<Content: View>: View, _PrimitiveView {
 }
 struct ModifierContent<Content: View, Modifier: ViewModifier>: View, _PrimitiveView {
   typealias Body = Never
-  let content: Content
-  let modifier: Modifier
+  nonisolated let content: Content
+  nonisolated let modifier: Modifier
+  nonisolated init(content: Content, modifier: Modifier) {
+    self.content = content
+    self.modifier = modifier
+  }
   var body: Never { fatalError("ModifierContent is primitive") }
   func _makeElement(path: ViewPath) -> Element {
     _installState(modifier, path: path)
@@ -275,7 +299,7 @@ public struct Shadow: Equatable {
   public var y: Double
 }
 extension View {
-  public func modifier<M: ViewModifier>(_ modifier: M) -> some View {
+  nonisolated public func modifier<M: ViewModifier>(_ modifier: M) -> some View {
     ModifierContent(content: self, modifier: modifier)
   }
   public func font(_ font: Font?) -> some View { environment(\.font, font) }

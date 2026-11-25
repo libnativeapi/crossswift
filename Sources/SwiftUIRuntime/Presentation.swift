@@ -423,13 +423,16 @@ private struct PopoverView<Content: View, Panel: View>: View, _PrimitiveView {
       let savedScroll = EnvironmentValues.current.scrollViewportContext
       let savedStack = EnvironmentValues.current.lazyStackKey
       let savedLazy = EnvironmentValues.current.lazyContainerContext
+      let savedLabelsHidden = EnvironmentValues.current.labelsHidden
       EnvironmentValues.current.scrollViewportContext = nil
       EnvironmentValues.current.lazyStackKey = nil
       EnvironmentValues.current.lazyContainerContext = nil
+      EnvironmentValues.current.labelsHidden = false
       defer {
         EnvironmentValues.current.scrollViewportContext = savedScroll
         EnvironmentValues.current.lazyStackKey = savedStack
         EnvironmentValues.current.lazyContainerContext = savedLazy
+        EnvironmentValues.current.labelsHidden = savedLabelsHidden
       }
       children.append(_render(panel, path: path.appending(index: 1)))
     }

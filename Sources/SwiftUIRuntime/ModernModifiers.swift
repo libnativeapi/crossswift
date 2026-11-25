@@ -491,6 +491,20 @@ private struct SafeAreaInsetVerticalView<Content: View, Bar: View>: View, _Primi
   let spacing: CGFloat
   let bar: Bar
 
+  nonisolated init(
+    content: Content,
+    edge: VerticalEdge,
+    alignment: HorizontalAlignment,
+    spacing: CGFloat,
+    bar: Bar
+  ) {
+    self.content = content
+    self.edge = edge
+    self.alignment = alignment
+    self.spacing = spacing
+    self.bar = bar
+  }
+
   var body: Never { fatalError("SafeAreaInsetVerticalView is primitive") }
 
   func _makeElement(path: ViewPath) -> Element {
@@ -522,6 +536,20 @@ private struct SafeAreaInsetHorizontalView<Content: View, Bar: View>: View, _Pri
   let alignment: VerticalAlignment
   let spacing: CGFloat
   let bar: Bar
+
+  nonisolated init(
+    content: Content,
+    edge: HorizontalEdge,
+    alignment: VerticalAlignment,
+    spacing: CGFloat,
+    bar: Bar
+  ) {
+    self.content = content
+    self.edge = edge
+    self.alignment = alignment
+    self.spacing = spacing
+    self.bar = bar
+  }
 
   var body: Never { fatalError("SafeAreaInsetHorizontalView is primitive") }
 
@@ -567,7 +595,7 @@ extension View {
     OnGeometryChangeView(content: self, transform: transform, action: action)
   }
 
-  public func safeAreaInset<V: View>(
+  nonisolated public func safeAreaInset<V: View>(
     edge: VerticalEdge,
     alignment: HorizontalAlignment = .center,
     spacing: CGFloat? = nil,
@@ -578,7 +606,7 @@ extension View {
     )
   }
 
-  public func safeAreaInset<V: View>(
+  nonisolated public func safeAreaInset<V: View>(
     edge: HorizontalEdge,
     alignment: VerticalAlignment = .center,
     spacing: CGFloat? = nil,
@@ -1359,6 +1387,71 @@ public struct WiggleSymbolEffect: DiscreteSymbolEffect, IndefiniteSymbolEffect, 
 
 public struct BreatheSymbolEffect: IndefiniteSymbolEffect, Sendable {
   public init() {}
+}
+
+public struct DrawOnSymbolEffect: DiscreteSymbolEffect, IndefiniteSymbolEffect, Sendable {
+  public init() {}
+  public var byLayer: DrawOnSymbolEffect { self }
+  public var wholeSymbol: DrawOnSymbolEffect { self }
+  public var individually: DrawOnSymbolEffect { self }
+}
+
+extension SymbolEffect where Self == DrawOnSymbolEffect {
+  public static var drawOn: DrawOnSymbolEffect { DrawOnSymbolEffect() }
+}
+
+@propertyWrapper
+public struct ScaledMetric<Value: BinaryFloatingPoint> {
+  public var wrappedValue: Value
+  public init(wrappedValue: Value, relativeTo textStyle: Font.TextStyle) {
+    self.wrappedValue = wrappedValue
+  }
+  public init(wrappedValue: Value) {
+    self.wrappedValue = wrappedValue
+  }
+}
+
+extension ScaledMetric: Sendable where Value: Sendable {}
+
+public enum AccessibilityHeadingLevel: UInt, Equatable, Hashable, Sendable {
+  case unspecified = 0
+  case h1 = 1
+  case h2 = 2
+  case h3 = 3
+  case h4 = 4
+  case h5 = 5
+  case h6 = 6
+}
+
+extension View {
+  public func accessibilityHeading(_ level: AccessibilityHeadingLevel) -> some View {
+    self
+  }
+
+  public func containerRelativeFrame(
+    _ axes: Axis.Set,
+    alignment: Alignment = .center
+  ) -> some View {
+    self
+  }
+
+  public func containerRelativeFrame(
+    _ axes: Axis.Set,
+    count: Int,
+    span: Int = 1,
+    spacing: CGFloat,
+    alignment: Alignment = .center
+  ) -> some View {
+    self
+  }
+
+  public func containerRelativeFrame(
+    _ axes: Axis.Set,
+    alignment: Alignment = .center,
+    _ length: @escaping (CGFloat, Axis) -> CGFloat
+  ) -> some View {
+    self
+  }
 }
 
 extension SymbolEffect where Self == BounceSymbolEffect {

@@ -278,7 +278,7 @@ extension ShapeStyle {
   }
 }
 
-public struct AnyShapeStyle: ShapeStyle {
+public struct AnyShapeStyle: ShapeStyle, @unchecked Sendable {
   let colorResolver: (EnvironmentValues) -> Color
   let gradientResolver: () -> LinearGradient.Data?
 

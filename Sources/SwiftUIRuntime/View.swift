@@ -132,9 +132,9 @@ public struct _HostedViewPrimitive: View, _PrimitiveView {
 public struct AnyView: View {
   public typealias Body = Never
 
-  private let builder: (ViewPath) -> Element
+  nonisolated private let builder: @MainActor (ViewPath) -> Element
 
-  public init<V: View>(_ view: V) {
+  nonisolated public init<V: View>(_ view: V) {
     self.builder = { path in _render(view, path: path) }
   }
 

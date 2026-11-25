@@ -332,6 +332,10 @@ import Carbon
     public init(markdown: String, options: MarkdownParsingOptions = MarkdownParsingOptions()) throws {
       self.init(markdown)
     }
+
+    public init(_ nsStr: NSAttributedString) {
+      self.init(nsStr.string)
+    }
   }
 
   // MARK: - String.EnumerationOptions.byWords & NSMutableAttributedString convenience

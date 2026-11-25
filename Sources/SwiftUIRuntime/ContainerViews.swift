@@ -661,10 +661,11 @@ public struct UnitPoint: Equatable, Hashable, Sendable {
   public static let top = UnitPoint(x: 0.5, y: 0), bottom = UnitPoint(x: 0.5, y: 1)
   public static let bottomLeading = UnitPoint(x: 0, y: 1), bottomTrailing = UnitPoint(x: 1, y: 1)
 }
-public final class LayoutSubview {
+public final class LayoutSubview: Equatable {
   let measure: (ProposedViewSize) -> CGSize
   var placement: (CGPoint, UnitPoint, ProposedViewSize)?
   init(measure: @escaping (ProposedViewSize) -> CGSize) { self.measure = measure }
+  public static func == (lhs: LayoutSubview, rhs: LayoutSubview) -> Bool { lhs === rhs }
   public func sizeThatFits(_ proposal: ProposedViewSize) -> CGSize { measure(proposal) }
   public func place(at point: CGPoint, anchor: UnitPoint = .topLeading, proposal: ProposedViewSize)
   { placement = (point, anchor, proposal) }

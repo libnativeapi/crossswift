@@ -10,6 +10,11 @@
 
 import Foundation
 
+public enum ScenePadding: Hashable, Sendable {
+  case minimum
+  case navigationBar
+}
+
 public enum Edge: Equatable, Hashable, Sendable {
   case top, leading, bottom, trailing
   public struct Set: OptionSet, Hashable, Sendable {
@@ -35,10 +40,10 @@ enum ViewModifierValue {
 public struct ModifiedView<Content: View>: View {
   public typealias Body = Never
 
-  let content: Content
-  let modifier: ViewModifierValue
+  nonisolated let content: Content
+  nonisolated let modifier: ViewModifierValue
 
-  init(content: Content, modifier: ViewModifierValue) {
+  nonisolated init(content: Content, modifier: ViewModifierValue) {
     self.content = content
     self.modifier = modifier
   }
@@ -91,30 +96,51 @@ extension ModifiedView: _PrimitiveView {
 }
 extension View {
   /// Pads every edge by `value`.
-  public func padding(_ value: Double) -> some View {
+  nonisolated public func padding(_ value: Double) -> some View {
     padding(EdgeInsets.all(value))
   }
 
   /// Pads by explicit per-edge values.
-  public func padding(_ insets: EdgeInsets) -> some View {
+  nonisolated public func padding(_ insets: EdgeInsets) -> some View {
     ModifiedView(content: self, modifier: .padding(insets))
   }
 
   /// Pads only the selected edges.
-  public func padding(_ edges: Edge.Set, _ value: Double) -> some View {
+  nonisolated public func padding(_ edges: Edge.Set, _ value: CGFloat? = nil) -> some View {
+    let length = Double(value ?? 8)
     var insets = EdgeInsets.zero
-    if edges.contains(.top) { insets.top = value }
-    if edges.contains(.leading) { insets.leading = value }
-    if edges.contains(.bottom) { insets.bottom = value }
-    if edges.contains(.trailing) { insets.trailing = value }
+    if edges.contains(.top) { insets.top = length }
+    if edges.contains(.leading) { insets.leading = length }
+    if edges.contains(.bottom) { insets.bottom = length }
+    if edges.contains(.trailing) { insets.trailing = length }
     return padding(insets)
+  }
+
+  nonisolated public func safeAreaPadding(_ edges: Edge.Set = .all, _ length: CGFloat? = nil) -> some View {
+    padding(edges, length)
+  }
+
+  nonisolated public func safeAreaPadding(_ insets: EdgeInsets) -> some View {
+    padding(insets)
+  }
+
+  nonisolated public func safeAreaPadding(_ length: CGFloat) -> some View {
+    padding(Double(length))
+  }
+
+  nonisolated public func scenePadding(_ edges: Edge.Set = .all) -> some View {
+    padding(edges, 16)
+  }
+
+  nonisolated public func scenePadding(_ padding: ScenePadding, edges: Edge.Set = .all) -> some View {
+    self.padding(edges, 16)
   }
 
   /// Constrains the view's preferred size.
   ///
   /// Windows aligns the child inside an explicit frame wrapper. The Linux
   /// backend maps this to native preferred sizing. See docs/DIVERGENCES.md.
-  public func frame(
+  nonisolated public func frame(
     width: CGFloat? = nil,
     height: CGFloat? = nil,
     alignment: Alignment = .center

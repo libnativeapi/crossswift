@@ -105,6 +105,36 @@ extension SwiftUIRuntime.Font {
   }
 }
 
+extension SwiftUIRuntime.Font.Resolved {
+  public var ctFont: CrossAppKit.NSFont {
+    let nsWeight: CrossAppKit.NSFont.Weight
+    switch weight.value {
+    case ..<150: nsWeight = .ultraLight
+    case ..<250: nsWeight = .thin
+    case ..<350: nsWeight = .light
+    case ..<450: nsWeight = .regular
+    case ..<550: nsWeight = .medium
+    case ..<650: nsWeight = .semibold
+    case ..<750: nsWeight = .bold
+    case ..<850: nsWeight = .heavy
+    default: nsWeight = .black
+    }
+    if family == "Consolas" || family.lowercased().contains("mono") {
+      return CrossAppKit.NSFont.monospacedSystemFont(ofSize: pointSize, weight: nsWeight)
+    }
+    if family == "Georgia" || family.lowercased().contains("serif") {
+      let base = CrossAppKit.NSFont.systemFont(ofSize: pointSize, weight: nsWeight)
+      if let desc = base.fontDescriptor.withDesign(.serif),
+         let serif = CrossAppKit.NSFont(descriptor: desc, size: pointSize)
+      {
+        return serif
+      }
+    }
+    return CrossAppKit.NSFont(name: family, size: pointSize)
+      ?? CrossAppKit.NSFont.systemFont(ofSize: pointSize, weight: nsWeight)
+  }
+}
+
 extension SwiftUIRuntime.Image {
   public init(nsImage: CrossAppKit.NSImage) {
     if let sym = nsImage.symbolName {

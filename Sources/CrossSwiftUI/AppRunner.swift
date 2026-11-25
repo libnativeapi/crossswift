@@ -184,6 +184,25 @@ private final class DesktopSceneCoordinator {
     }
   }
 
+  private static func defaultWindowTitle() -> String {
+    if let displayName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String,
+      !displayName.isEmpty
+    {
+      return displayName
+    }
+    if let bundleName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String,
+      !bundleName.isEmpty
+    {
+      return bundleName
+    }
+    let rawProcessName = ProcessInfo.processInfo.processName
+    let stripped =
+      rawProcessName.lowercased().hasSuffix(".exe")
+      ? String(rawProcessName.dropLast(4))
+      : rawProcessName
+    return stripped.isEmpty ? "CrossSwiftUI" : stripped
+  }
+
   @discardableResult
   func createAndMountWindow(
     scene: any _WindowScene,
@@ -196,7 +215,7 @@ private final class DesktopSceneCoordinator {
     }
 
     let title = scene._windowTitle
-    window.setTitle(title.isEmpty ? "CrossSwiftUI" : title)
+    window.setTitle(title.isEmpty ? Self.defaultWindowTitle() : title)
 
     var initialWidth = scene._defaultSize.width
     var initialHeight = scene._defaultSize.height

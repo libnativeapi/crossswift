@@ -107,6 +107,7 @@ struct EditHook {
   std::wstring placeholder;
   double sample_x = 0;
   double sample_y = 0;
+  double wheel_remainder = 0;
 };
 struct Framebuffer {
   UINT width, height;
@@ -2554,6 +2555,34 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
     sui_surface_focus_next(s, hwnd, (Modifiers() & 1) != 0);
     return 0;
   }
+  if (msg == WM_MOUSEWHEEL && found->second.multiline) {
+    const int line_count = int(SendMessageW(hwnd, EM_GETLINECOUNT, 0, 0));
+    const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+    if (line_count > 1 && delta != 0) {
+      UINT wheel_lines = 3;
+      SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &wheel_lines, 0);
+      if (wheel_lines == WHEEL_PAGESCROLL || wheel_lines == 0)
+        wheel_lines = 3;
+      found->second.wheel_remainder +=
+          double(delta) * double(wheel_lines) / double(WHEEL_DELTA);
+      const int step = int(std::trunc(found->second.wheel_remainder));
+      if (step != 0) {
+        found->second.wheel_remainder -= double(step);
+        const int before = int(SendMessageW(hwnd, EM_GETFIRSTVISIBLELINE, 0, 0));
+        SendMessageW(hwnd, EM_LINESCROLL, 0, -step);
+        const int after = int(SendMessageW(hwnd, EM_GETFIRSTVISIBLELINE, 0, 0));
+        if (after != before) {
+          if (transparent) {
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+          }
+          return 0;
+        }
+      } else {
+        return 0;
+      }
+    }
+  }
   if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_MOUSEWHEEL) &&
       Input(s, hwnd, id, msg, wp, lp)) {
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_RETURN) {
@@ -2707,6 +2736,18 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
   if (msg == WM_MOUSEMOVE) {
     TRACKMOUSEEVENT track = {sizeof(track), TME_LEAVE, hwnd, 0};
     TrackMouseEvent(&track);
+  }
+  if (msg == WM_MOUSEWHEEL && !s->edits.empty()) {
+    POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    for (auto &entry : s->edits) {
+      HWND edit_hwnd = entry.first;
+      if (!entry.second.multiline || !IsWindowVisible(edit_hwnd))
+        continue;
+      RECT wr{};
+      if (GetWindowRect(edit_hwnd, &wr) && PtInRect(&wr, pt)) {
+        return SendMessageW(edit_hwnd, WM_MOUSEWHEEL, wp, lp);
+      }
+    }
   }
   if (Input(s, hwnd, 0, msg, wp, lp)) {
     if (msg == WM_LBUTTONDOWN && GetCapture() == hwnd &&

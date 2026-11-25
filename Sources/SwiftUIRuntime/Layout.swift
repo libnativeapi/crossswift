@@ -479,7 +479,16 @@ public struct LayoutEngine {
         size.height = max(size.height + 8, 24)
       }
       #endif
-      if p.multiline { size.height *= 3 }
+      if p.multiline {
+        let singleLineH = max(18.0, Double((p.font ?? .body).size) * 1.35)
+        let minMultilineH = singleLineH * 3 + 8
+        let naturalH = max(minMultilineH, size.height)
+        if let offeredH = offer.height, offeredH.isFinite {
+          size.height = min(Double(offeredH), naturalH)
+        } else {
+          size.height = naturalH
+        }
+      }
     case .image:
       if let iw = p.idealWidth ?? p.intrinsicImageWidth,
          let ih = p.idealHeight ?? p.intrinsicImageHeight
@@ -951,7 +960,33 @@ public struct LayoutEngine {
           pass?.activeScrollContentOrigin = savedScrollOrigin
           pass?.activeScrollViewportSize = savedScrollViewport
         }
-        let size = measure(e.children[1], ProposedViewSize(width: 640, height: nil))
+        let panel = e.children[1]
+        func unboundedScrollContentHeight(_ node: Element, width: CGFloat) -> Double? {
+          if node.props.frameHeight != nil || node.props.idealHeight != nil { return nil }
+          if node.kind == .scroll && node.props.scrollAxes.contains(.vertical) {
+            return node.children.first.map {
+              measure($0, ProposedViewSize(width: width, height: nil)).height
+            }
+          }
+          if node.kind == .frame || node.kind == .padding || node.kind == .layer || node.kind == .fragment {
+            let innerW = node.kind == .padding ? max(0, width - CGFloat(node.props.padding.horizontal)) : width
+            for child in node.children {
+              if let h = unboundedScrollContentHeight(child, width: innerW) {
+                return h + (node.kind == .padding ? node.props.padding.vertical : 0)
+              }
+            }
+          }
+          return nil
+        }
+        let proposedW: CGFloat = CGFloat(panel.props.frameWidth ?? panel.props.idealWidth ?? 640)
+        let explicitH = panel.props.frameHeight ?? panel.props.idealHeight
+        let proposedH: CGFloat? =
+          explicitH.map { CGFloat($0) }
+          ?? unboundedScrollContentHeight(panel, width: proposedW).map { CGFloat(min(520, max(10, $0))) }
+        var size = measure(panel, ProposedViewSize(width: proposedW, height: proposedH))
+        if explicitH == nil && size.height > 520 {
+          size.height = 520
+        }
         place(
           &e.children[1],
           in: Rect(x: rect.minX, y: rect.maxY, width: size.width, height: size.height))

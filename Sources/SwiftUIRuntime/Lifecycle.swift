@@ -188,8 +188,17 @@ extension View {
       content: self, value: value, appear: initial ? { action(value, value) } : nil,
       change: action, disappear: nil, task: nil)
   }
-  public func task<ID: Equatable>(id: ID, _ action: @escaping () async -> Void) -> some View {
+  public func task<ID: Equatable>(
+    id: ID,
+    priority: TaskPriority = .userInitiated,
+    _ action: @escaping () async -> Void
+  ) -> some View {
     LifecycleView(content: self, value: id, appear: nil, change: nil, disappear: nil, task: action)
   }
-  public func task(_ action: @escaping () async -> Void) -> some View { task(id: false, action) }
+  public func task(
+    priority: TaskPriority = .userInitiated,
+    _ action: @escaping () async -> Void
+  ) -> some View {
+    task(id: false, priority: priority, action)
+  }
 }

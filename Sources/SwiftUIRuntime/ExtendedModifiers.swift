@@ -123,6 +123,97 @@ public struct AnyTransition: Equatable, Sendable {
     copy.animationOverride = animation
     return copy
   }
+
+  public init<T: Transition>(_ transition: T) {
+    self = .opacity
+  }
+}
+
+public protocol Transition: Sendable {}
+
+public struct CombinedTransition<First: Transition, Second: Transition>: Transition, Sendable {
+  public let first: First
+  public let second: Second
+  public init(_ first: First, _ second: Second) {
+    self.first = first
+    self.second = second
+  }
+}
+
+extension Transition {
+  public func combined<T: Transition>(with other: T) -> CombinedTransition<Self, T> {
+    CombinedTransition(self, other)
+  }
+}
+
+public struct BlurReplaceTransition: Transition, Sendable {
+  public enum Configuration: Sendable {
+    case downUp
+    case upUp
+  }
+  public init(configuration: Configuration = .downUp) {}
+}
+
+extension Transition where Self == BlurReplaceTransition {
+  public static var blurReplace: BlurReplaceTransition { BlurReplaceTransition() }
+  public static func blurReplace(_ configuration: BlurReplaceTransition.Configuration) -> BlurReplaceTransition {
+    BlurReplaceTransition(configuration: configuration)
+  }
+}
+
+public struct SymbolEffectTransition: Transition, Sendable {
+  public init() {}
+}
+
+extension Transition where Self == SymbolEffectTransition {
+  public static var symbolEffect: SymbolEffectTransition { SymbolEffectTransition() }
+  public static func symbolEffect<T: SymbolEffect>(
+    _ effect: T,
+    options: SymbolEffectOptions = .default
+  ) -> SymbolEffectTransition {
+    SymbolEffectTransition()
+  }
+}
+
+public protocol VectorArithmetic: AdditiveArithmetic {
+  mutating func scale(by rhs: Double)
+  var magnitudeSquared: Double { get }
+}
+
+extension Double: VectorArithmetic {
+  public mutating func scale(by rhs: Double) { self *= rhs }
+  public var magnitudeSquared: Double { self * self }
+}
+
+extension CGFloat: VectorArithmetic {
+  public mutating func scale(by rhs: Double) { self *= CGFloat(rhs) }
+  public var magnitudeSquared: Double { Double(self * self) }
+}
+
+extension Float: VectorArithmetic {
+  public mutating func scale(by rhs: Double) { self *= Float(rhs) }
+  public var magnitudeSquared: Double { Double(self * self) }
+}
+
+public struct EmptyAnimatableData: VectorArithmetic, Sendable {
+  public init() {}
+  public static var zero: EmptyAnimatableData { EmptyAnimatableData() }
+  public static func + (lhs: EmptyAnimatableData, rhs: EmptyAnimatableData) -> EmptyAnimatableData { .zero }
+  public static func - (lhs: EmptyAnimatableData, rhs: EmptyAnimatableData) -> EmptyAnimatableData { .zero }
+  public mutating func scale(by rhs: Double) {}
+  public var magnitudeSquared: Double { 0 }
+}
+
+public protocol Animatable {
+  associatedtype AnimatableData: VectorArithmetic = EmptyAnimatableData
+  var animatableData: Self.AnimatableData { get set }
+}
+
+extension Animatable where AnimatableData == EmptyAnimatableData {
+  public var animatableData: EmptyAnimatableData {
+    get { .zero }
+    set {}
+  }
 }
 extension Font {
   public func weight(_ value: Weight) -> Font {

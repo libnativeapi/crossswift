@@ -137,7 +137,7 @@ extension View {
     _ key: K.Type = K.self,
     alignment: Alignment = .center,
     @ViewBuilder _ content: @escaping (K.Value) -> Overlay
-  ) -> some View where K.Value: Equatable {
+  ) -> some View {
     PreferenceOverlay<Overlay, Self, K>(
       content: self, alignment: alignment, behind: false, overlay: content)
   }
@@ -146,7 +146,7 @@ extension View {
     _ key: K.Type = K.self,
     alignment: Alignment = .center,
     @ViewBuilder _ content: @escaping (K.Value) -> Background
-  ) -> some View where K.Value: Equatable {
+  ) -> some View {
     PreferenceOverlay<Background, Self, K>(
       content: self, alignment: alignment, behind: true, overlay: content)
   }
@@ -225,8 +225,59 @@ func resolvePreferences(_ node: Element) -> [ObjectIdentifier: PreferenceValue] 
   }
   return result
 }
-private struct PreferenceOverlay<Overlay: View, Content: View, Key: PreferenceKey>: View
-where Key.Value: Equatable {
+private func preferenceValueFingerprint(_ value: Any, depth: Int = 0) -> String {
+  if depth > 6 { return "..." }
+  if type(of: value) is AnyClass { return "<ref>" }
+  let mirror = Mirror(reflecting: value)
+  if mirror.children.isEmpty {
+    return String(describing: value)
+  }
+  var parts: [String] = []
+  for child in mirror.children {
+    if type(of: child.value) is AnyClass { continue }
+    let label = child.label ?? ""
+    parts.append("\(label)=\(preferenceValueFingerprint(child.value, depth: depth + 1))")
+  }
+  if mirror.displayStyle == .dictionary || mirror.displayStyle == .set {
+    parts.sort()
+  }
+  return "{\(parts.joined(separator: ","))}"
+}
+
+private func preferenceValuesEqual(_ lhs: Any, _ rhs: Any) -> Bool {
+  func openEqual<T: Equatable>(_ a: T, _ b: Any) -> Bool {
+    guard let b = b as? T else { return false }
+    return a == b
+  }
+  if let eq = lhs as? any Equatable {
+    return openEqual(eq, rhs)
+  }
+  return preferenceValueFingerprint(lhs) == preferenceValueFingerprint(rhs)
+}
+
+private struct AnyPreferenceReader<Content: View, Key: PreferenceKey>: View, _PrimitiveView {
+  typealias Body = Never
+  let content: Content
+  let action: (Key.Value) -> Void
+  @State private var previous: Key.Value?
+  var body: Never { fatalError() }
+  func _makeElement(path: ViewPath) -> Element {
+    var element = _render(content, path: path)
+    let old = element.preferenceAction
+    element.preferenceAction = { values in
+      old?(values)
+      let next = values[ObjectIdentifier(Key.self)]?.value as? Key.Value ?? Key.defaultValue
+      if let prev = previous, preferenceValuesEqual(prev, next) {
+        return
+      }
+      previous = next
+      action(next)
+    }
+    return element
+  }
+}
+
+private struct PreferenceOverlay<Overlay: View, Content: View, Key: PreferenceKey>: View {
   let content: Content
   let alignment: Alignment
   let behind: Bool
@@ -235,7 +286,7 @@ where Key.Value: Equatable {
 
   var body: some View {
     LayerView(
-      content: content.onPreferenceChange(Key.self) { value = $0 },
+      content: AnyPreferenceReader<Content, Key>(content: content) { value = $0 },
       layer: overlay(value),
       behind: behind,
       alignment: alignment)

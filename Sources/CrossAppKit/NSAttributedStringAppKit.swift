@@ -333,12 +333,32 @@ public enum NSTextAlignment: Int, Sendable {
       public static let characterEncoding = DocumentAttributeKey(rawValue: "CharacterEncoding")
     }
 
+    public typealias DocumentReadingOptionKey = DocumentAttributeKey
+
     public struct DocumentType: Hashable, RawRepresentable, Sendable {
       public let rawValue: String
       public init(rawValue: String) { self.rawValue = rawValue }
       public static let plain = DocumentType(rawValue: "NSPlainText")
       public static let rtf = DocumentType(rawValue: "NSRTFText")
       public static let html = DocumentType(rawValue: "NSHTMLText")
+    }
+
+    public convenience init(
+      data: Data,
+      options: [DocumentReadingOptionKey: Any] = [:],
+      documentAttributes dict: AutoreleasingUnsafeMutablePointer<NSDictionary?>?
+    ) throws {
+      let raw = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+      let docType = options[.documentType] as? DocumentType
+      let plain: String
+      if docType == .html {
+        plain = Self._stripHTML(raw)
+      } else if docType == .rtf {
+        plain = Self._stripRTF(raw)
+      } else {
+        plain = raw
+      }
+      self.init(string: plain)
     }
 
     public convenience init?(

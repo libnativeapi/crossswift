@@ -44,6 +44,18 @@ public struct Binding<Value> {
   public static func constant(_ value: Value) -> Binding<Value> {
     Binding(get: { value }, set: { _ in })
   }
+
+  /// Specifies an animation to perform when the binding value changes.
+  public func animation(_ animation: Animation? = .default) -> Binding<Value> {
+    Binding(
+      get: getter,
+      set: { newValue in
+        withAnimation(animation) {
+          setter(newValue)
+        }
+      }
+    )
+  }
 }
 
 extension Binding: Sequence where Value: MutableCollection {

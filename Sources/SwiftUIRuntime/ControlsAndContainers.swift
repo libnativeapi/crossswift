@@ -2463,7 +2463,50 @@ public struct ToolbarTitleDisplayMode: Equatable, Sendable {
   public static let large = ToolbarTitleDisplayMode()
 }
 
-public struct ToolbarItem<ID, Content: View>: View {
+@MainActor @preconcurrency
+public protocol ToolbarContent: View {}
+
+extension EmptyView: ToolbarContent {}
+extension TupleView: ToolbarContent {}
+extension OptionalView: ToolbarContent {}
+extension _ConditionalContent: ToolbarContent {}
+extension ArrayView: ToolbarContent {}
+extension AnyView: ToolbarContent {}
+
+@resultBuilder
+public enum ToolbarContentBuilder {
+  public static func buildExpression<C: ToolbarContent>(_ content: C) -> C { content }
+  public static func buildBlock() -> EmptyView { EmptyView() }
+  public static func buildBlock<C: ToolbarContent>(_ content: C) -> C { content }
+  public static func buildBlock<each C: ToolbarContent>(_ content: repeat each C) -> TupleView {
+    TupleView { path in
+      var elements: [Element] = []
+      var index = 0
+      for child in repeat each content {
+        elements.append(_render(child, path: path.appending(index: index)))
+        index += 1
+      }
+      return elements
+    }
+  }
+  public static func buildOptional<C: ToolbarContent>(_ content: C?) -> OptionalView<C> {
+    OptionalView(content)
+  }
+  public static func buildEither<T: ToolbarContent, F: ToolbarContent>(
+    first content: T
+  ) -> _ConditionalContent<T, F> { .first(content) }
+  public static func buildEither<T: ToolbarContent, F: ToolbarContent>(
+    second content: F
+  ) -> _ConditionalContent<T, F> { .second(content) }
+  public static func buildArray<C: ToolbarContent>(_ components: [C]) -> ArrayView<C> {
+    ArrayView(components)
+  }
+  public static func buildLimitedAvailability<C: ToolbarContent>(_ component: C) -> AnyView {
+    AnyView(component)
+  }
+}
+
+public struct ToolbarItem<ID, Content: View>: ToolbarContent {
   let content: Content
   public init(placement: ToolbarItemPlacement = .automatic, @ViewBuilder content: () -> Content)
   where ID == Void {
@@ -2475,12 +2518,40 @@ public struct ToolbarItem<ID, Content: View>: View {
   public var body: some View { content }
 }
 
-public struct ToolbarItemGroup<Content: View>: View {
+public struct ToolbarItemGroup<Content: View>: ToolbarContent {
   let content: Content
   public init(placement: ToolbarItemPlacement = .automatic, @ViewBuilder content: () -> Content) {
     self.content = content()
   }
   public var body: some View { HStack(spacing: 6) { content } }
+}
+
+private struct _ToolbarHostView<Content: View, Toolbar: View>: View {
+  let content: Content
+  let toolbar: Toolbar
+  @Environment(\._navigationActions) private var navActions
+
+  var body: some View {
+    if navActions.push != nil {
+      VStack(spacing: 0) {
+        HStack(spacing: 8) {
+          Spacer()
+          toolbar
+            .labelsHidden()
+        }
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, minHeight: 42, maxHeight: 42)
+        .background(Color { s in s == .dark ? (0.13, 0.13, 0.145, 1) : (0.96, 0.96, 0.97, 1) })
+        Divider()
+        content
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else {
+      content
+        .environment(\._navigationToolbarContent, _ToolbarContentBox(view: AnyView(toolbar)))
+    }
+  }
 }
 
 public struct SearchFieldPlacement: Equatable, Sendable {
@@ -2524,7 +2595,7 @@ extension View {
   public func navigationSubtitle<S: StringProtocol>(_ subtitle: S) -> some View { self }
 
   public func toolbar<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-    environment(\._navigationToolbarContent, _ToolbarContentBox(view: AnyView(content())))
+    _ToolbarHostView(content: self, toolbar: content())
   }
 
   public func toolbar(removing: ToolbarRemoving?) -> some View { self }

@@ -183,15 +183,15 @@ public final class StateRegistry {
     }
   }
 }
-@propertyWrapper public struct State<Value>: _StateProperty {
+@propertyWrapper public struct State<Value>: _StateProperty, @unchecked Sendable {
   private final class Storage {
     var value: Value
     var key: StateKey?
     init(_ value: Value) { self.value = value }
   }
   private let storage: Storage
-  public init(wrappedValue: Value) { storage = Storage(wrappedValue) }
-  public init(initialValue: Value) { self.init(wrappedValue: initialValue) }
+  nonisolated public init(wrappedValue: Value) { storage = Storage(wrappedValue) }
+  nonisolated public init(initialValue: Value) { self.init(wrappedValue: initialValue) }
   func install(_ key: StateKey) {
     storage.key = key
     StateRegistry.shared.install(key, initial: storage.value)
