@@ -107,9 +107,19 @@ public struct _HostedViewPrimitive: View, _PrimitiveView {
   }
   let mirror = Mirror(reflecting: value)
   var indices: [Int] = []
+  var registeredOwner = false
   for (index, child) in mirror.children.enumerated() {
     let environment = child.value as? any _EnvironmentProperty
     let state = child.value as? any _StateProperty
+    if state != nil {
+      if !registeredOwner {
+        registeredOwner = true
+        StateRegistry.shared.registerOwnerType(type, name: String(reflecting: V.self))
+      }
+      if let label = child.label {
+        StateRegistry.shared.registerPropertyLabel(owner: type, property: index, label: label)
+      }
+    }
     environment?.installEnvironment()
     state?.install(StateKey(path: path, owner: type, property: index))
     if environment != nil || state != nil { indices.append(index) }

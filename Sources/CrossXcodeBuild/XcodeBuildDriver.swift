@@ -35,7 +35,9 @@ public enum XcodeBuildCLIParser {
   Usage:
     xcodebuild [-project <name.xcodeproj>] [-scheme <name>] [-target <name>]
                [-configuration <Debug|Release>] [-derivedDataPath <path>]
-               [-destination <spec>] [KEY=VALUE ...] [build | clean]
+               [-destination <spec>] [KEY=VALUE ...] [build | clean | dev]
+    xcodebuild -project <name.xcodeproj> -destination generic/platform=Wasm
+               dev [--port <8000>] [--host <127.0.0.1>]
     xcodebuild -list [-json] [-project <name.xcodeproj>]
     xcodebuild -showBuildSettings [-json] [-project <name.xcodeproj>]
                [-scheme <name>] [-configuration <Debug|Release>]
@@ -59,6 +61,9 @@ public enum XcodeBuildCLIParser {
     -json                     Generate machine-readable JSON output for -list / -showBuildSettings
     -version                  Display CrossSwiftUI xcodebuild version information
     -quiet                    Suppress non-error build output
+    --watch, -watch           Watch files and serve Wasm hot-reload dev server (implies Debug)
+    --port, -port <port>      Port for Wasm hot-reload dev server (default: 8000)
+    --host, -host <host>      Bind address for Wasm hot-reload dev server (default: 127.0.0.1)
     --crossswift-path <dir>   Override path to CrossSwiftUI checkout
     --nativeapi-path <dir>    Override path to nativeapi/bindings/swift checkout
     --scratch-path <dir>      Override intermediate SwiftPM scratch directory
@@ -182,6 +187,16 @@ public enum XcodeBuildCLIParser {
         options.scratchDirectory = resolvePath(try nextValue(arg), relativeTo: currentDirectory)
       case "--console", "-console":
         options.consoleSubsystem = true
+      case "--watch", "-watch":
+        options.watch = true
+      case "--port", "-port":
+        let raw = try nextValue(arg)
+        guard let parsedPort = UInt16(raw) else {
+          throw XcodeBuildDriverError.invalidArguments("Invalid port '\(raw)' (expected 0-65535)")
+        }
+        options.devPort = parsedPort
+      case "--host", "-host":
+        options.devHost = try nextValue(arg)
       default:
         if ignoredValuedFlags.contains(arg) {
           _ = try nextValue(arg)
@@ -196,6 +211,8 @@ public enum XcodeBuildCLIParser {
             throw XcodeBuildDriverError.invalidArguments("Invalid build setting override '\(arg)'")
           }
           options.buildSettingOverrides[key] = value
+        } else if arg == "serve" {
+          actions.append(.dev)
         } else if let action = XcodeBuildAction(rawValue: arg) {
           actions.append(action)
         } else {
@@ -212,7 +229,14 @@ public enum XcodeBuildCLIParser {
     } else if sawShowBuildSettings {
       options.mode = .showBuildSettings
     } else if !actions.isEmpty {
-      options.mode = .actions(actions)
+      if options.watch && !actions.contains(.dev) {
+        let normalized = actions.filter { $0 != .build } + [.dev]
+        options.mode = .actions(normalized)
+      } else {
+        options.mode = .actions(actions)
+      }
+    } else if options.watch {
+      options.mode = .actions([.dev])
     } else {
       options.mode = .actions([.build])
     }
@@ -449,7 +473,8 @@ public final class XcodeBuildDriver {
       workspacePath: options.workspacePath,
       in: currentDirectory
     )
-    let configuration = options.configuration ?? .release
+    let isDevAction = actions.contains(.dev) || options.watch
+    let configuration = options.configuration ?? (isDevAction ? .debug : .release)
     let project = try loader.load(
       from: projectURL,
       configuration: configuration,
@@ -522,6 +547,24 @@ public final class XcodeBuildDriver {
           ProcessRunner.writeStdoutLine("Staged product at \(staged.appBundleDirectory.path)")
           ProcessRunner.writeStdoutLine("** BUILD SUCCEEDED **")
         }
+
+      case .dev:
+        guard platform == .wasm else {
+          throw XcodeBuildDriverError.invalidArguments(
+            "The 'dev' / '--watch' hot-reload server currently requires -destination generic/platform=Wasm."
+          )
+        }
+        let serverConfig = WasmDevServerConfiguration(
+          host: options.devHost,
+          port: options.devPort
+        )
+        let session = WasmDevSession(
+          projectURL: projectURL,
+          configuration: configuration,
+          options: options,
+          serverConfiguration: serverConfig
+        )
+        try session.runUntilInterrupted()
       }
     }
 

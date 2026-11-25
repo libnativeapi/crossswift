@@ -9,6 +9,14 @@ import Foundation
 
 // MARK: - NavigationPath & navigationDestination
 
+/// Deferred JSON payload for custom `Codable & Hashable` `NavigationPath` elements
+/// restored across hot-reload boundaries before `.navigationDestination(for:)` runs.
+struct _DeferredCodableNavigationPayload: Hashable {
+  let typeName: String
+  let payload: String
+  let label: String
+}
+
 /// Type-erased list of Hashable navigation values used with `NavigationStack(path:)`.
 public struct NavigationPath: Equatable {
   struct Box: Equatable {
@@ -22,6 +30,13 @@ public struct NavigationPath: Equatable {
       self.value = AnyHashable(value)
       self.raw = value
       self.label = String(describing: value)
+    }
+
+    init(deferred: _DeferredCodableNavigationPayload) {
+      self.typeID = ObjectIdentifier(_DeferredCodableNavigationPayload.self)
+      self.value = AnyHashable(deferred)
+      self.raw = deferred
+      self.label = deferred.label
     }
 
     static func == (lhs: Box, rhs: Box) -> Bool {
@@ -53,16 +68,43 @@ public struct NavigationPath: Equatable {
 
 final class _NavigationDestinationRegistry {
   var factories: [ObjectIdentifier: (Any) -> AnyView] = [:]
+  var deferredFactories: [String: (String) -> AnyView?] = [:]
+  var needsResolution = false
+
+  func markNeedsResolution() {
+    needsResolution = true
+  }
 
   func register<D: Hashable>(_ type: D.Type, builder: @escaping (D) -> AnyView) {
-    factories[ObjectIdentifier(type)] = { raw in
+    let typeID = ObjectIdentifier(type)
+    let isNew = factories[typeID] == nil
+    factories[typeID] = { raw in
       guard let value = raw as? D else { return AnyView(EmptyView()) }
       return builder(value)
+    }
+    if let decodableType = D.self as? any Decodable.Type {
+      let typeName = HotReloadCodec.normalizeTypeName(String(reflecting: D.self))
+      deferredFactories[typeName] = { payload in
+        guard let decoded = HotReloadCodec.decodeCodable(decodableType, from: payload) as? D else {
+          return nil
+        }
+        return builder(decoded)
+      }
+    }
+    if isNew && needsResolution {
+      needsResolution = false
+      LifecycleRegistry.shared.enqueue {
+        StateRegistry.shared.notifyChange()
+      }
     }
   }
 
   func resolve(typeID: ObjectIdentifier, value: Any) -> AnyView? {
     factories[typeID]?(value)
+  }
+
+  func resolveDeferred(typeName: String, payload: String) -> AnyView? {
+    deferredFactories[typeName]?(payload)
   }
 }
 

@@ -32,6 +32,24 @@ package final class ViewPath: Hashable {
 
   var root: ViewPath { parent?.root ?? self }
 
+  var stablePath: String {
+    var segments: [String] = []
+    var cursor: ViewPath? = self
+    while let current = cursor {
+      if let component = current.component {
+        switch component {
+        case .index(let index):
+          segments.append("i:\(index)")
+        case .id(let hashable):
+          segments.append("id:\(HotReloadCodec.stableIDComponent(hashable))")
+        }
+      }
+      cursor = current.parent
+    }
+    segments.reverse()
+    return segments.joined(separator: "/")
+  }
+
   func appending(index: Int) -> ViewPath { child(.index(index)) }
   func appending(id: AnyHashable) -> ViewPath { child(.id(id)) }
 
@@ -54,8 +72,12 @@ struct StateKey: Hashable {
 protocol _StateProperty { func install(_ key: StateKey) }
 public final class StateRegistry {
   public static let shared = StateRegistry()
-  private var values: [StateKey: Any] = [:]
+  var values: [StateKey: Any] = [:]
   private var liveByRoot: [ObjectIdentifier: Set<StateKey>] = [:]
+  var ownerTypeNames: [ObjectIdentifier: String] = [:]
+  var propertyLabels: [ObjectIdentifier: [Int: String]] = [:]
+  var pendingHotReload: HotReloadRestoreBuffer?
+  var appStorageBindings: [StateKey: HotReloadAppStorageBinding] = [:]
   public var onChange: (() -> Void)?
   var onStateChange: ((StateKey) -> Void)?
   private struct Observer {
@@ -63,6 +85,14 @@ public final class StateRegistry {
     let stateChange: (StateKey) -> Void
   }
   private var observers: [ObjectIdentifier: Observer] = [:]
+  func registerOwnerType(_ id: ObjectIdentifier, name: String) {
+    if ownerTypeNames[id] == nil {
+      ownerTypeNames[id] = HotReloadCodec.normalizeTypeName(name)
+    }
+  }
+  func registerPropertyLabel(owner: ObjectIdentifier, property: Int, label: String) {
+    propertyLabels[owner, default: [:]][property] = label
+  }
   func observe(_ root: ViewPath, change: @escaping () -> Void, stateChange: @escaping (StateKey) -> Void) {
     observers[ObjectIdentifier(root)] = Observer(change: change, stateChange: stateChange)
   }
@@ -70,6 +100,7 @@ public final class StateRegistry {
     let rootID = ObjectIdentifier(root)
     observers.removeValue(forKey: rootID)
     values = values.filter { $0.key.path.root !== root }
+    appStorageBindings = appStorageBindings.filter { $0.key.path.root !== root }
     liveByRoot.removeValue(forKey: rootID)
     LifecycleRegistry.shared.remove(root)
     SceneStorageStore.shared.remove(root: root)
@@ -84,6 +115,8 @@ public final class StateRegistry {
     SceneStorageStore.shared.reset()
     values.removeAll()
     liveByRoot.removeAll()
+    appStorageBindings.removeAll()
+    pendingHotReload = nil
     onChange = nil
     onStateChange = nil
     observers.removeAll()
@@ -100,18 +133,35 @@ public final class StateRegistry {
   func end(root: ViewPath) {
     let live = liveByRoot[ObjectIdentifier(root)] ?? []
     values = values.filter { $0.key.path.root !== root || live.contains($0.key) }
+    if !appStorageBindings.isEmpty {
+      appStorageBindings = appStorageBindings.filter { $0.key.path.root !== root || live.contains($0.key) }
+    }
   }
-  func install<Value>(_ key: StateKey, initial: Value) {
+  func install<Value>(_ key: StateKey, initial: Value, allowHotReloadRestore: Bool = true) {
     EvaluationGraph.active?.installState(key)
     GeometrySnapshot.active?.state.insert(key)
     liveByRoot[ObjectIdentifier(key.path.root), default: []].insert(key)
-    if values[key] == nil { values[key] = initial }
+    if values[key] == nil {
+      if allowHotReloadRestore, pendingHotReload != nil,
+         let restored: Value = consumePendingHotReloadValue(for: key, as: Value.self)
+      {
+        values[key] = restored
+      } else {
+        values[key] = initial
+      }
+    }
   }
   func installLazy<Value>(_ key: StateKey, initial: () -> Value) -> Value {
     EvaluationGraph.active?.installState(key)
     GeometrySnapshot.active?.state.insert(key)
     liveByRoot[ObjectIdentifier(key.path.root), default: []].insert(key)
     if let value = values[key] as? Value { return value }
+    if pendingHotReload != nil,
+       let restored: Value = consumePendingHotReloadValue(for: key, as: Value.self)
+    {
+      values[key] = restored
+      return restored
+    }
     let value = initial()
     values[key] = value
     return value

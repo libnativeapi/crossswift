@@ -623,8 +623,8 @@ final class ControlsAndContainersTests: XCTestCase {
 
   @MainActor
   func testAppPickerPopoverScrollViewHasExactHeightAndRealizesBottomItems() throws {
-    final class PickerModel: ObservableObject {
-      @Published var picking = true
+    final class PickerModel: SwiftUIRuntime.ObservableObject {
+      @SwiftUIRuntime.Published var picking = true
     }
 
     struct AppPickerPopoverProbe: View {

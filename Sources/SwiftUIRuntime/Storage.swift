@@ -12,17 +12,23 @@ public struct AppStorage<Value>: _StateProperty {
     let store: UserDefaults
     let read: (UserDefaults, String) -> Value
     let write: (UserDefaults, String, Value) -> Void
+    let encodeHotReload: (Value) -> HotReloadAppStorageValue
+    let decodeHotReload: (HotReloadAppStorageValue) -> Value?
 
     init(
       storageKey: String,
       store: UserDefaults,
       read: @escaping (UserDefaults, String) -> Value,
-      write: @escaping (UserDefaults, String, Value) -> Void
+      write: @escaping (UserDefaults, String, Value) -> Void,
+      encodeHotReload: @escaping (Value) -> HotReloadAppStorageValue,
+      decodeHotReload: @escaping (HotReloadAppStorageValue) -> Value?
     ) {
       self.storageKey = storageKey
       self.store = store
       self.read = read
       self.write = write
+      self.encodeHotReload = encodeHotReload
+      self.decodeHotReload = decodeHotReload
     }
   }
 
@@ -32,19 +38,39 @@ public struct AppStorage<Value>: _StateProperty {
     storageKey: String,
     store: UserDefaults?,
     read: @escaping (UserDefaults, String) -> Value,
-    write: @escaping (UserDefaults, String, Value) -> Void
+    write: @escaping (UserDefaults, String, Value) -> Void,
+    encodeHotReload: @escaping (Value) -> HotReloadAppStorageValue,
+    decodeHotReload: @escaping (HotReloadAppStorageValue) -> Value?
   ) {
     self.storage = Storage(
       storageKey: storageKey,
       store: store ?? .standard,
       read: read,
-      write: write
+      write: write,
+      encodeHotReload: encodeHotReload,
+      decodeHotReload: decodeHotReload
     )
   }
 
   func install(_ key: StateKey) {
     storage.key = key
-    StateRegistry.shared.install(key, initial: storage.read(storage.store, storage.storageKey))
+    if let raw = StateRegistry.shared.pendingAppStorageValue(for: storage.storageKey),
+       let restored = storage.decodeHotReload(raw)
+    {
+      storage.write(storage.store, storage.storageKey, restored)
+    }
+    StateRegistry.shared.registerAppStorage(
+      key: key,
+      storageKey: storage.storageKey,
+      export: { [storage] in
+        storage.encodeHotReload(storage.read(storage.store, storage.storageKey))
+      }
+    )
+    StateRegistry.shared.install(
+      key,
+      initial: storage.read(storage.store, storage.storageKey),
+      allowHotReloadRestore: false
+    )
   }
 
   public var wrappedValue: Value {
@@ -74,7 +100,9 @@ extension AppStorage where Value == Bool {
     self.init(
       storageKey: key, store: store,
       read: { defaults, k in defaults.object(forKey: k) as? Bool ?? wrappedValue },
-      write: { defaults, k, v in defaults.set(v, forKey: k) }
+      write: { defaults, k, v in defaults.set(v, forKey: k) },
+      encodeHotReload: { .bool($0) },
+      decodeHotReload: { if case .bool(let v) = $0 { return v } else { return nil } }
     )
   }
 }
@@ -84,7 +112,9 @@ extension AppStorage where Value == Int {
     self.init(
       storageKey: key, store: store,
       read: { defaults, k in defaults.object(forKey: k) as? Int ?? wrappedValue },
-      write: { defaults, k, v in defaults.set(v, forKey: k) }
+      write: { defaults, k, v in defaults.set(v, forKey: k) },
+      encodeHotReload: { .int($0) },
+      decodeHotReload: { if case .int(let v) = $0 { return v } else { return nil } }
     )
   }
 }
@@ -94,7 +124,9 @@ extension AppStorage where Value == Double {
     self.init(
       storageKey: key, store: store,
       read: { defaults, k in defaults.object(forKey: k) as? Double ?? wrappedValue },
-      write: { defaults, k, v in defaults.set(v, forKey: k) }
+      write: { defaults, k, v in defaults.set(v, forKey: k) },
+      encodeHotReload: { .double($0) },
+      decodeHotReload: { if case .double(let v) = $0 { return v } else { return nil } }
     )
   }
 }
@@ -104,7 +136,9 @@ extension AppStorage where Value == String {
     self.init(
       storageKey: key, store: store,
       read: { defaults, k in defaults.string(forKey: k) ?? wrappedValue },
-      write: { defaults, k, v in defaults.set(v, forKey: k) }
+      write: { defaults, k, v in defaults.set(v, forKey: k) },
+      encodeHotReload: { .string($0) },
+      decodeHotReload: { if case .string(let v) = $0 { return v } else { return nil } }
     )
   }
 }
@@ -117,7 +151,9 @@ extension AppStorage where Value == URL {
         if let str = defaults.string(forKey: k), let url = URL(string: str) { return url }
         return defaults.url(forKey: k) ?? wrappedValue
       },
-      write: { defaults, k, v in defaults.set(v.absoluteString, forKey: k) }
+      write: { defaults, k, v in defaults.set(v.absoluteString, forKey: k) },
+      encodeHotReload: { .url($0.absoluteString) },
+      decodeHotReload: { if case .url(let s) = $0 { return URL(string: s) } else { return nil } }
     )
   }
 }
@@ -127,7 +163,9 @@ extension AppStorage where Value == Data {
     self.init(
       storageKey: key, store: store,
       read: { defaults, k in defaults.data(forKey: k) ?? wrappedValue },
-      write: { defaults, k, v in defaults.set(v, forKey: k) }
+      write: { defaults, k, v in defaults.set(v, forKey: k) },
+      encodeHotReload: { .data($0) },
+      decodeHotReload: { if case .data(let v) = $0 { return v } else { return nil } }
     )
   }
 }
@@ -142,7 +180,9 @@ extension AppStorage where Value: RawRepresentable, Value.RawValue == Int {
         }
         return v
       },
-      write: { defaults, k, v in defaults.set(v.rawValue, forKey: k) }
+      write: { defaults, k, v in defaults.set(v.rawValue, forKey: k) },
+      encodeHotReload: { .int($0.rawValue) },
+      decodeHotReload: { if case .int(let raw) = $0 { return Value(rawValue: raw) } else { return nil } }
     )
   }
 }
@@ -157,7 +197,9 @@ extension AppStorage where Value: RawRepresentable, Value.RawValue == String {
         }
         return v
       },
-      write: { defaults, k, v in defaults.set(v.rawValue, forKey: k) }
+      write: { defaults, k, v in defaults.set(v.rawValue, forKey: k) },
+      encodeHotReload: { .string($0.rawValue) },
+      decodeHotReload: { if case .string(let raw) = $0 { return Value(rawValue: raw) } else { return nil } }
     )
   }
 }
@@ -169,6 +211,14 @@ extension AppStorage where Value == Bool? {
       read: { defaults, k in defaults.object(forKey: k) as? Bool },
       write: { defaults, k, v in
         if let v { defaults.set(v, forKey: k) } else { defaults.removeObject(forKey: k) }
+      },
+      encodeHotReload: { $0.map { .bool($0) } ?? .nilValue },
+      decodeHotReload: {
+        switch $0 {
+        case .bool(let v): return .some(v)
+        case .nilValue: return .some(nil)
+        default: return nil
+        }
       }
     )
   }
@@ -181,6 +231,14 @@ extension AppStorage where Value == Int? {
       read: { defaults, k in defaults.object(forKey: k) as? Int },
       write: { defaults, k, v in
         if let v { defaults.set(v, forKey: k) } else { defaults.removeObject(forKey: k) }
+      },
+      encodeHotReload: { $0.map { .int($0) } ?? .nilValue },
+      decodeHotReload: {
+        switch $0 {
+        case .int(let v): return .some(v)
+        case .nilValue: return .some(nil)
+        default: return nil
+        }
       }
     )
   }
@@ -193,6 +251,14 @@ extension AppStorage where Value == Double? {
       read: { defaults, k in defaults.object(forKey: k) as? Double },
       write: { defaults, k, v in
         if let v { defaults.set(v, forKey: k) } else { defaults.removeObject(forKey: k) }
+      },
+      encodeHotReload: { $0.map { .double($0) } ?? .nilValue },
+      decodeHotReload: {
+        switch $0 {
+        case .double(let v): return .some(v)
+        case .nilValue: return .some(nil)
+        default: return nil
+        }
       }
     )
   }
@@ -205,6 +271,14 @@ extension AppStorage where Value == String? {
       read: { defaults, k in defaults.string(forKey: k) },
       write: { defaults, k, v in
         if let v { defaults.set(v, forKey: k) } else { defaults.removeObject(forKey: k) }
+      },
+      encodeHotReload: { $0.map { .string($0) } ?? .nilValue },
+      decodeHotReload: {
+        switch $0 {
+        case .string(let v): return .some(v)
+        case .nilValue: return .some(nil)
+        default: return nil
+        }
       }
     )
   }
@@ -217,6 +291,14 @@ extension AppStorage where Value == URL? {
       read: { defaults, k in defaults.string(forKey: k).flatMap(URL.init(string:)) },
       write: { defaults, k, v in
         if let v { defaults.set(v.absoluteString, forKey: k) } else { defaults.removeObject(forKey: k) }
+      },
+      encodeHotReload: { $0.map { .url($0.absoluteString) } ?? .nilValue },
+      decodeHotReload: {
+        switch $0 {
+        case .url(let s): return URL(string: s).map { .some($0) }
+        case .nilValue: return .some(nil)
+        default: return nil
+        }
       }
     )
   }
@@ -229,6 +311,14 @@ extension AppStorage where Value == Data? {
       read: { defaults, k in defaults.data(forKey: k) },
       write: { defaults, k, v in
         if let v { defaults.set(v, forKey: k) } else { defaults.removeObject(forKey: k) }
+      },
+      encodeHotReload: { $0.map { .data($0) } ?? .nilValue },
+      decodeHotReload: {
+        switch $0 {
+        case .data(let v): return .some(v)
+        case .nilValue: return .some(nil)
+        default: return nil
+        }
       }
     )
   }
@@ -246,6 +336,16 @@ final class SceneStorageStore {
 
   func set<Value>(root: ViewPath, key: String, value: Value) {
     valuesByRoot[ObjectIdentifier(root), default: [:]][key] = value
+  }
+
+  func snapshotEntries() -> [String: Any] {
+    var result: [String: Any] = [:]
+    for dict in valuesByRoot.values {
+      for (k, v) in dict {
+        result[k] = v
+      }
+    }
+    return result
   }
 
   func remove(root: ViewPath) {
@@ -277,10 +377,17 @@ public struct SceneStorage<Value>: _StateProperty {
 
   func install(_ key: StateKey) {
     storage.key = key
+    if let restored: Value = StateRegistry.shared.consumePendingSceneStorage(
+      for: storage.name, as: Value.self
+    ) {
+      SceneStorageStore.shared.set(root: key.path.root, key: storage.name, value: restored)
+      StateRegistry.shared.install(key, initial: restored, allowHotReloadRestore: false)
+      return
+    }
     let current = SceneStorageStore.shared.value(
       root: key.path.root, key: storage.name, default: storage.fallback
     )
-    StateRegistry.shared.install(key, initial: current)
+    StateRegistry.shared.install(key, initial: current, allowHotReloadRestore: false)
   }
 
   public var wrappedValue: Value {
@@ -298,6 +405,7 @@ public struct SceneStorage<Value>: _StateProperty {
         SceneStorageStore.shared.set(root: key.path.root, key: storage.name, value: newValue)
         StateRegistry.shared.set(key, value: newValue)
       }
+      StateRegistry.shared.notifyChange()
     }
   }
 

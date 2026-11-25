@@ -87,6 +87,14 @@ final class EvaluationGraph {
     if readers[key]?.isEmpty == true { readers.removeValue(forKey: key) }
   }
 
+  func reset() {
+    root = nil
+    current = nil
+    readers.removeAll()
+    nodesByID.removeAll()
+    globalInvalidationEpoch += 1
+  }
+
   func invalidateAll() {
     globalInvalidationEpoch += 1
     root?.dirty = true

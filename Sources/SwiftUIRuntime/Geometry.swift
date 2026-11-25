@@ -19,7 +19,7 @@ import Foundation
 /// A two-axis alignment, used by ``View/frame(width:height:alignment:)``.
 
 /// Which axis a stack lays its children out on.
-public struct Point: Equatable, Sendable {
+public struct Point: Equatable, Sendable, Codable {
   public var x: Double
   public var y: Double
 
@@ -30,7 +30,7 @@ public struct Point: Equatable, Sendable {
 
   public static let zero = Point()
 }
-public struct Size: Equatable, Sendable {
+public struct Size: Equatable, Sendable, Codable {
   public var width: Double
   public var height: Double
 
@@ -43,7 +43,7 @@ public struct Size: Equatable, Sendable {
 
   public var isEmpty: Bool { width <= 0 || height <= 0 }
 }
-public struct Rect: Equatable, Sendable {
+public struct Rect: Equatable, Sendable, Codable {
   public var origin: Point
   public var size: Size
 
@@ -75,7 +75,7 @@ public struct Rect: Equatable, Sendable {
     )
   }
 }
-public struct EdgeInsets: Equatable, Sendable {
+public struct EdgeInsets: Equatable, Sendable, Codable {
   public var top: Double
   public var leading: Double
   public var bottom: Double

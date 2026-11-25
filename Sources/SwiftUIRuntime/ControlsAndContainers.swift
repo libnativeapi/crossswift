@@ -2215,10 +2215,18 @@ public struct NavigationStack<Data, Root: View>: View {
       return nil
     }()
     let topExternalView: AnyView? = topExternalBox.flatMap { box in
-      if let payload = box.raw as? _RawBoxPayload {
-        return registry.resolve(typeID: payload.typeID, value: payload.raw)
+      let resolved: AnyView?
+      if let deferred = box.raw as? _DeferredCodableNavigationPayload {
+        resolved = registry.resolveDeferred(typeName: deferred.typeName, payload: deferred.payload)
+      } else if let payload = box.raw as? _RawBoxPayload {
+        resolved = registry.resolve(typeID: payload.typeID, value: payload.raw)
+      } else {
+        resolved = registry.resolve(typeID: box.typeID, value: box.raw)
       }
-      return registry.resolve(typeID: box.typeID, value: box.raw)
+      if resolved == nil {
+        registry.markNeedsResolution()
+      }
+      return resolved
     }
 
     let activeTitle = totalDepth == 0
@@ -2311,7 +2319,7 @@ public struct NavigationStack<Data, Root: View>: View {
   }
 }
 
-private struct _RawBoxPayload: Hashable {
+struct _RawBoxPayload: Hashable {
   let typeID: ObjectIdentifier
   let hashable: AnyHashable
   let raw: Any

@@ -187,8 +187,10 @@ public final class ApplicationStager {
     let stageRoot = builtProductsDirectory ?? built.buildDirectory.appendingPathComponent("stage")
     try fm.createDirectory(at: stageRoot, withIntermediateDirectories: true)
     let appDir = stageRoot.appendingPathComponent(appName)
-    if fm.fileExists(atPath: appDir.path) {
-      try fm.removeItem(at: appDir)
+    if built.targetPlatform != .wasm {
+      if fm.fileExists(atPath: appDir.path) {
+        try fm.removeItem(at: appDir)
+      }
     }
     try fm.createDirectory(at: appDir, withIntermediateDirectories: true)
 
@@ -265,47 +267,21 @@ public final class ApplicationStager {
         throw BuildBackendError.binaryMissing(built.executableURL.path)
       }
       let webAppDir = appDir.appendingPathComponent("app")
-      try fm.copyItem(at: wasmPkgDir, to: webAppDir)
-      try fm.copyItem(at: built.compiledAssets.resourcesDirectory, to: resourcesDestURL)
-      try stageWasmWebManifest(
+      // Incrementally sync PackageToJS outputs while preserving node_modules and package-lock.json
+      // so incremental rebuilds avoid wiping and re-running npm install.
+      try IncrementalFileWriter.syncDirectory(
+        from: wasmPkgDir,
+        to: webAppDir,
+        excluding: ["node_modules", "package-lock.json", ".crossswift-npm-stamp"]
+      )
+      try stageWasmResourcesOnly(
         project: project,
-        built: built,
+        compiledAssets: built.compiledAssets,
+        adaptedPackageDirectories: built.adaptedRemotePackageDirectories,
         resourcesDestURL: resourcesDestURL
       )
 
-      let home = fm.homeDirectoryForCurrentUser
-      if let npmURL = ProcessRunner.findExecutable(
-        named: ["npm"],
-        extraDirectories: [
-          home.appendingPathComponent(".vite-plus/bin"),
-          URL(fileURLWithPath: "/opt/homebrew/bin"),
-          URL(fileURLWithPath: "/usr/local/bin"),
-        ]
-      ) {
-        if !quiet {
-          ProcessRunner.writeStdoutLine("Installing WebAssembly runtime dependencies (npm)...")
-        }
-        let npmResult = try ProcessRunner.run(
-          executable: npmURL,
-          arguments: [
-            "install",
-            "--prefix", webAppDir.path,
-            "--ignore-scripts",
-            "--omit=dev",
-            "--no-audit",
-            "--no-fund",
-          ],
-          workingDirectory: appDir,
-          echoOutput: !quiet
-        )
-        if npmResult.exitCode != 0 {
-          throw ProcessRunnerError.commandFailed(
-            command: "\(npmURL.path) install --prefix \(webAppDir.path)",
-            exitCode: npmResult.exitCode,
-            output: npmResult.stdout + "\n" + npmResult.stderr
-          )
-        }
-      }
+      try ensureWasmNodeModules(in: webAppDir, appDir: appDir, quiet: quiet)
 
       let displayName = target.infoPlistKeys["CFBundleDisplayName"] ?? target.productName
       let templateIndexHTML = built.crossSwiftRoot.appendingPathComponent("Web/index.html")
@@ -315,7 +291,7 @@ public final class ApplicationStager {
           of: "<title>CrossSwiftUI</title>",
           with: "<title>\(htmlEscape(displayName))</title>"
         )
-        try rendered.write(to: indexHTMLURL, atomically: true, encoding: .utf8)
+        try IncrementalFileWriter.writeIfChanged(text: rendered, to: indexHTMLURL)
       } else {
         let fallback = """
         <!doctype html>
@@ -341,7 +317,7 @@ public final class ApplicationStager {
         </body>
         </html>
         """
-        try fallback.write(to: indexHTMLURL, atomically: true, encoding: .utf8)
+        try IncrementalFileWriter.writeIfChanged(text: fallback, to: indexHTMLURL)
       }
       exeDestURL = indexHTMLURL
     case .harmonyos:
@@ -675,15 +651,89 @@ public final class ApplicationStager {
     return "Utility;"
   }
 
+  /// Fast resource-only Wasm staging path used by both full staging and hot-reload
+  /// resource refresh without touching `app/` or triggering Wasm compilation.
+  public func stageWasmResourcesOnly(
+    project: ResolvedXcodeProject,
+    compiledAssets: CompiledAssets,
+    adaptedPackageDirectories: [URL],
+    resourcesDestURL: URL
+  ) throws {
+    try IncrementalFileWriter.syncDirectory(
+      from: compiledAssets.resourcesDirectory,
+      to: resourcesDestURL,
+      excluding: ["_web_assets", "web-manifest.json"]
+    )
+    try stageWasmWebManifest(
+      project: project,
+      adaptedPackageDirectories: adaptedPackageDirectories,
+      resourcesDestURL: resourcesDestURL
+    )
+  }
+
+  private func ensureWasmNodeModules(in webAppDir: URL, appDir: URL, quiet: Bool) throws {
+    let fm = FileManager.default
+    let packageJSONURL = webAppDir.appendingPathComponent("package.json")
+    let stampURL = webAppDir.appendingPathComponent(".crossswift-npm-stamp")
+    let nodeModulesDir = webAppDir.appendingPathComponent("node_modules")
+    let expectedShim = nodeModulesDir.appendingPathComponent("@bjorn3/browser_wasi_shim/dist/index.js")
+    let packageJSONText = (try? String(contentsOf: packageJSONURL, encoding: .utf8)) ?? ""
+
+    if let existingStamp = try? String(contentsOf: stampURL, encoding: .utf8),
+       existingStamp == packageJSONText,
+       fm.fileExists(atPath: nodeModulesDir.path),
+       (fm.fileExists(atPath: expectedShim.path)
+         || ((try? fm.contentsOfDirectory(atPath: nodeModulesDir.path).isEmpty) == false))
+    {
+      return
+    }
+
+    let home = fm.homeDirectoryForCurrentUser
+    if let npmURL = ProcessRunner.findExecutable(
+      named: ["npm"],
+      extraDirectories: [
+        home.appendingPathComponent(".vite-plus/bin"),
+        URL(fileURLWithPath: "/opt/homebrew/bin"),
+        URL(fileURLWithPath: "/usr/local/bin"),
+      ]
+    ) {
+      if !quiet {
+        ProcessRunner.writeStdoutLine("Installing WebAssembly runtime dependencies (npm)...")
+      }
+      let npmResult = try ProcessRunner.run(
+        executable: npmURL,
+        arguments: [
+          "install",
+          "--prefix", webAppDir.path,
+          "--ignore-scripts",
+          "--omit=dev",
+          "--no-audit",
+          "--no-fund",
+        ],
+        workingDirectory: appDir,
+        echoOutput: !quiet
+      )
+      if npmResult.exitCode != 0 {
+        throw ProcessRunnerError.commandFailed(
+          command: "\(npmURL.path) install --prefix \(webAppDir.path)",
+          exitCode: npmResult.exitCode,
+          output: npmResult.stdout + "\n" + npmResult.stderr
+        )
+      }
+      try IncrementalFileWriter.writeIfChanged(text: packageJSONText, to: stampURL)
+    }
+  }
+
   private func stageWasmWebManifest(
     project: ResolvedXcodeProject,
-    built: BuiltTargetArtifacts,
+    adaptedPackageDirectories: [URL],
     resourcesDestURL: URL
   ) throws {
     let fm = FileManager.default
     var images: [String: String] = [:]
     var xcstrings: [String] = []
     let webAssetsDir = resourcesDestURL.appendingPathComponent("_web_assets")
+    var keptWebAssets = Set<String>()
 
     func relativeResourceURL(for url: URL) -> String? {
       let base = resourcesDestURL.standardizedFileURL.path
@@ -767,7 +817,8 @@ public final class ApplicationStager {
               try? fm.createDirectory(at: webAssetsDir, withIntermediateDirectories: true)
               let safeName = ProcessRunner.sanitizedSlug(assetName) + "-" + ProcessRunner.fnv1aHex(assetName) + ".svg"
               let svgURL = webAssetsDir.appendingPathComponent(safeName)
-              try? vector.toSVG().write(to: svgURL, atomically: true, encoding: .utf8)
+              keptWebAssets.insert(safeName)
+              _ = try? IncrementalFileWriter.writeIfChanged(text: vector.toSVG(), to: svgURL)
               if let rel = relativeResourceURL(for: svgURL) {
                 images[assetName] = rel
               }
@@ -778,10 +829,8 @@ public final class ApplicationStager {
             try? fm.createDirectory(at: webAssetsDir, withIntermediateDirectories: true)
             let safeName = ProcessRunner.sanitizedSlug(assetName) + "-" + ProcessRunner.fnv1aHex(assetName) + "." + ext
             let dstURL = webAssetsDir.appendingPathComponent(safeName)
-            if fm.fileExists(atPath: dstURL.path) {
-              try? fm.removeItem(at: dstURL)
-            }
-            if (try? fm.copyItem(at: fileURL, to: dstURL)) != nil,
+            keptWebAssets.insert(safeName)
+            if (try? IncrementalFileWriter.copyFileIfChanged(from: fileURL, to: dstURL)) != nil,
                let rel = relativeResourceURL(for: dstURL)
             {
               images[assetName] = rel
@@ -792,11 +841,15 @@ public final class ApplicationStager {
     }
 
     scanCatalogs(under: resourcesDestURL, isInsideResources: true)
-    for adaptedDir in built.adaptedRemotePackageDirectories {
+    for adaptedDir in adaptedPackageDirectories {
       scanCatalogs(under: adaptedDir, isInsideResources: false)
     }
     for localPkg in project.localPackages {
       scanCatalogs(under: localPkg.path, isInsideResources: false)
+    }
+
+    if fm.fileExists(atPath: webAssetsDir.path) {
+      IncrementalFileWriter.pruneStaleEntries(under: webAssetsDir, keeping: keptWebAssets)
     }
 
     let payload: [String: Any] = [
@@ -805,7 +858,7 @@ public final class ApplicationStager {
     ]
     let jsonData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
     let manifestURL = resourcesDestURL.appendingPathComponent("web-manifest.json")
-    try jsonData.write(to: manifestURL, options: .atomic)
+    try IncrementalFileWriter.writeIfChanged(data: jsonData, to: manifestURL)
   }
 
   private func htmlEscape(_ text: String) -> String {

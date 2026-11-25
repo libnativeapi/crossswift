@@ -62,6 +62,7 @@ public enum BuildConfiguration: String, CaseIterable, Codable, Hashable, Sendabl
 public enum XcodeBuildAction: String, CaseIterable, Sendable, Equatable {
   case build
   case clean
+  case dev
 }
 
 public enum XcodeBuildMode: Sendable, Equatable {
@@ -191,6 +192,9 @@ public struct XcodeBuildOptions: Sendable {
   public var nativeAPISwiftPath: URL?
   public var scratchDirectory: URL?
   public var consoleSubsystem: Bool
+  public var watch: Bool
+  public var devPort: UInt16
+  public var devHost: String
 
   public init(
     projectPath: URL? = nil,
@@ -210,7 +214,10 @@ public struct XcodeBuildOptions: Sendable {
     crossSwiftPath: URL? = nil,
     nativeAPISwiftPath: URL? = nil,
     scratchDirectory: URL? = nil,
-    consoleSubsystem: Bool = false
+    consoleSubsystem: Bool = false,
+    watch: Bool = false,
+    devPort: UInt16 = 8000,
+    devHost: String = "127.0.0.1"
   ) {
     self.projectPath = projectPath
     self.workspacePath = workspacePath
@@ -230,5 +237,8 @@ public struct XcodeBuildOptions: Sendable {
     self.nativeAPISwiftPath = nativeAPISwiftPath
     self.scratchDirectory = scratchDirectory
     self.consoleSubsystem = consoleSubsystem
+    self.watch = watch
+    self.devPort = devPort
+    self.devHost = devHost
   }
 }

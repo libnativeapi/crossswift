@@ -144,6 +144,15 @@ public final class XCStringsCatalog: @unchecked Sendable {
     }
   }
 
+  public func reset() {
+    lock.lock()
+    sourceLanguage = "en"
+    entries.removeAll()
+    availableLanguages.removeAll()
+    didAttemptAutoBootstrap = true
+    lock.unlock()
+  }
+
   @discardableResult
   public func load(from url: URL) -> Bool {
     guard let data = try? Data(contentsOf: url) else {

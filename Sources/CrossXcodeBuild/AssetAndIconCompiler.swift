@@ -141,25 +141,26 @@ public final class AssetAndIconCompiler {
     let fm = FileManager.default
     let resourcesDir = stagingRoot.appendingPathComponent("Resources")
     let winMetaDir = stagingRoot.appendingPathComponent("WindowsMeta")
-    if fm.fileExists(atPath: resourcesDir.path) {
-      try fm.removeItem(at: resourcesDir)
-    }
     try fm.createDirectory(at: resourcesDir, withIntermediateDirectories: true)
     try fm.createDirectory(at: winMetaDir, withIntermediateDirectories: true)
 
     let target = project.mainTarget
+    var expectedResourceTopNames = Set<String>(["Info.plist", "AppIcon.ico", "AppIcon.png"])
 
-    // 1. Copy *.xcassets, *.xcstrings, and other resource files into Resources/
+    // 1. Incrementally sync *.xcassets, *.xcstrings, and other resource files into Resources/
     for xcassets in target.assetCatalogs {
-      let dest = resourcesDir.appendingPathComponent(xcassets.lastPathComponent)
-      if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
-      try fm.copyItem(at: xcassets, to: dest)
+      let name = xcassets.lastPathComponent
+      expectedResourceTopNames.insert(name)
+      let dest = resourcesDir.appendingPathComponent(name)
+      try IncrementalFileWriter.syncDirectory(from: xcassets, to: dest)
     }
     for xcstrings in target.stringCatalogs {
-      let dest = resourcesDir.appendingPathComponent(xcstrings.lastPathComponent)
-      if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
-      try fm.copyItem(at: xcstrings, to: dest)
+      let name = xcstrings.lastPathComponent
+      expectedResourceTopNames.insert(name)
+      let dest = resourcesDir.appendingPathComponent(name)
+      try IncrementalFileWriter.copyFileIfChanged(from: xcstrings, to: dest)
     }
+    var expectedLprojFiles: [String: Set<String>] = [:]
     for res in target.otherResources {
       if res.pathExtension.lowercased() == "icon" {
         var isDir: ObjCBool = false
@@ -170,20 +171,44 @@ public final class AssetAndIconCompiler {
       let components = res.pathComponents
       let dest: URL
       if let lprojIdx = components.lastIndex(where: { $0.lowercased().hasSuffix(".lproj") }) {
+        let lprojName = components[lprojIdx]
+        expectedResourceTopNames.insert(lprojName)
         var targetURL = resourcesDir
+        var relParts: [String] = []
         for comp in components[lprojIdx...] {
           targetURL = targetURL.appendingPathComponent(comp)
+          if comp != lprojName {
+            relParts.append(comp)
+          }
         }
+        expectedLprojFiles[lprojName, default: []].insert(relParts.joined(separator: "/"))
         try fm.createDirectory(
           at: targetURL.deletingLastPathComponent(),
           withIntermediateDirectories: true
         )
         dest = targetURL
       } else {
-        dest = resourcesDir.appendingPathComponent(res.lastPathComponent)
+        let name = res.lastPathComponent
+        expectedResourceTopNames.insert(name)
+        dest = resourcesDir.appendingPathComponent(name)
       }
-      if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
-      try fm.copyItem(at: res, to: dest)
+      var resIsDir: ObjCBool = false
+      if fm.fileExists(atPath: res.path, isDirectory: &resIsDir), resIsDir.boolValue {
+        try IncrementalFileWriter.syncDirectory(from: res, to: dest)
+      } else {
+        try IncrementalFileWriter.copyFileIfChanged(from: res, to: dest)
+      }
+    }
+    if let existingRes = try? fm.contentsOfDirectory(atPath: resourcesDir.path) {
+      for name in existingRes where !expectedResourceTopNames.contains(name) {
+        try? fm.removeItem(at: resourcesDir.appendingPathComponent(name))
+      }
+    }
+    for (lprojName, keptRelPaths) in expectedLprojFiles {
+      IncrementalFileWriter.pruneStaleEntries(
+        under: resourcesDir.appendingPathComponent(lprojName),
+        keeping: keptRelPaths
+      )
     }
 
     // 2. Synthesize Info.plist
@@ -191,7 +216,7 @@ public final class AssetAndIconCompiler {
     let infoPlistDict = buildInfoPlistDictionary(target: target)
     let plistData = try PropertyListSerialization.data(
       fromPropertyList: infoPlistDict, format: .xml, options: 0)
-    try plistData.write(to: infoPlistURL, options: .atomic)
+    try IncrementalFileWriter.writeIfChanged(data: plistData, to: infoPlistURL)
 
     // 3. Compile AppIcon.appiconset -> Windows .ico & Linux PNG icons
     let iconEntries = collectAppIconPNGs(target: target)
@@ -199,9 +224,11 @@ public final class AssetAndIconCompiler {
     if let icoData = ICOEncoder.encode(pngEntries: iconEntries) {
       let resIco = resourcesDir.appendingPathComponent("AppIcon.ico")
       let metaIco = winMetaDir.appendingPathComponent("AppIcon.ico")
-      try icoData.write(to: resIco, options: .atomic)
-      try icoData.write(to: metaIco, options: .atomic)
+      try IncrementalFileWriter.writeIfChanged(data: icoData, to: resIco)
+      try IncrementalFileWriter.writeIfChanged(data: icoData, to: metaIco)
       windowsIconURL = metaIco
+    } else {
+      try? fm.removeItem(at: resourcesDir.appendingPathComponent("AppIcon.ico"))
     }
 
     var linuxIconVariants: [(size: Int, url: URL)] = []
@@ -218,28 +245,34 @@ public final class AssetAndIconCompiler {
       for size in bySize.keys.sorted() {
         if let entry = bySize[size] {
           let pngURL = linuxIconsDir.appendingPathComponent("\(size).png")
-          try entry.data.write(to: pngURL, options: .atomic)
+          try IncrementalFileWriter.writeIfChanged(data: entry.data, to: pngURL)
           linuxIconVariants.append((size: size, url: pngURL))
         }
       }
       let preferredAppPNG =
         bySize[256] ?? bySize[128] ?? bySize[512] ?? bySize[bySize.keys.max() ?? 0]
       if let preferredAppPNG {
-        try preferredAppPNG.data.write(
-          to: resourcesDir.appendingPathComponent("AppIcon.png"), options: .atomic)
+        try IncrementalFileWriter.writeIfChanged(
+          data: preferredAppPNG.data,
+          to: resourcesDir.appendingPathComponent("AppIcon.png")
+        )
       }
+    } else {
+      try? fm.removeItem(at: resourcesDir.appendingPathComponent("AppIcon.png"))
     }
 
     // 4. Generate Windows manifest & resource script (.rc)
     let manifestURL = winMetaDir.appendingPathComponent("Application.manifest")
-    try generateWindowsManifest(target: target).write(
-      to: manifestURL, atomically: true, encoding: .utf8)
+    try IncrementalFileWriter.writeIfChanged(
+      text: generateWindowsManifest(target: target),
+      to: manifestURL
+    )
 
     let rcURL = winMetaDir.appendingPathComponent("AppResources.rc")
-    try generateWindowsRC(
-      target: target,
-      hasIcon: windowsIconURL != nil
-    ).write(to: rcURL, atomically: true, encoding: .utf8)
+    try IncrementalFileWriter.writeIfChanged(
+      text: generateWindowsRC(target: target, hasIcon: windowsIconURL != nil),
+      to: rcURL
+    )
 
     // 5. Synthesize GeneratedAssetSymbols.swift
     var generatedSymbolsURL: URL?
@@ -250,7 +283,7 @@ public final class AssetAndIconCompiler {
         try fm.createDirectory(at: swiftDir, withIntermediateDirectories: true)
         let outURL = swiftDir.appendingPathComponent("GeneratedAssetSymbols.swift")
         let source = renderGeneratedAssetSymbolsSwift(colors: colors, imageNames: images)
-        try source.write(to: outURL, atomically: true, encoding: .utf8)
+        try IncrementalFileWriter.writeIfChanged(text: source, to: outURL)
         generatedSymbolsURL = outURL
       }
     }

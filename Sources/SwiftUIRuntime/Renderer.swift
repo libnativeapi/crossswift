@@ -75,6 +75,7 @@ import Foundation
   private var hoverPending = false
   private var hoverPoint: CGPoint?
   private var pendingScroll: (id: NodeID, key: StateKey, offset: Point)?
+  private var isAttached = false
 
   /// The last mounted element tree, with frames from the reference layout.
   public private(set) var tree: Element?
@@ -93,6 +94,11 @@ import Foundation
     self.root = root
     self.contentSize = size
     self.layoutEngine = layoutEngine
+    attachObservers()
+  }
+
+  private func attachObservers() {
+    isAttached = true
     StateRegistry.shared.observe(rootPath, change: { [weak self] in
       self?.pendingScroll = nil
       self?.evaluations.invalidateAll()
@@ -128,6 +134,57 @@ import Foundation
     StateRegistry.shared.removeObserver(rootPath)
   }
 
+  /// Tears down the mounted tree, cancels pending timers and lifecycle tasks,
+  /// and detaches `StateRegistry`, `@Observable`, and backend handlers.
+  /// Safe to call multiple times; calling `mount()` afterwards re-attaches and remounts.
+  public func unmount() {
+    isAttached = false
+    pendingLongPress?.cancelTimer()
+    pendingLongPress = nil
+    for task in scrollIdleTasks.values { task.cancel() }
+    scrollIdleTasks.removeAll()
+    activeScrollPhases.removeAll()
+    hoveredNodeIDs.removeAll()
+    hoverActions.removeAll()
+    continuousHoverActions.removeAll()
+    lastContinuousHoverPoints.removeAll()
+    focused = nil
+    dragging = nil
+    scrollDrag = nil
+    pointerDown = nil
+    pointerDownHighPriority = false
+    pointerDownSimultaneous.removeAll()
+    pendingScroll = nil
+    unpublishedOffsets.removeAll()
+    wheelRemainders.removeAll()
+    hoverPending = false
+    hoverPoint = nil
+    needsRender = false
+    observableWakeupScheduled = false
+    pendingAnimation = nil
+    pendingAnimationExplicit = false
+    pendingDisablesAnimations = false
+    evaluations.reset()
+    evaluations.onObservableChange = nil
+    backend.tapHandler = nil
+    backend.transactionHandler = nil
+    backend.animationTickHandler = nil
+    if let old = mounted {
+      if backend.needsRenderCommands {
+        let commands: [RenderCommand] = [.remove(id: old.id)]
+        lastCommands = commands
+        backend.perform(commands)
+      } else {
+        lastCommands = []
+      }
+    }
+    mounted = nil
+    normalized = nil
+    tree = nil
+    mountedGeometryChildren.removeAll()
+    StateRegistry.shared.removeObserver(rootPath)
+  }
+
   /// Checks whether an active `LongPressGesture` has reached its `minimumDuration`
   /// against the current `clock()` timestamp and fires its completion if so.
   @discardableResult
@@ -148,6 +205,9 @@ import Foundation
 
   /// Builds and mounts the initial tree.
   public func mount() {
+    if !isAttached {
+      attachObservers()
+    }
     guard mounted == nil else {
       renderIfNeeded()
       return
@@ -179,6 +239,7 @@ import Foundation
     } else {
       onDidFinishRenderPasses?()
     }
+    StateRegistry.shared.finishHotReloadRestore()
   }
 
   /// Updates the available content area and re-renders if it changed.
@@ -222,9 +283,20 @@ import Foundation
 
   /// Marks the tree dirty and renders now unless already inside a render pass.
   public func setNeedsRender() {
+    guard isAttached else { return }
     pendingScroll = nil
     // Explicit host invalidation may follow changes outside tracked wrappers.
     evaluations.invalidateAll()
+    scheduleRender()
+  }
+
+  /// Invalidates cached text/layout measurements and view evaluation caches,
+  /// then schedules a re-render (e.g. after hot-reloading `.xcstrings` or image assets).
+  public func reloadResources() {
+    guard isAttached else { return }
+    layoutEngine.invalidateMeasurements()
+    evaluations.invalidateAll()
+    pendingScroll = nil
     scheduleRender()
   }
   private var observableWakeupScheduled = false
@@ -233,6 +305,7 @@ import Foundation
   /// Mark `needsRender = true` immediately (so synchronous callers calling `renderIfNeeded()`
   /// after the write see it) while deferring automatic rendering until after `willSet` completes.
   private func scheduleObservableRender() {
+    guard isAttached else { return }
     pendingScroll = nil
     if AnimationContext.disablesAnimations {
       pendingDisablesAnimations = true
@@ -250,12 +323,13 @@ import Foundation
     Task { @MainActor [weak self] in
       guard let self else { return }
       self.observableWakeupScheduled = false
-      guard self.needsRender, !self.isRendering, self.transactionDepth == 0 else { return }
+      guard self.isAttached, self.needsRender, !self.isRendering, self.transactionDepth == 0 else { return }
       self.requestRender()
     }
   }
 
   private func scheduleRender() {
+    guard isAttached else { return }
     if AnimationContext.disablesAnimations {
       pendingDisablesAnimations = true
       pendingAnimation = nil
@@ -278,7 +352,7 @@ import Foundation
   /// Returns true if layout animations remain in flight after this frame.
   @discardableResult
   public func stepAnimations() -> Bool {
-    guard mounted != nil else { return false }
+    guard isAttached, mounted != nil else { return false }
     if needsRender {
       renderIfNeeded()
       return layoutAnimations.hasActiveMotions
@@ -291,8 +365,9 @@ import Foundation
     return layoutAnimations.hasActiveMotions
   }
   private func requestRender() {
+    guard isAttached else { return }
     if !backend.requestRender({ [weak self] in
-      guard let self, self.needsRender else { return }
+      guard let self, self.isAttached, self.needsRender else { return }
       self.renderIfNeeded()
     }) {
       renderIfNeeded()
@@ -307,13 +382,13 @@ import Foundation
       updateHover(chain, point: pt)
     }
     transactionDepth -= 1
-    if transactionDepth == 0 && needsRender && !isRendering { requestRender() }
+    if transactionDepth == 0 && isAttached && needsRender && !isRendering { requestRender() }
   }
 
   /// Runs a render pass if one is pending. Coalesces writes made during a pass
   /// into at most eight follow-up passes, then stops to avoid a render loop.
   public func renderIfNeeded() {
-    guard !isRendering else { return }
+    guard isAttached, !isRendering else { return }
     guard mounted != nil else {
       mount()
       return

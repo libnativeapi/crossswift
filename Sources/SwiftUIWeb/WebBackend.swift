@@ -1,6 +1,28 @@
 import JavaScriptKit
 import SwiftUIRuntime
 
+struct DOMScrollSnapshot: Codable {
+  let node: String?
+  let index: Int
+  let left: Double
+  let top: Double
+}
+
+struct DOMFocusSnapshot: Codable {
+  let node: String?
+  let tag: String
+  let kind: String?
+  let index: Int
+  let selectionStart: Int?
+  let selectionEnd: Int?
+  let selectionDirection: String?
+}
+
+struct DOMHotReloadState: Codable {
+  let scrolls: [DOMScrollSnapshot]
+  let focus: DOMFocusSnapshot?
+}
+
 final class WebBackend: RenderBackend {
   var tapHandler: ((NodeID) -> Void)?
   var animationTickHandler: (() -> Bool)?
@@ -12,9 +34,15 @@ final class WebBackend: RenderBackend {
   private let measureContext: JSObject
   private var renderScheduled = false
   private var animationScheduled = false
+  private var renderFrameID: Double?
+  private var renderFrameClosure: JSOneshotClosure?
+  private var animationFrameID: Double?
+  private var animationFrameClosure: JSOneshotClosure?
   private var resizeObserver: JSObject?
+  private var resizeClosure: JSClosure?
   private var colorSchemeMediaQuery: JSObject?
   private var syncingScrollID: NodeID?
+  private var isDisconnected = false
 
   struct Node {
     let dom: JSObject
@@ -28,9 +56,15 @@ final class WebBackend: RenderBackend {
     var acceptsPointer: Bool?
   }
 
+  private struct EventListenerRegistration {
+    let target: JSObject
+    let type: String
+    let capture: Bool
+    let closure: JSClosure
+  }
+
   private var nodes: [NodeID: Node] = [:]
-  // Listeners live for the lifetime of the mounted app.
-  private var listeners: [JSClosure] = []
+  private var eventListeners: [EventListenerRegistration] = []
   private var pressedButton: NodeID?
   private var trackingPointer: Int?
   private var composing: NodeID?
@@ -52,14 +86,19 @@ final class WebBackend: RenderBackend {
   }
 
   func requestRender(_ render: @escaping () -> Void) -> Bool {
+    guard !isDisconnected else { return true }
     if !renderScheduled {
       renderScheduled = true
-      _ = JSObject.global.requestAnimationFrame!(
-        JSOneshotClosure { [weak self] _ in
-          self?.renderScheduled = false
-          render()
-          return .undefined
-        })
+      let closure = JSOneshotClosure { [weak self] _ in
+        guard let self, !self.isDisconnected else { return .undefined }
+        self.renderScheduled = false
+        self.renderFrameID = nil
+        self.renderFrameClosure = nil
+        render()
+        return .undefined
+      }
+      renderFrameClosure = closure
+      renderFrameID = JSObject.global.requestAnimationFrame!(closure).number
     }
     return true
   }
@@ -67,13 +106,14 @@ final class WebBackend: RenderBackend {
   func perform(_ commands: [RenderCommand]) {}
 
   func connect(_ renderer: Renderer) {
+    isDisconnected = false
     if let matchMedia: ((ConvertibleToJSValue...) -> JSValue) = JSObject.global.window.object?["matchMedia"],
        let mq = matchMedia("(prefers-color-scheme: dark)").object
     {
       environment.colorScheme = mq.matches.boolean == true ? .dark : .light
       colorSchemeMediaQuery = mq
       listen("change", on: mq) { [weak self, weak renderer] event in
-        guard let self else { return }
+        guard let self, !self.isDisconnected else { return }
         let next: ColorScheme = event.matches.boolean == true ? .dark : .light
         guard self.environment.colorScheme != next else { return }
         self.environment.colorScheme = next
@@ -83,10 +123,10 @@ final class WebBackend: RenderBackend {
     }
 
     let resize = JSClosure { [weak self, weak renderer] _ in
-      if let self { renderer?.resize(to: self.size) }
+      if let self, !self.isDisconnected { renderer?.resize(to: self.size) }
       return .undefined
     }
-    listeners.append(resize)
+    resizeClosure = resize
     let observer = JSObject.global.ResizeObserver.object!.new(resize)
     _ = observer.observe!(host)
     resizeObserver = observer
@@ -195,14 +235,188 @@ final class WebBackend: RenderBackend {
     }
   }
 
+  func disconnect() {
+    guard !isDisconnected else { return }
+    isDisconnected = true
+
+    if let id = renderFrameID {
+      _ = JSObject.global.cancelAnimationFrame!(id)
+      renderFrameID = nil
+    }
+    renderFrameClosure?.release()
+    renderFrameClosure = nil
+    renderScheduled = false
+
+    if let id = animationFrameID {
+      _ = JSObject.global.cancelAnimationFrame!(id)
+      animationFrameID = nil
+    }
+    animationFrameClosure?.release()
+    animationFrameClosure = nil
+    animationScheduled = false
+
+    if let observer = resizeObserver {
+      _ = observer.disconnect!()
+      resizeObserver = nil
+    }
+    resizeClosure = nil
+
+    for reg in eventListeners {
+      _ = reg.target.removeEventListener!(reg.type, reg.closure, reg.capture)
+    }
+    eventListeners.removeAll()
+    colorSchemeMediaQuery = nil
+
+    tapHandler = nil
+    animationTickHandler = nil
+
+    nodes.removeAll()
+    pressedButton = nil
+    trackingPointer = nil
+    composing = nil
+    syncingScrollID = nil
+
+    if let replaceChildren = host.replaceChildren.function {
+      _ = replaceChildren.callAsFunction(this: host)
+    } else {
+      host.innerHTML = .string("")
+    }
+  }
+
+  func captureDOMState() -> DOMHotReloadState {
+    var scrolls: [DOMScrollSnapshot] = []
+    if let scrollNodes = host.querySelectorAll!("[data-scroll]").object {
+      let count = Int(scrollNodes.length.number ?? 0)
+      for index in 0..<count {
+        guard let el = scrollNodes[index].object else { continue }
+        let left = el.scrollLeft.number ?? 0
+        let top = el.scrollTop.number ?? 0
+        if abs(left) > 0.5 || abs(top) > 0.5 {
+          scrolls.append(
+            DOMScrollSnapshot(
+              node: el.getAttribute!("data-node").string,
+              index: index,
+              left: left,
+              top: top
+            ))
+        }
+      }
+    }
+
+    var focusSnapshot: DOMFocusSnapshot?
+    if let active = document.activeElement.object,
+       host.contains!(active).boolean == true,
+       let tag = active.tagName.string, !tag.isEmpty
+    {
+      let nodeAttr = active.getAttribute!("data-node").string
+      let kindAttr = active.getAttribute!("data-kind").string
+      var tagIndex = 0
+      if let sameTag = host.querySelectorAll!(tag).object {
+        let count = Int(sameTag.length.number ?? 0)
+        for index in 0..<count where sameTag[index].object == active {
+          tagIndex = index
+          break
+        }
+      }
+      var selectionStart: Int?
+      var selectionEnd: Int?
+      var selectionDirection: String?
+      if tag == "INPUT" || tag == "TEXTAREA" {
+        selectionStart = active.selectionStart.number.map { Int($0) }
+        selectionEnd = active.selectionEnd.number.map { Int($0) }
+        selectionDirection = active.selectionDirection.string
+      }
+      focusSnapshot = DOMFocusSnapshot(
+        node: nodeAttr,
+        tag: tag,
+        kind: kindAttr,
+        index: tagIndex,
+        selectionStart: selectionStart,
+        selectionEnd: selectionEnd,
+        selectionDirection: selectionDirection
+      )
+    }
+
+    return DOMHotReloadState(scrolls: scrolls, focus: focusSnapshot)
+  }
+
+  func restoreDOMState(_ domState: DOMHotReloadState, renderer: Renderer) {
+    guard !isDisconnected else { return }
+
+    if !domState.scrolls.isEmpty {
+      let scrollNodes = host.querySelectorAll!("[data-scroll]").object
+      let scrollCount = Int(scrollNodes?.length.number ?? 0)
+      for saved in domState.scrolls {
+        var matched: JSObject?
+        if let node = saved.node, isNumericIdentifier(node) {
+          matched = host.querySelector!("[data-scroll][data-node=\"\(node)\"]").object
+        }
+        if matched == nil, let scrollNodes, saved.index >= 0, saved.index < scrollCount {
+          matched = scrollNodes[saved.index].object
+        }
+        guard let dom = matched else { continue }
+        let nodeID = dom.getAttribute!("data-node").string.flatMap(Int.init).map(NodeID.init(rawValue:))
+        if let nodeID { syncingScrollID = nodeID }
+        dom.scrollLeft = .number(saved.left)
+        dom.scrollTop = .number(saved.top)
+        syncingScrollID = nil
+        if let nodeID {
+          renderer.scroll(id: nodeID, to: Point(x: saved.left, y: saved.top))
+        }
+      }
+    }
+
+    if let savedFocus = domState.focus {
+      var matched: JSObject?
+      if let node = savedFocus.node, isNumericIdentifier(node),
+         let byNode = host.querySelector!("[data-node=\"\(node)\"]").object,
+         byNode.tagName.string == savedFocus.tag
+      {
+        matched = byNode
+      }
+      if matched == nil,
+         let sameTag = host.querySelectorAll!(savedFocus.tag).object,
+         savedFocus.index >= 0,
+         savedFocus.index < Int(sameTag.length.number ?? 0)
+      {
+        matched = sameTag[savedFocus.index].object
+      }
+      if let el = matched {
+        let options: JSObject = ["preventScroll": .boolean(true)]
+        _ = el.focus!(options)
+        if (savedFocus.tag == "INPUT" || savedFocus.tag == "TEXTAREA"),
+           let start = savedFocus.selectionStart,
+           let end = savedFocus.selectionEnd,
+           let setSelectionRange = el.setSelectionRange.function
+        {
+          let maxOffset = el.value.string?.utf16.count ?? 0
+          let clampedStart = max(0, min(start, maxOffset))
+          let clampedEnd = max(clampedStart, min(end, maxOffset))
+          if let dir = savedFocus.selectionDirection, !dir.isEmpty {
+            _ = setSelectionRange.callAsFunction(this: el, clampedStart, clampedEnd, dir)
+          } else {
+            _ = setSelectionRange.callAsFunction(this: el, clampedStart, clampedEnd)
+          }
+        }
+      }
+    }
+  }
+
+  private func isNumericIdentifier(_ value: String) -> Bool {
+    !value.isEmpty && value.allSatisfy { $0.isASCII && $0.isNumber }
+  }
+
   private func listen(
     _ type: String, on target: JSObject, capture: Bool = false, handle: @escaping (JSObject) -> Void
   ) {
-    let listener = JSClosure { args in
+    let listener = JSClosure { [weak self] args in
+      guard let self, !self.isDisconnected else { return .undefined }
       if let event = args.first?.object { handle(event) }
       return .undefined
     }
-    listeners.append(listener)
+    eventListeners.append(
+      EventListenerRegistration(target: target, type: type, capture: capture, closure: listener)
+    )
     _ = target.addEventListener!(type, listener, capture)
   }
 
@@ -223,6 +437,7 @@ final class WebBackend: RenderBackend {
   }
 
   func didRender(_ root: Element) {
+    guard !isDisconnected else { return }
     var liveIDs: Set<NodeID> = []
     func collect(_ element: Element) {
       liveIDs.insert(element.id)
@@ -238,15 +453,18 @@ final class WebBackend: RenderBackend {
       let options: JSObject = ["preventScroll": .boolean(true)]
       _ = focus.focus!(options)
     }
-    if root.hasLayoutAnimation && !animationScheduled {
+    if root.hasLayoutAnimation && !animationScheduled && !isDisconnected {
       animationScheduled = true
-      _ = JSObject.global.requestAnimationFrame!(
-        JSOneshotClosure { [weak self] _ in
-          guard let self else { return .undefined }
-          self.animationScheduled = false
-          _ = self.animationTickHandler?()
-          return .undefined
-        })
+      let closure = JSOneshotClosure { [weak self] _ in
+        guard let self, !self.isDisconnected else { return .undefined }
+        self.animationScheduled = false
+        self.animationFrameID = nil
+        self.animationFrameClosure = nil
+        _ = self.animationTickHandler?()
+        return .undefined
+      }
+      animationFrameClosure = closure
+      animationFrameID = JSObject.global.requestAnimationFrame!(closure).number
     }
   }
 

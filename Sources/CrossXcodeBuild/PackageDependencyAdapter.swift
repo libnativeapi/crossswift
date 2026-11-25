@@ -571,12 +571,14 @@ public enum PackageDependencyAdapter {
           try fm.createDirectory(at: dstCatalog, withIntermediateDirectories: true)
           let srcContents = srcCatalog.appendingPathComponent("Contents.json")
           if fm.fileExists(atPath: srcContents.path) {
-            try fm.copyItem(at: srcContents, to: dstCatalog.appendingPathComponent("Contents.json"))
+            try IncrementalFileWriter.copyFileIfChanged(
+              from: srcContents,
+              to: dstCatalog.appendingPathComponent("Contents.json")
+            )
           } else {
-            try "{\n  \"info\" : { \"author\" : \"xcode\", \"version\" : 1 }\n}\n".write(
-              to: dstCatalog.appendingPathComponent("Contents.json"),
-              atomically: true,
-              encoding: .utf8
+            try IncrementalFileWriter.writeIfChanged(
+              text: "{\n  \"info\" : { \"author\" : \"xcode\", \"version\" : 1 }\n}\n",
+              to: dstCatalog.appendingPathComponent("Contents.json")
             )
           }
           for name in matchedSets {
@@ -613,10 +615,9 @@ public enum PackageDependencyAdapter {
         }
         #endif
         """
-        try shimSource.write(
-          to: dstTarget.appendingPathComponent("_CrossSwiftUIWasmBundleShim.swift"),
-          atomically: true,
-          encoding: .utf8
+        try IncrementalFileWriter.writeIfChanged(
+          text: shimSource,
+          to: dstTarget.appendingPathComponent("_CrossSwiftUIWasmBundleShim.swift")
         )
       }
 
@@ -625,19 +626,15 @@ public enum PackageDependencyAdapter {
           withJSONObject: ["catalogPaths": fallbackCatalogPaths],
           options: [.prettyPrinted, .sortedKeys]
         )
-        try pointerJSON.write(
-          to: dstTarget.appendingPathComponent("crossswift-assets.json"),
-          options: .atomic
+        try IncrementalFileWriter.writeIfChanged(
+          data: pointerJSON,
+          to: dstTarget.appendingPathComponent("crossswift-assets.json")
         )
       }
     }
 
-    try patchedManifest.write(
-      to: dstManifestURL,
-      atomically: true,
-      encoding: .utf8
-    )
-    try stampText.write(to: stampURL, atomically: true, encoding: .utf8)
+    try IncrementalFileWriter.writeIfChanged(text: patchedManifest, to: dstManifestURL)
+    try IncrementalFileWriter.writeIfChanged(text: stampText, to: stampURL)
 
     return outputDirectory
   }
@@ -748,9 +745,9 @@ public enum PackageDependencyAdapter {
         if let keptCases = pruneEnumCases {
           text = pruneOversizedAssetEnumSource(text, keepingCases: keptCases)
         }
-        try text.write(to: dstItem, atomically: true, encoding: .utf8)
+        try IncrementalFileWriter.writeIfChanged(text: text, to: dstItem)
       } else {
-        try fm.copyItem(at: srcItem, to: dstItem)
+        try IncrementalFileWriter.copyFileIfChanged(from: srcItem, to: dstItem)
       }
     }
   }
