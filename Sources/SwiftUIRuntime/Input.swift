@@ -174,6 +174,7 @@ public struct TextField: View, _PrimitiveView {
     p.placeholder = title
     p.multiline = axis == .vertical
     p.secure = secure
+    p.plainTextField = EnvironmentValues.current.plainTextFieldStyle
     p.font = EnvironmentValues.current.font
     p.fillWidth = true
     var e = Element(kind: .textField, props: p)
@@ -227,13 +228,20 @@ public struct PlainButtonStyle: ButtonStyle {
   public static let plain = Self()
 }
 extension ButtonStyle where Self == PlainButtonStyle { public static var plain: Self { Self() } }
+private struct PlainTextFieldStyleKey: EnvironmentKey {
+  static let defaultValue = false
+}
+
+extension EnvironmentValues {
+  var plainTextFieldStyle: Bool {
+    get { self[PlainTextFieldStyleKey.self] }
+    set { self[PlainTextFieldStyleKey.self] = newValue }
+  }
+}
+
 extension View {
   public func textFieldStyle<S: TextFieldStyle>(_ style: S) -> some View {
-    TransformView(content: self) { element in
-      if element.kind == .textField {
-        element.props.plainTextField = style is PlainTextFieldStyle
-      }
-    }
+    environment(\.plainTextFieldStyle, style is PlainTextFieldStyle)
   }
   public func onSubmit(_ action: @escaping () -> Void) -> some View {
     TransformView(content: self) { $0.submitAction = action }

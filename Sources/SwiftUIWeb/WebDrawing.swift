@@ -158,6 +158,7 @@ extension WebBackend {
       dom.placeholder = .string(props.placeholder)
       style.padding = .string(props.plainTextField ? "0" : "0 3px")
       style.border = .string(props.plainTextField ? "0" : "")
+      style.outline = .string(props.plainTextField ? "none" : "")
       if props.plainTextField && props.background == nil {
         style.backgroundColor = .string("transparent")
       }

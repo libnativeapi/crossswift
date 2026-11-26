@@ -251,7 +251,7 @@ public enum PackageDependencyAdapter {
         filteredImports.remove("UIKit")
       }
       if (!filteredImports.isEmpty || scan.hasCrossPlatformRewrites)
-        && allowedCrossSwiftModules.contains("AppKit")
+        && allowedCrossSwiftModules.contains("CrossFoundation")
       {
         filteredImports.insert("CrossFoundation")
       }
