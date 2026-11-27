@@ -560,9 +560,11 @@ open class NSImage: NSObject, @unchecked Sendable {
       ctx.ops.append(.image(pngData: data, rect: rect))
     }
   }
-  public func draw(in dstSpacePortionRect: NSRect, from srcSpacePortionRect: NSRect, operation op: NSCompositingOperation, fraction requestedAlpha: CGFloat) {
-    draw(in: dstSpacePortionRect)
-  }
+  #if !os(macOS)
+    public func draw(in dstSpacePortionRect: NSRect, from srcSpacePortionRect: NSRect, operation op: NSCompositingOperation, fraction requestedAlpha: CGFloat) {
+      draw(in: dstSpacePortionRect)
+    }
+  #endif
   public func draw(in dstSpacePortionRect: NSRect, from srcSpacePortionRect: NSRect, operation op: UInt, fraction requestedAlpha: CGFloat) {
     draw(in: dstSpacePortionRect)
   }

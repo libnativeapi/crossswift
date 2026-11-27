@@ -556,7 +556,12 @@ open class NSView: NSResponder {
   open func viewDidMoveToWindow() {}
   open func viewDidMoveToSuperview() {}
   open func viewDidChangeFrameSize(from oldSize: NSSize) {
-    if self === window?.contentView, ownedNativeView == nil, subviews.count == 1,
+    #if os(macOS)
+      let hasNativeView = false
+    #else
+      let hasNativeView = ownedNativeView != nil
+    #endif
+    if self === window?.contentView, !hasNativeView, subviews.count == 1,
       window?.toolbar?._pendingSelectedItemIdentifier == nil
     {
       let child = subviews[0]

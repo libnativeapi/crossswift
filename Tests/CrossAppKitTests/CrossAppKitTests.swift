@@ -138,10 +138,12 @@ final class CrossAppKitTests: XCTestCase {
 
   func testOpenSavePanelExtensionsAndTildeAbbreviation() {
     MainActor.assumeIsolated {
-      XCTAssertEqual(
-        CrossAppKit.NSSavePanel._normalizeDialogExtensions([.json, .plainText], allowAppBundleShortcuts: false),
-        [".json", ".txt"]
-      )
+      #if !os(macOS)
+        XCTAssertEqual(
+          CrossAppKit.NSSavePanel._normalizeDialogExtensions([.json, .plainText], allowAppBundleShortcuts: false),
+          [".json", ".txt"]
+        )
+      #endif
       XCTAssertTrue([UTType.folder, UTType.applicationBundle].allSatisfy { $0.conforms(to: .directory) })
       #if os(Windows)
         XCTAssertEqual(

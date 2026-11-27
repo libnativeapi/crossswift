@@ -23,7 +23,11 @@ open class NSResponder: NSObject {
   open func resignFirstResponder() -> Bool { true }
   open var undoManager: UndoManager? { nextResponder?.undoManager }
   open func supplementalTarget(forAction action: Selector, sender: Any?) -> Any? { nil }
-  open func responds(to aSelector: Selector!) -> Bool { false }
+  #if os(macOS)
+    open override func responds(to aSelector: Selector!) -> Bool { false }
+  #else
+    open func responds(to aSelector: Selector!) -> Bool { false }
+  #endif
 
   open func keyDown(with event: NSEvent) { nextResponder?.keyDown(with: event) }
   open func keyUp(with event: NSEvent) { nextResponder?.keyUp(with: event) }

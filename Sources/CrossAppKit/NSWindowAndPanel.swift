@@ -608,7 +608,10 @@ open class NSWindow: NSResponder {
     }
   }
   public var acceptsMouseMovedEvents: Bool = true
-  public var className: String { String(describing: type(of: self)) }
+  #if !os(macOS)
+    // Foundation's NSObject provides className on macOS.
+    public var className: String { String(describing: type(of: self)) }
+  #endif
   open var isMovable: Bool = true {
     didSet {
       #if !os(macOS)
