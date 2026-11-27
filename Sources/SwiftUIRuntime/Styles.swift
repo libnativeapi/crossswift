@@ -356,6 +356,7 @@ extension View {
       $0.props.cornerRadius = Double(shape.cornerRadius)
       $0.props.clipped = true
       $0.clipPathBuilder = { shape.path(in: $0) }
+      $0.roundedClipRadius = (shape as? RoundedRectangle)?.cornerRadius
     }
   }
   public func contentShape<S: Shape>(_ shape: S) -> some View {

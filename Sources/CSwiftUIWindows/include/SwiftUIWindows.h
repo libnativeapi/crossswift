@@ -11,6 +11,7 @@ typedef struct {
 typedef int (*sui_input_callback)(void *, int64_t, int, double, double, int,
                                   int);
 void sui_surface_schedule(void *);
+void sui_surface_request_wheel_update(void *surface);
 void sui_surface_trace_update(void *, int begin);
 void sui_surface_trace_duration(void *surface, int stage, double milliseconds);
 void sui_surface_flush(void *);

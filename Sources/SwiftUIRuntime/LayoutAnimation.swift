@@ -129,6 +129,53 @@ final class LayoutAnimator {
     !motions.isEmpty || !colorMotions.isEmpty || !activeInsertions.isEmpty || !activeRemovals.isEmpty
   }
 
+  var hasOnlyColorMotions: Bool {
+    !colorMotions.isEmpty && motions.isEmpty && activeInsertions.isEmpty && activeRemovals.isEmpty
+  }
+
+  /// Color targets are resolved during the regular state update. Between
+  /// updates they can be sampled on the mounted tree without changing layout.
+  func advanceColors(in element: inout Element, at now: TimeInterval,
+                     changes: inout [(id: NodeID, props: NodeProps)]) -> Bool {
+    guard element.hasLayoutAnimation || element.hasScopedAnimation else { return false }
+    // Animation descriptors belong to the state transaction that installed
+    // the target. A backend must not start a second fade for each sampled color.
+    var changed = element.props.animation != nil || element.props.animationDisabled
+      || element.props.animationPass != 0
+    element.props.animation = nil
+    element.props.animationDisabled = false
+    element.props.animationPass = 0
+    element.hasScopedAnimation = false
+    var active = false
+    if let fields = colorMotions[element.id] {
+      for (field, motion) in fields {
+        let running = motion.isActive(at: now)
+        let value = running ? motion.value(at: now) : motion.to
+        switch field {
+        case .background:
+          if element.props.background != value { element.props.background = value; changed = true }
+        case .foreground:
+          if element.props.foreground != value { element.props.foreground = value; changed = true }
+        case .borderColor:
+          if element.props.borderColor != value { element.props.borderColor = value; changed = true }
+        }
+        if running { active = true }
+        else { colorMotions[element.id]?.removeValue(forKey: field) }
+      }
+      if !active { colorMotions.removeValue(forKey: element.id) }
+    }
+    if changed { changes.append((element.id, element.props)) }
+    for index in element.children.indices where element.children[index].hasLayoutAnimation
+      || element.children[index].hasScopedAnimation
+    {
+      if advanceColors(in: &element.children[index], at: now, changes: &changes) { changed = true }
+      if element.children[index].hasLayoutAnimation { active = true }
+    }
+    element.hasLayoutAnimation = active
+    if changed { element.reusesLayout = false }
+    return changed
+  }
+
   func beginPass() {
     visitedMotions.removeAll(keepingCapacity: true)
     visitedColorMotions.removeAll(keepingCapacity: true)
@@ -245,10 +292,16 @@ final class LayoutAnimator {
     if let matched {
       let parentID = matched.id
       // Exclude already-active removal ghosts from oldChildren when computing newly removed items.
-      let removalGhostIDs = Set(activeRemovals.values.map(\.ghostID))
-      let oldChildren = matched.children.filter { child in
-        guard let eid = child.explicitID else { return true }
-        return !removalGhostIDs.contains(eid)
+      // Without removals, share the previous children instead of copying each element.
+      let oldChildren: [Element]
+      if activeRemovals.isEmpty {
+        oldChildren = matched.children
+      } else {
+        let removalGhostIDs = Set(activeRemovals.values.map(\.ghostID))
+        oldChildren = matched.children.filter { child in
+          guard let eid = child.explicitID else { return true }
+          return !removalGhostIDs.contains(eid)
+        }
       }
       let aligned =
         oldChildren.count == element.children.count

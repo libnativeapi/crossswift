@@ -56,6 +56,33 @@ private struct EnabledLabel: View {
 }
 
 final class StyledViewTests: XCTestCase {
+  @MainActor
+  func testRepeatedImageAssetLookupsAreScopedToEachRenderPass() {
+    let graph = EvaluationGraph()
+    let path = ViewPath()
+    var generation = 0
+    var queries = 0
+    let previous = Image.assetPathResolver
+    defer { Image.assetPathResolver = previous }
+    Image.assetPathResolver = { name, bundle in
+      queries += 1
+      return "\(generation)/\(bundle == nil ? "default" : "bundle")/\(name)"
+    }
+    for pass in 1...2 {
+      generation = pass
+      _ = graph.evaluateRoot {
+        for _ in 0..<32 {
+          let first = Image("repeated-symbol")._makeElement(path: path)
+          let second = Image("repeated-symbol", bundle: .main)._makeElement(path: path)
+          XCTAssertEqual(first.props.imagePath, "\(pass)/default/repeated-symbol")
+          XCTAssertEqual(second.props.imagePath, "\(pass)/bundle/repeated-symbol")
+        }
+        return Element(kind: .empty)
+      }
+      XCTAssertEqual(queries, pass * 2)
+    }
+  }
+
   override func setUp() { StateRegistry.shared.reset() }
   private func render<V: View>(_ view: V) -> Renderer {
     let renderer = Renderer(

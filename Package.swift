@@ -143,6 +143,7 @@ if buildDesktopNative {
         .linkedLibrary("comctl32"),
         .linkedLibrary("dwrite"),
         .linkedLibrary("d2d1"),
+        .linkedLibrary("windowscodecs"),
       ]))
   targets.append(
     .target(

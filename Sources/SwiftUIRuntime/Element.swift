@@ -314,7 +314,23 @@ public struct NodeProps: Equatable {
 public struct Element {
   public internal(set) var id: NodeID
   public var kind: ElementKind
-  public var props: NodeProps
+  // Render passes copy element trees, while most node properties stay shared.
+  private final class Properties {
+    var value: NodeProps
+    init(_ value: NodeProps) { self.value = value }
+  }
+  private var properties: Properties
+  public var props: NodeProps {
+    _read { yield properties.value }
+    _modify {
+      if !isKnownUniquelyReferenced(&properties) {
+        properties = Properties(properties.value)
+      }
+      yield &properties.value
+    }
+  }
+  /// Only the direct rows of a fixed-height, row-clipped vertical stack qualify.
+  package var hasFixedLazyRows = false
   public var children: [Element]
   public internal(set) var frame: Rect
 
@@ -342,75 +358,523 @@ public struct Element {
   var hoverAction: ((Bool) -> Void)? = nil
   var focusAction: ((Bool) -> Void)? = nil
   public var pathBuilder: ((CGRect) -> Path)? = nil
-  public var clipPathBuilder: ((CGRect) -> Path)? = nil
-  var horizontalGuides: [HorizontalAlignment: (ViewDimensions) -> CGFloat] = [:]
-  var verticalGuides: [VerticalAlignment: (ViewDimensions) -> CGFloat] = [:]
-  var preferences: [ObjectIdentifier: PreferenceValue] = [:]
-  var anchorPreferences: [(CGRect, inout [ObjectIdentifier: PreferenceValue]) -> Void] = []
-  var preferenceTransforms: [(inout [ObjectIdentifier: PreferenceValue]) -> Void] = []
-  var preferenceAction: (([ObjectIdentifier: PreferenceValue]) -> Void)? = nil
-  var geometryBuilder: ((CGRect) -> Element)? = nil
-  var layout: (any _LayoutBridge)? = nil
-  package var hostedViewAdapter: (any AnyObject)? = nil
-  package var hostedViewMeasure: ((ProposedViewSize) -> Size)? = nil
-  package var hostedViewHitTest: ((Int, CGPoint, EventModifiers) -> Bool)? = nil
-  package var hostedViewMouseInput: ((Int, CGPoint, EventModifiers) -> Bool)? = nil
-  var textAction: ((String) -> Void)? = nil
-  var submitAction: (() -> Void)? = nil
-  var dragAction: ((DragGesture.Value, Bool) -> Void)? = nil
-  var dragMinimumDistance: Double = 10
-  var highPriorityAction: (() -> Void)? = nil
-  var simultaneousActions: [() -> Void] = []
-  var highPriorityDragAction: ((DragGesture.Value, Bool) -> Void)? = nil
-  var highPriorityDragMinimumDistance: Double = 10
-  var simultaneousDragActions: [(DragGesture.Value, Bool) -> Void] = []
+  public var clipPathBuilder: ((CGRect) -> Path)? = nil {
+    didSet { roundedClipRadius = nil }
+  }
+  var roundedClipRadius: CGFloat?
   struct LongPressConfig {
     let minimumDuration: Double
     let maximumDistance: Double
     let onPressingChanged: ((Bool) -> Void)?
     let onEnded: () -> Void
   }
-  var longPressAction: LongPressConfig? = nil
-  var tapLocationAction: ((CGPoint) -> Void)?
-  var doubleTapLocationAction: ((CGPoint) -> Void)?
-  var doubleTapAction: (() -> Void)? = nil
-  var continuousHoverAction: ((HoverPhase) -> Void)? = nil
   var continuousHoverGlobal = false
-  var keyAction: ((KeyPress) -> KeyPress.Result)? = nil
-  var scrollTarget: ScrollTarget?
-  var completeScrollTarget: (() -> Void)?
-  var scrollAction: ((Point) -> Void)? = nil
-  var scrollGeometryHandlers: [(ScrollGeometry) -> Void] = []
-  var scrollPhaseHandlers: [(ScrollPhase, ScrollPhase) -> Void] = []
-  var geometryChangeHandlers: [(GeometryProxy) -> Void] = []
   var lazyCacheKey: AnyHashable? = nil
   package var tagValue: AnyHashable? = nil
   // Only ScrollView's private offset can use the geometry-only update path.
   var scrollStateKey: StateKey? = nil
-  var secondaryAction: ((CGPoint) -> Void)? = nil
   var dismissOnAction = false
   var presentationCentered = false
-  var presentationPoint: CGPoint? = nil
-  var presentationEdge: Edge? = nil
   var presentationPopoverChrome = false
-  var presentationColorScheme: ColorScheme = .light
-  var dismissPresentation: (() -> Void)? = nil
-  package var presentationStyle: PresentationStyle = .modal
-  package var presentationID: ObjectIdentifier? = nil
-  package var popupPresentationIndex: Int? = nil
-  package var popupPresentationRole: PopupPresentationRole? = nil
-  package var popupPresentations: [PopupPresentationMetadata] = []
-  var pressedAction: ((Bool) -> Void)? = nil
-  package var semanticBoolAction: ((Bool) -> Void)? = nil
-  package var semanticDoubleAction: ((Double, Bool) -> Void)? = nil
-  package var semanticIntAction: ((Int) -> Void)? = nil
-  package var semanticIncrementAction: (() -> Void)? = nil
-  package var semanticDecrementAction: (() -> Void)? = nil
-  package var semanticBackAction: (() -> Void)? = nil
-  package var semanticAlertActions: [() -> Void] = []
-  package var tabItemTitle: String? = nil
-  package var tabItemIcon: String? = nil
-  package var tabItemContent: AnyView? = nil
+  /// Rarely set handlers and metadata share one copy-on-write box, so
+  /// copying an element retains one reference instead of each closure.
+  private final class Extras {
+    nonisolated(unsafe) static let empty = Extras()
+    var horizontalGuides: [HorizontalAlignment: (ViewDimensions) -> CGFloat] = [:]
+    var verticalGuides: [VerticalAlignment: (ViewDimensions) -> CGFloat] = [:]
+    var preferences: [ObjectIdentifier: PreferenceValue] = [:]
+    var anchorPreferences: [(CGRect, inout [ObjectIdentifier: PreferenceValue]) -> Void] = []
+    var preferenceTransforms: [(inout [ObjectIdentifier: PreferenceValue]) -> Void] = []
+    var preferenceAction: (([ObjectIdentifier: PreferenceValue]) -> Void)? = nil
+    var geometryBuilder: ((CGRect) -> Element)? = nil
+    var layout: (any _LayoutBridge)? = nil
+    var hostedViewAdapter: (any AnyObject)? = nil
+    var hostedViewMeasure: ((ProposedViewSize) -> Size)? = nil
+    var hostedViewHitTest: ((Int, CGPoint, EventModifiers) -> Bool)? = nil
+    var hostedViewMouseInput: ((Int, CGPoint, EventModifiers) -> Bool)? = nil
+    var textAction: ((String) -> Void)? = nil
+    var submitAction: (() -> Void)? = nil
+    var dragAction: ((DragGesture.Value, Bool) -> Void)? = nil
+    var dragMinimumDistance: Double = 10
+    var highPriorityAction: (() -> Void)? = nil
+    var simultaneousActions: [() -> Void] = []
+    var highPriorityDragAction: ((DragGesture.Value, Bool) -> Void)? = nil
+    var highPriorityDragMinimumDistance: Double = 10
+    var simultaneousDragActions: [(DragGesture.Value, Bool) -> Void] = []
+    var longPressAction: LongPressConfig? = nil
+    var tapLocationAction: ((CGPoint) -> Void)? = nil
+    var doubleTapLocationAction: ((CGPoint) -> Void)? = nil
+    var doubleTapAction: (() -> Void)? = nil
+    var continuousHoverAction: ((HoverPhase) -> Void)? = nil
+    var keyAction: ((KeyPress) -> KeyPress.Result)? = nil
+    var scrollTarget: ScrollTarget? = nil
+    var completeScrollTarget: (() -> Void)? = nil
+    var scrollAction: ((Point) -> Void)? = nil
+    var scrollGeometryHandlers: [(ScrollGeometry) -> Void] = []
+    var scrollPhaseHandlers: [(ScrollPhase, ScrollPhase) -> Void] = []
+    var geometryChangeHandlers: [(GeometryProxy) -> Void] = []
+    var secondaryAction: ((CGPoint) -> Void)? = nil
+    var presentationPoint: CGPoint? = nil
+    var presentationEdge: Edge? = nil
+    var presentationColorScheme: ColorScheme = .light
+    var dismissPresentation: (() -> Void)? = nil
+    var presentationStyle: PresentationStyle = .modal
+    var presentationID: ObjectIdentifier? = nil
+    var popupPresentationIndex: Int? = nil
+    var popupPresentationRole: PopupPresentationRole? = nil
+    var popupPresentations: [PopupPresentationMetadata] = []
+    var pressedAction: ((Bool) -> Void)? = nil
+    var semanticBoolAction: ((Bool) -> Void)? = nil
+    var semanticDoubleAction: ((Double, Bool) -> Void)? = nil
+    var semanticIntAction: ((Int) -> Void)? = nil
+    var semanticIncrementAction: (() -> Void)? = nil
+    var semanticDecrementAction: (() -> Void)? = nil
+    var semanticBackAction: (() -> Void)? = nil
+    var semanticAlertActions: [() -> Void] = []
+    var tabItemTitle: String? = nil
+    var tabItemIcon: String? = nil
+    var tabItemContent: AnyView? = nil
+    init() {}
+    init(copying other: Extras) {
+      horizontalGuides = other.horizontalGuides
+      verticalGuides = other.verticalGuides
+      preferences = other.preferences
+      anchorPreferences = other.anchorPreferences
+      preferenceTransforms = other.preferenceTransforms
+      preferenceAction = other.preferenceAction
+      geometryBuilder = other.geometryBuilder
+      layout = other.layout
+      hostedViewAdapter = other.hostedViewAdapter
+      hostedViewMeasure = other.hostedViewMeasure
+      hostedViewHitTest = other.hostedViewHitTest
+      hostedViewMouseInput = other.hostedViewMouseInput
+      textAction = other.textAction
+      submitAction = other.submitAction
+      dragAction = other.dragAction
+      dragMinimumDistance = other.dragMinimumDistance
+      highPriorityAction = other.highPriorityAction
+      simultaneousActions = other.simultaneousActions
+      highPriorityDragAction = other.highPriorityDragAction
+      highPriorityDragMinimumDistance = other.highPriorityDragMinimumDistance
+      simultaneousDragActions = other.simultaneousDragActions
+      longPressAction = other.longPressAction
+      tapLocationAction = other.tapLocationAction
+      doubleTapLocationAction = other.doubleTapLocationAction
+      doubleTapAction = other.doubleTapAction
+      continuousHoverAction = other.continuousHoverAction
+      keyAction = other.keyAction
+      scrollTarget = other.scrollTarget
+      completeScrollTarget = other.completeScrollTarget
+      scrollAction = other.scrollAction
+      scrollGeometryHandlers = other.scrollGeometryHandlers
+      scrollPhaseHandlers = other.scrollPhaseHandlers
+      geometryChangeHandlers = other.geometryChangeHandlers
+      secondaryAction = other.secondaryAction
+      presentationPoint = other.presentationPoint
+      presentationEdge = other.presentationEdge
+      presentationColorScheme = other.presentationColorScheme
+      dismissPresentation = other.dismissPresentation
+      presentationStyle = other.presentationStyle
+      presentationID = other.presentationID
+      popupPresentationIndex = other.popupPresentationIndex
+      popupPresentationRole = other.popupPresentationRole
+      popupPresentations = other.popupPresentations
+      pressedAction = other.pressedAction
+      semanticBoolAction = other.semanticBoolAction
+      semanticDoubleAction = other.semanticDoubleAction
+      semanticIntAction = other.semanticIntAction
+      semanticIncrementAction = other.semanticIncrementAction
+      semanticDecrementAction = other.semanticDecrementAction
+      semanticBackAction = other.semanticBackAction
+      semanticAlertActions = other.semanticAlertActions
+      tabItemTitle = other.tabItemTitle
+      tabItemIcon = other.tabItemIcon
+      tabItemContent = other.tabItemContent
+    }
+  }
+  private var extras = Extras.empty
+  private mutating func uniqueExtras() -> Extras {
+    if !isKnownUniquelyReferenced(&extras) { extras = Extras(copying: extras) }
+    return extras
+  }
+  var horizontalGuides: [HorizontalAlignment: (ViewDimensions) -> CGFloat] {
+    get { extras.horizontalGuides }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.horizontalGuides
+    }
+  }
+  var verticalGuides: [VerticalAlignment: (ViewDimensions) -> CGFloat] {
+    get { extras.verticalGuides }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.verticalGuides
+    }
+  }
+  var preferences: [ObjectIdentifier: PreferenceValue] {
+    get { extras.preferences }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.preferences
+    }
+  }
+  var anchorPreferences: [(CGRect, inout [ObjectIdentifier: PreferenceValue]) -> Void] {
+    get { extras.anchorPreferences }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.anchorPreferences
+    }
+  }
+  var preferenceTransforms: [(inout [ObjectIdentifier: PreferenceValue]) -> Void] {
+    get { extras.preferenceTransforms }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.preferenceTransforms
+    }
+  }
+  var preferenceAction: (([ObjectIdentifier: PreferenceValue]) -> Void)? {
+    get { extras.preferenceAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.preferenceAction
+    }
+  }
+  var geometryBuilder: ((CGRect) -> Element)? {
+    get { extras.geometryBuilder }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.geometryBuilder
+    }
+  }
+  var layout: (any _LayoutBridge)? {
+    get { extras.layout }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.layout
+    }
+  }
+  package var hostedViewAdapter: (any AnyObject)? {
+    get { extras.hostedViewAdapter }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.hostedViewAdapter
+    }
+  }
+  package var hostedViewMeasure: ((ProposedViewSize) -> Size)? {
+    get { extras.hostedViewMeasure }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.hostedViewMeasure
+    }
+  }
+  package var hostedViewHitTest: ((Int, CGPoint, EventModifiers) -> Bool)? {
+    get { extras.hostedViewHitTest }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.hostedViewHitTest
+    }
+  }
+  package var hostedViewMouseInput: ((Int, CGPoint, EventModifiers) -> Bool)? {
+    get { extras.hostedViewMouseInput }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.hostedViewMouseInput
+    }
+  }
+  var textAction: ((String) -> Void)? {
+    get { extras.textAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.textAction
+    }
+  }
+  var submitAction: (() -> Void)? {
+    get { extras.submitAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.submitAction
+    }
+  }
+  var dragAction: ((DragGesture.Value, Bool) -> Void)? {
+    get { extras.dragAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.dragAction
+    }
+  }
+  var dragMinimumDistance: Double {
+    get { extras.dragMinimumDistance }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.dragMinimumDistance
+    }
+  }
+  var highPriorityAction: (() -> Void)? {
+    get { extras.highPriorityAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.highPriorityAction
+    }
+  }
+  var simultaneousActions: [() -> Void] {
+    get { extras.simultaneousActions }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.simultaneousActions
+    }
+  }
+  var highPriorityDragAction: ((DragGesture.Value, Bool) -> Void)? {
+    get { extras.highPriorityDragAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.highPriorityDragAction
+    }
+  }
+  var highPriorityDragMinimumDistance: Double {
+    get { extras.highPriorityDragMinimumDistance }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.highPriorityDragMinimumDistance
+    }
+  }
+  var simultaneousDragActions: [(DragGesture.Value, Bool) -> Void] {
+    get { extras.simultaneousDragActions }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.simultaneousDragActions
+    }
+  }
+  var longPressAction: LongPressConfig? {
+    get { extras.longPressAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.longPressAction
+    }
+  }
+  var tapLocationAction: ((CGPoint) -> Void)? {
+    get { extras.tapLocationAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.tapLocationAction
+    }
+  }
+  var doubleTapLocationAction: ((CGPoint) -> Void)? {
+    get { extras.doubleTapLocationAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.doubleTapLocationAction
+    }
+  }
+  var doubleTapAction: (() -> Void)? {
+    get { extras.doubleTapAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.doubleTapAction
+    }
+  }
+  var continuousHoverAction: ((HoverPhase) -> Void)? {
+    get { extras.continuousHoverAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.continuousHoverAction
+    }
+  }
+  var keyAction: ((KeyPress) -> KeyPress.Result)? {
+    get { extras.keyAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.keyAction
+    }
+  }
+  var scrollTarget: ScrollTarget? {
+    get { extras.scrollTarget }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.scrollTarget
+    }
+  }
+  var completeScrollTarget: (() -> Void)? {
+    get { extras.completeScrollTarget }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.completeScrollTarget
+    }
+  }
+  var scrollAction: ((Point) -> Void)? {
+    get { extras.scrollAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.scrollAction
+    }
+  }
+  var scrollGeometryHandlers: [(ScrollGeometry) -> Void] {
+    get { extras.scrollGeometryHandlers }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.scrollGeometryHandlers
+    }
+  }
+  var scrollPhaseHandlers: [(ScrollPhase, ScrollPhase) -> Void] {
+    get { extras.scrollPhaseHandlers }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.scrollPhaseHandlers
+    }
+  }
+  var geometryChangeHandlers: [(GeometryProxy) -> Void] {
+    get { extras.geometryChangeHandlers }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.geometryChangeHandlers
+    }
+  }
+  var secondaryAction: ((CGPoint) -> Void)? {
+    get { extras.secondaryAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.secondaryAction
+    }
+  }
+  var presentationPoint: CGPoint? {
+    get { extras.presentationPoint }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.presentationPoint
+    }
+  }
+  var presentationEdge: Edge? {
+    get { extras.presentationEdge }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.presentationEdge
+    }
+  }
+  var presentationColorScheme: ColorScheme {
+    get { extras.presentationColorScheme }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.presentationColorScheme
+    }
+  }
+  var dismissPresentation: (() -> Void)? {
+    get { extras.dismissPresentation }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.dismissPresentation
+    }
+  }
+  package var presentationStyle: PresentationStyle {
+    get { extras.presentationStyle }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.presentationStyle
+    }
+  }
+  package var presentationID: ObjectIdentifier? {
+    get { extras.presentationID }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.presentationID
+    }
+  }
+  package var popupPresentationIndex: Int? {
+    get { extras.popupPresentationIndex }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.popupPresentationIndex
+    }
+  }
+  package var popupPresentationRole: PopupPresentationRole? {
+    get { extras.popupPresentationRole }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.popupPresentationRole
+    }
+  }
+  package var popupPresentations: [PopupPresentationMetadata] {
+    get { extras.popupPresentations }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.popupPresentations
+    }
+  }
+  var pressedAction: ((Bool) -> Void)? {
+    get { extras.pressedAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.pressedAction
+    }
+  }
+  package var semanticBoolAction: ((Bool) -> Void)? {
+    get { extras.semanticBoolAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.semanticBoolAction
+    }
+  }
+  package var semanticDoubleAction: ((Double, Bool) -> Void)? {
+    get { extras.semanticDoubleAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.semanticDoubleAction
+    }
+  }
+  package var semanticIntAction: ((Int) -> Void)? {
+    get { extras.semanticIntAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.semanticIntAction
+    }
+  }
+  package var semanticIncrementAction: (() -> Void)? {
+    get { extras.semanticIncrementAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.semanticIncrementAction
+    }
+  }
+  package var semanticDecrementAction: (() -> Void)? {
+    get { extras.semanticDecrementAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.semanticDecrementAction
+    }
+  }
+  package var semanticBackAction: (() -> Void)? {
+    get { extras.semanticBackAction }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.semanticBackAction
+    }
+  }
+  package var semanticAlertActions: [() -> Void] {
+    get { extras.semanticAlertActions }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.semanticAlertActions
+    }
+  }
+  package var tabItemTitle: String? {
+    get { extras.tabItemTitle }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.tabItemTitle
+    }
+  }
+  package var tabItemIcon: String? {
+    get { extras.tabItemIcon }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.tabItemIcon
+    }
+  }
+  package var tabItemContent: AnyView? {
+    get { extras.tabItemContent }
+    _modify {
+      let box = uniqueExtras()
+      yield &box.tabItemContent
+    }
+  }
 
   package init(
     id: NodeID = NodeID(rawValue: 0),
@@ -423,7 +887,7 @@ public struct Element {
   ) {
     self.id = id
     self.kind = kind
-    self.props = props
+    self.properties = Properties(props)
     self.children = children
     self.frame = frame
     self.explicitID = explicitID
@@ -512,6 +976,36 @@ enum ElementKey: Hashable {
   case explicit(AnyHashable)
   case structural(ElementKind, Int)
 }
+/// Finds the previous counterpart of `children[index]`. Children of a lazy
+/// stack shift positions when its window moves, so an identified child that
+/// no longer sits at its old index is looked up by its explicit ID instead.
+struct PreviousChildren {
+  private let previous: Element?
+  private var byID: [AnyHashable: Int]?
+
+  init(_ previous: Element?) { self.previous = previous }
+
+  mutating func match(_ child: Element, at index: Int) -> Element? {
+    guard let previous else { return nil }
+    let children = previous.children
+    if index < children.count, children[index].explicitID == child.explicitID {
+      return children[index]
+    }
+    guard let id = child.explicitID else {
+      return index < children.count ? children[index] : nil
+    }
+    if byID == nil {
+      var map: [AnyHashable: Int] = [:]
+      map.reserveCapacity(children.count)
+      for (i, old) in children.enumerated() {
+        if let oldID = old.explicitID, map[oldID] == nil { map[oldID] = i }
+      }
+      byID = map
+    }
+    return byID?[id].map { children[$0] }
+  }
+}
+
 func normalize(_ element: Element, previous: Element? = nil) -> Element {
   if let previous, element.scrollTarget == nil, element.evaluationID != 0,
     element.evaluationID == previous.evaluationID,
@@ -521,10 +1015,10 @@ func normalize(_ element: Element, previous: Element? = nil) -> Element {
     return previous
   }
   var result = element
+  var counterparts = PreviousChildren(previous)
   if element.kind == .layer {
     result.children = element.children.enumerated().map { index, child in
-      normalize(
-        child, previous: previous.flatMap { index < $0.children.count ? $0.children[index] : nil })
+      normalize(child, previous: counterparts.match(child, at: index))
     }
     return result
   }
@@ -532,8 +1026,7 @@ func normalize(_ element: Element, previous: Element? = nil) -> Element {
   var children: [Element] = []
   children.reserveCapacity(element.children.count)
   for (index, child) in element.children.enumerated() {
-    let normalized = normalize(
-      child, previous: previous.flatMap { index < $0.children.count ? $0.children[index] : nil })
+    let normalized = normalize(child, previous: counterparts.match(child, at: index))
     switch normalized.kind {
     case .fragment:
       for var nested in normalized.children {
@@ -701,7 +1194,9 @@ func resolveEnvironment(
     }
   }
 
+  var counterparts = PreviousChildren(previous)
   for index in element.children.indices {
+    let counterpart = counterparts.match(element.children[index], at: index)
     resolveEnvironment(
       &element.children[index],
       colorScheme: effectiveScheme,
@@ -712,7 +1207,7 @@ func resolveEnvironment(
       inheritedVisible: element.props.visible,
       inheritedLineLimit: element.props.lineLimit,
       inheritedLineSpacing: element.props.lineSpacing,
-      previous: previous.flatMap { index < $0.children.count ? $0.children[index] : nil }
+      previous: counterpart
     )
   }
 }

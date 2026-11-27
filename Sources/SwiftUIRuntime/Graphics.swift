@@ -656,26 +656,8 @@ public struct Image: View, _PrimitiveView {
       p.imagePath = "sf://" + name
       p.font = EnvironmentValues.current.font
     } else {
-      #if os(WASI) || CROSS_SWIFTUI_HARMONY
-        if let resolved = Self.assetPathResolver?(name, bundle) {
-          p.imagePath = resolved
-        } else {
-          p.imagePath = name
-        }
-      #else
-        if FileManager.default.fileExists(atPath: name) {
-          p.imagePath = name
-        } else if let resolved = Self.assetPathResolver?(name, bundle) {
-          p.imagePath = resolved
-        } else {
-          let resources = bundle ?? .main
-          p.imagePath =
-            resources.url(forResource: name, withExtension: "svg")?.path
-            ?? resources.url(forResource: name, withExtension: "pdf")?.path
-            ?? resources.url(forResource: name, withExtension: "png")?.path
-            ?? name
-        }
-      #endif
+      p.imagePath = EvaluationGraph.active?.imagePath(named: name, in: bundle, resolve: resolvedPath)
+        ?? resolvedPath()
     }
     if let naturalSize {
       p.intrinsicImageWidth = naturalSize.width
@@ -689,6 +671,20 @@ public struct Image: View, _PrimitiveView {
     p.fillWidth = flexible
     p.fillHeight = flexible
     return Element(kind: .image, props: p)
+  }
+
+  private func resolvedPath() -> String {
+    #if os(WASI) || CROSS_SWIFTUI_HARMONY
+      return Self.assetPathResolver?(name, bundle) ?? name
+    #else
+      if FileManager.default.fileExists(atPath: name) { return name }
+      if let resolved = Self.assetPathResolver?(name, bundle) { return resolved }
+      let resources = bundle ?? .main
+      return resources.url(forResource: name, withExtension: "svg")?.path
+        ?? resources.url(forResource: name, withExtension: "pdf")?.path
+        ?? resources.url(forResource: name, withExtension: "png")?.path
+        ?? name
+    #endif
   }
 }
 public struct GraphicsContext {

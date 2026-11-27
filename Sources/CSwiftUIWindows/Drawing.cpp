@@ -8,6 +8,8 @@
 #include <d2d1.h>
 #include <dwmapi.h>
 #include <dwrite.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 #include <windowsx.h>
 using std::max;
 using std::min;
@@ -34,6 +36,7 @@ std::shared_ptr<Bitmap> LookupMemoryImage(const std::wstring &key) {
 }
 constexpr UINT_PTR subclass_id = 0x53554950;
 constexpr UINT deferred_input = WM_APP + 581;
+constexpr UINT wheel_update = WM_APP + 582;
 struct AlphaMask {
   std::vector<uint32_t> pixels;
   Bitmap bitmap;
@@ -46,6 +49,22 @@ struct AlphaMask {
   }
 };
 using MaskHandle = std::shared_ptr<AlphaMask>;
+// A DirectWrite label paints its measured bitmap, even when its assigned
+// frame is narrower than the string. Coordinates are relative to the same
+// left/vertical-center anchor used by DrawLabelPixels.
+struct TextInk {
+  UINT dpi = 0;
+  float center = 0, extra_center = 0, width = 0, height = 0;
+
+  float top(const RectF &frame) const {
+    return frame.Y + frame.Height * 0.5f - center - extra_center - 4.f;
+  }
+  RectF bounds(const RectF &frame) const {
+    RectF ink(frame.X - 4.f, top(frame), width, height);
+    ink.Inflate(1.f, 1.f); // Device placement rounds to an integral pixel.
+    return ink;
+  }
+};
 struct Command {
   int kind = 0; // 0=shape, 1=text, 2=clip, 3=restore, 4=path, 5=clipPath, 6=transform, 7=gradient, 8=image, 9=translate, 10=mask, 11=layerBegin
   RectF rect;
@@ -59,6 +78,8 @@ struct Command {
   float grad_p0 = 0, grad_p1 = 0;
   PointF start, end;
   MaskHandle mask;
+  std::shared_ptr<Bitmap> image;
+  TextInk text_ink;
   size_t clip_end = 0;
   bool operator==(const Command &c) const {
     return kind == c.kind && rect.Equals(c.rect) && radius == c.radius &&
@@ -69,7 +90,7 @@ struct Command {
            locations == c.locations && gradient_kind == c.gradient_kind &&
            grad_p0 == c.grad_p0 && grad_p1 == c.grad_p1 &&
            start.X == c.start.X && start.Y == c.start.Y && end.X == c.end.X &&
-           end.Y == c.end.Y && mask == c.mask;
+           end.Y == c.end.Y && mask == c.mask && image == c.image;
   }
 };
 struct ButtonHook {
@@ -270,7 +291,7 @@ struct ScrollDrawing {
 struct ScrollCopy {
   RECT destination{};
   int dx = 0, dy = 0;
-  RECT repaint{};
+  std::vector<RECT> repaint;
 };
 struct Surface {
   HWND host;
@@ -297,13 +318,16 @@ struct Surface {
   std::unordered_set<HWND> custom_views;
   uint32_t background_argb = 0xFFFFFFFFu;
   std::unordered_map<FontKey, std::unique_ptr<TextFont>, FontKeyHash> fonts;
-  std::unordered_map<std::wstring, std::unique_ptr<Bitmap>> images;
+  std::unordered_map<std::wstring, std::shared_ptr<Bitmap>> images;
   std::unordered_map<std::string, std::wstring> wide_families;
   std::unordered_map<HWND, native_view_t> native_views;
   std::unordered_map<HWND, HWND> native_parents;
   bool updating_views = false;
   bool native_state_changed = true;
+  bool wheel_update_pending = false;
+  double previous_wheel_update_ms = 0, refresh_checked_ms = 0, refresh_ms = 16.667;
   std::vector<ScrollDrawing> scrolls, pending_scrolls;
+  UINT publication_dpi = 96;
   // The immutable frame actually present in the DIB while later publications
   // are waiting for WM_PAINT. Never copy pixels relative to an unpainted frame.
   std::vector<Command> painted_commands;
@@ -912,7 +936,146 @@ struct DWriteCenterKeyHash {
     return h;
   }
 };
+// DirectWrite rasterizes a label in local coordinates before the surface
+// positions it. Retain small, untransformed labels at their actual DPI so
+// scrolling and resizing can blit the same premultiplied pixels.
+struct LabelRaster {
+  std::wstring text, family;
+  float size, weight, spacing, center, extra_center;
+  UINT dpi, width, height;
+  uint32_t fill;
+  std::vector<uint32_t> pixels;
+  Bitmap bitmap;
+
+  LabelRaster(const Command &c, UINT dpi, UINT width, UINT height,
+              float center, float extra_center, const Framebuffer &source)
+      : text(c.text), family(c.family), size(c.size), weight(c.weight),
+        spacing(c.line_spacing), center(center), extra_center(extra_center),
+        dpi(dpi), width(width), height(height), fill(c.fill),
+        pixels(size_t(width) * height),
+        bitmap(INT(width), INT(height), INT(width * 4), PixelFormat32bppPARGB,
+               reinterpret_cast<BYTE *>(pixels.data())) {
+    for (UINT y = 0; y < height; ++y)
+      std::copy_n(source.pixels + size_t(y) * source.stride_pixels, width,
+                  pixels.data() + size_t(y) * width);
+  }
+  bool matches(const Command &c, UINT target_dpi) const {
+    return dpi == target_dpi && size == c.size && weight == c.weight &&
+           spacing == c.line_spacing && fill == c.fill &&
+           text == c.text && family == c.family;
+  }
+};
+Point LabelPixelOrigin(const Matrix &matrix, float x, float y) {
+  PointF point(x, y);
+  matrix.TransformPoints(&point, 1);
+  return {int(std::lround(point.X)), int(std::lround(point.Y))};
+}
+void DrawLabelPixels(Graphics &g, Bitmap *bitmap, UINT width, UINT height,
+                     float x, float y) {
+  Matrix matrix;
+  g.GetTransform(&matrix);
+  const auto origin = LabelPixelOrigin(matrix, x, y);
+  const auto prev_offset = g.GetPixelOffsetMode();
+  g.ResetTransform();
+  g.SetPixelOffsetMode(PixelOffsetModeNone);
+  g.DrawImage(bitmap, Rect(origin.X, origin.Y, int(width), int(height)),
+              0, 0, int(width), int(height), UnitPixel);
+  g.SetPixelOffsetMode(prev_offset);
+  g.SetTransform(&matrix);
+}
+// Labels are drawn into a premultiplied software bitmap before GDI+ places
+// them on the surface. Keeping that target in memory avoids binding a GDI
+// device context for every new string or foreground color.
+struct LabelBitmapTarget {
+  Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+  Microsoft::WRL::ComPtr<IWICBitmap> bitmap;
+  Microsoft::WRL::ComPtr<ID2D1RenderTarget> target;
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+  UINT width = 0, height = 0;
+
+  bool prepare(ID2D1Factory *d2d, UINT w, UINT h) {
+    const UINT wantedWidth = max(256u, w), wantedHeight = max(64u, h);
+    // Limit the extra persistent surface to one MiB. Larger labels still use
+    // the existing DC target and its full bitmap budget.
+    if (size_t(wantedWidth) * wantedHeight > 256 * 1024) return false;
+    if (target && width >= w && height >= h) return true;
+    if (!factory && FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+        CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf())))) return false;
+
+    Microsoft::WRL::ComPtr<IWICBitmap> nextBitmap;
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> nextTarget;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> nextBrush;
+    const auto props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.f, 96.f);
+    if (FAILED(factory->CreateBitmap(wantedWidth, wantedHeight, GUID_WICPixelFormat32bppPBGRA,
+                                     WICBitmapCacheOnLoad, nextBitmap.GetAddressOf())) ||
+        FAILED(d2d->CreateWicBitmapRenderTarget(nextBitmap.Get(), &props, nextTarget.GetAddressOf())) ||
+        FAILED(nextTarget->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), nextBrush.GetAddressOf())))
+      return false;
+    nextTarget->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    brush = std::move(nextBrush);
+    target = std::move(nextTarget);
+    bitmap = std::move(nextBitmap);
+    width = wantedWidth;
+    height = wantedHeight;
+    return true;
+  }
+
+  void discard() {
+    brush.Reset();
+    target.Reset();
+    bitmap.Reset();
+    width = height = 0;
+  }
+};
 struct DirectWriteEngine {
+  // At most 128 entries of 128 KiB each. Misses replace one slot without
+  // invalidating other windows' labels or growing during a long list scroll.
+  static constexpr size_t labelCount = 128;
+  std::unique_ptr<LabelRaster> labels[labelCount];
+  struct InkEntry {
+    std::wstring text, family;
+    float size = 0, weight = 0, spacing = 0;
+    TextInk ink;
+    bool matches(const Command &c, UINT dpi) const {
+      return ink.dpi == dpi && size == c.size && weight == c.weight &&
+             spacing == c.line_spacing && text == c.text && family == c.family;
+    }
+  };
+  // Multiple published labels may share a hash slot. Keep every observed
+  // typography until its place in this bounded FIFO expires.
+  static constexpr size_t inkCapacity = 512;
+  InkEntry inkEntries[inkCapacity];
+  std::unordered_multimap<size_t, size_t> inkIndex;
+  size_t nextInkEntry = 0;
+  static size_t inkHash(const std::wstring &text, float size) {
+    return std::hash<std::wstring>{}(text) ^ (FloatBits(size) >> 15);
+  }
+  TextInk knownInk(const Command &c, UINT dpi) const {
+    if (c.text.size() > 1024) return {};
+    const auto range = inkIndex.equal_range(inkHash(c.text, c.size));
+    for (auto it = range.first; it != range.second; ++it) {
+      const auto &entry = inkEntries[it->second];
+      if (entry.matches(c, dpi)) return entry.ink;
+    }
+    return {};
+  }
+  void rememberInk(Command &c, TextInk ink) {
+    c.text_ink = ink;
+    if (c.text.size() > 1024 || knownInk(c, ink.dpi).dpi) return;
+    const size_t index = nextInkEntry;
+    nextInkEntry = (nextInkEntry + 1) % inkCapacity;
+    auto &entry = inkEntries[index];
+    if (entry.ink.dpi) {
+      const auto range = inkIndex.equal_range(inkHash(entry.text, entry.size));
+      for (auto it = range.first; it != range.second; ++it)
+        if (it->second == index) { inkIndex.erase(it); break; }
+    }
+    entry = {c.text, c.family, c.size, c.weight, c.line_spacing, ink};
+    inkIndex.emplace(inkHash(c.text, c.size), index);
+  }
   bool attempted = false;
   bool ready = false;
   IDWriteFactory *dwrite = nullptr;
@@ -920,6 +1083,7 @@ struct DirectWriteEngine {
   ID2D1DCRenderTarget *rt = nullptr;
   ID2D1SolidColorBrush *brush = nullptr;
   std::unique_ptr<Framebuffer> scratch;
+  LabelBitmapTarget labelTarget;
   std::unordered_map<DWriteFormatKey, IDWriteTextFormat *, DWriteFormatKeyHash> formats;
   std::unordered_map<DWriteCenterKey, float, DWriteCenterKeyHash> optical_centers;
 
@@ -1048,8 +1212,25 @@ struct DirectWriteEngine {
     return result;
   }
 
-  bool Draw(Graphics &g, UINT dpi, const Command &c, bool transformed) {
+  bool Draw(Graphics &g, UINT dpi, Command &c, bool transformed) {
     if (c.text.empty()) return true;
+    const float pad = 4.f;
+    auto slot = size_t(0);
+    const bool cacheable = !transformed && c.text.size() <= 1024;
+    if (cacheable) {
+      slot = (std::hash<std::wstring>{}(c.text) ^ c.fill ^
+              (FloatBits(c.weight) >> 16) ^ (FloatBits(c.size) >> 15)) % labelCount;
+      const auto &cached = labels[slot];
+      if (cached && cached->matches(c, dpi)) {
+        const float scale = max(1.f, dpi / 96.f);
+        rememberInk(c, {dpi, cached->center, cached->extra_center,
+                        cached->width / scale, cached->height / scale});
+        DrawLabelPixels(g, &cached->bitmap, cached->width, cached->height,
+                        c.rect.X - pad,
+                        c.rect.Y + c.rect.Height * 0.5f - cached->center - cached->extra_center - pad);
+        return true;
+      }
+    }
     auto *fmt = Format(c.family, c.size, c.weight);
     if (!fmt) return false;
     const float scale = max(1.f, (dpi ? dpi : 96u) / 96.f);
@@ -1091,7 +1272,6 @@ struct DirectWriteEngine {
     }
 
     const float center = OpticalCenter(fmt, c.family, c.size, c.weight, dpi, base_line_h);
-    const float pad = 4.f;
     const float step = base_line_h + c.line_spacing;
     const float total_h = lines.size() <= 1
         ? base_line_h
@@ -1110,56 +1290,59 @@ struct DirectWriteEngine {
     }
     scratch->width = px_w;
     scratch->height = px_h;
-    const size_t stride = size_t(scratch->stride_pixels);
-    for (UINT y = 0; y < px_h; ++y) {
-      std::fill_n(scratch->pixels + size_t(y) * stride, px_w, 0u);
-    }
-
-    RECT bind_rect{0, 0, LONG(px_w), LONG(px_h)};
-    if (FAILED(rt->BindDC(scratch->dc, &bind_rect))) {
-      for (auto &li : lines) if (li.layout) li.layout->Release();
-      return false;
-    }
-    const float a = ((c.fill >> 24) & 255u) / 255.f;
-    const float r = ((c.fill >> 16) & 255u) / 255.f;
-    const float gr = ((c.fill >> 8) & 255u) / 255.f;
-    const float b = (c.fill & 255u) / 255.f;
-    brush->SetColor(D2D1::ColorF(r, gr, b, a));
-
-    rt->BeginDraw();
-    rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
-    float cy = pad;
-    const auto draw_opts = static_cast<D2D1_DRAW_TEXT_OPTIONS>(0x00000004); // ENABLE_COLOR_FONT
-    for (auto &li : lines) {
-      if (li.layout) {
-        rt->DrawTextLayout(D2D1::Point2F(pad, cy), li.layout, brush, draw_opts);
-        li.layout->Release();
+    const UINT stride = scratch->stride_pixels;
+    const auto color = D2D1::ColorF(
+        ((c.fill >> 16) & 255u) / 255.f, ((c.fill >> 8) & 255u) / 255.f,
+        (c.fill & 255u) / 255.f, ((c.fill >> 24) & 255u) / 255.f);
+    auto drawLines = [&](ID2D1RenderTarget *target, ID2D1SolidColorBrush *paint, bool inMemory) {
+      paint->SetColor(color);
+      target->BeginDraw();
+      if (inMemory) {
+        target->SetTransform(D2D1::Matrix3x2F::Identity());
+        target->PushAxisAlignedClip(D2D1::RectF(0, 0, float(px_w), float(px_h)),
+                                    D2D1_ANTIALIAS_MODE_ALIASED);
+        target->Clear(D2D1::ColorF(0, 0, 0, 0));
       }
-      cy += step;
+      target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
+      float cy = pad;
+      const auto opts = static_cast<D2D1_DRAW_TEXT_OPTIONS>(4); // ENABLE_COLOR_FONT
+      for (const auto &li : lines) {
+        if (li.layout) target->DrawTextLayout(D2D1::Point2F(pad, cy), li.layout, paint, opts);
+        cy += step;
+      }
+      if (inMemory) target->PopAxisAlignedClip();
+      return target->EndDraw();
+    };
+
+    bool drawn = false;
+    if (labelTarget.prepare(d2d, px_w, px_h)) {
+      WICRect area{0, 0, INT(px_w), INT(px_h)};
+      drawn = SUCCEEDED(drawLines(labelTarget.target.Get(), labelTarget.brush.Get(), true)) &&
+              SUCCEEDED(labelTarget.bitmap->CopyPixels(&area, stride * 4, stride * px_h * 4,
+                        reinterpret_cast<BYTE *>(scratch->pixels)));
+      if (!drawn) labelTarget.discard();
     }
-    const HRESULT end_hr = rt->EndDraw();
-    if (FAILED(end_hr)) return false;
-    GdiFlush();
+    if (!drawn) {
+      for (UINT y = 0; y < px_h; ++y)
+        std::fill_n(scratch->pixels + size_t(y) * stride, px_w, 0u);
+      RECT area{0, 0, LONG(px_w), LONG(px_h)};
+      drawn = SUCCEEDED(rt->BindDC(scratch->dc, &area)) && SUCCEEDED(drawLines(rt, brush, false));
+      if (drawn) GdiFlush();
+    }
+    for (const auto &li : lines) if (li.layout) li.layout->Release();
+    if (!drawn) return false;
 
     // Optically center cap-to-baseline ink inside c.rect.
     const float draw_x = c.rect.X - pad;
-    const float draw_y = lines.size() <= 1
-        ? (c.rect.Y + c.rect.Height * 0.5f - center - pad)
-        : (c.rect.Y + c.rect.Height * 0.5f - center - step * float(lines.size() - 1) * 0.5f - pad);
+    const float extra_center = step * float(lines.size() - 1) * 0.5f;
+    const float draw_y = c.rect.Y + c.rect.Height * 0.5f - center - extra_center - pad;
+    rememberInk(c, {dpi, center, extra_center, px_w / scale, px_h / scale});
     if (!transformed) {
-      Matrix prev;
-      g.GetTransform(&prev);
-      PointF pt(draw_x, draw_y);
-      prev.TransformPoints(&pt, 1);
-      const int dx = int(std::lround(pt.X));
-      const int dy = int(std::lround(pt.Y));
-      const auto prev_offset = g.GetPixelOffsetMode();
-      g.ResetTransform();
-      g.SetPixelOffsetMode(PixelOffsetModeNone);
-      g.DrawImage(scratch->bitmap.get(), Rect(dx, dy, int(px_w), int(px_h)),
-                  0, 0, int(px_w), int(px_h), UnitPixel);
-      g.SetPixelOffsetMode(prev_offset);
-      g.SetTransform(&prev);
+      DrawLabelPixels(g, scratch->bitmap.get(), px_w, px_h, draw_x, draw_y);
+      if (cacheable && size_t(px_w) * px_h <= 32768) {
+        labels[slot] = std::make_unique<LabelRaster>(c, dpi, px_w, px_h, center,
+                                                     extra_center, *scratch);
+      }
     } else {
       g.DrawImage(scratch->bitmap.get(), RectF(draw_x, draw_y, log_w, log_h),
                   0.f, 0.f, REAL(px_w), REAL(px_h), UnitPixel);
@@ -1429,9 +1612,10 @@ void ApplyBrightnessContrastPARGB(uint32_t *pixels, int w, int h, int stride,
 }
 
 void DrawTextCommand(Surface *s, Graphics &g, SolidBrush &brush,
-                     const Command &c, bool transformed) {
+                     Command &c, bool transformed) {
   if (DWrite().Draw(g, s->buffer_dpi, c, transformed))
     return;
+  c.text_ink = {}; // GDI+ fallback has independent glyph metrics.
   FontKey key{c.family, FloatBits(c.size), c.weight >= 600.f};
   auto found = s->fonts.find(key);
   if (found == s->fonts.end()) {
@@ -1539,6 +1723,30 @@ RectF PathBounds(const std::vector<double> &commands) {
   return RectF(float(left), float(top), float(right - left),
                float(bottom - top));
 }
+// Keep the exact decoded pixels used by each painted command alive across
+// cache eviction and multiple pending publications.
+std::shared_ptr<Bitmap> SurfaceImage(Surface *s, const std::wstring &key,
+                                     bool decode) {
+  if (key.rfind(L"mem://", 0) == 0)
+    return LookupMemoryImage(key);
+  const auto it = s->images.find(key);
+  if (it != s->images.end()) return it->second;
+  if (!decode) return nullptr;
+  if (s->images.size() >= 512)
+    s->images.erase(s->images.begin());
+  std::shared_ptr<Bitmap> decoded;
+  Image src(key.c_str());
+  if (src.GetLastStatus() == Ok && src.GetWidth() > 0 && src.GetHeight() > 0) {
+    const UINT iw = src.GetWidth(), ih = src.GetHeight();
+    decoded = std::make_shared<Bitmap>(INT(iw), INT(ih), PixelFormat32bppPARGB);
+    Graphics imageGraphics(decoded.get());
+    imageGraphics.SetCompositingMode(CompositingModeSourceCopy);
+    imageGraphics.DrawImage(&src, Rect(0, 0, INT(iw), INT(ih)),
+                            0, 0, INT(iw), INT(ih), UnitPixel);
+  }
+  s->images.emplace(key, decoded);
+  return decoded;
+}
 void RenderFrame(Surface *s) {
   RECT client = SurfaceClientRect(s);
   const auto dpi = GetDpiForWindow(s->host);
@@ -1563,7 +1771,7 @@ void RenderFrame(Surface *s) {
   s->buffer_dpi = dpi;
   s->buffer_dirty = false;
   RECT copied{};
-  RECT repaint = s->scroll_copy.repaint;
+  auto repaint = std::move(s->scroll_copy.repaint);
   if (!full) {
     const auto &copy = s->scroll_copy;
     if (!IsRectEmpty(&copy.destination)) {
@@ -1596,33 +1804,33 @@ void RenderFrame(Surface *s) {
     }
   }
   Graphics g(s->buffer->bitmap.get());
-  RECT dirty_px = s->damage;
   std::vector<RECT> active_damage_rects;
   if (!full) {
     Region dirty;
     dirty.MakeEmpty();
-    if (!s->damage_rects.empty()) {
-      for (const auto &dr : s->damage_rects) {
-        if (!IsRectEmpty(&dr)) {
-          dirty.Union(Rect(dr.left, dr.top, dr.right - dr.left, dr.bottom - dr.top));
-          active_damage_rects.push_back(dr);
-        }
+    auto addDamage = [&](const RECT &r) {
+      if (IsRectEmpty(&r)) return;
+      dirty.Union(Rect(r.left, r.top, r.right - r.left, r.bottom - r.top));
+      active_damage_rects.push_back(r);
+    };
+    auto addUncopied = [&](const RECT &r) {
+      RECT overlap;
+      if (!IntersectRect(&overlap, &r, &copied)) {
+        addDamage(r);
+        return;
       }
-    } else if (!IsRectEmpty(&s->damage)) {
-      dirty.Union(Rect(s->damage.left, s->damage.top,
-                       s->damage.right - s->damage.left,
-                       s->damage.bottom - s->damage.top));
-      active_damage_rects.push_back(s->damage);
-    }
-    if (!IsRectEmpty(&copied))
-      dirty.Exclude(Rect(copied.left, copied.top, copied.right - copied.left,
-                         copied.bottom - copied.top));
-    if (!IsRectEmpty(&repaint)) {
-      dirty.Union(Rect(repaint.left, repaint.top, repaint.right - repaint.left,
-                       repaint.bottom - repaint.top));
-      UnionRect(&dirty_px, &dirty_px, &repaint);
-      active_damage_rects.push_back(repaint);
-    }
+      // Use these same exposed strips for both GDI+ and command culling.
+      addDamage({r.left, r.top, r.right, overlap.top});
+      addDamage({r.left, overlap.bottom, r.right, r.bottom});
+      addDamage({r.left, overlap.top, overlap.left, overlap.bottom});
+      addDamage({overlap.right, overlap.top, r.right, overlap.bottom});
+    };
+    if (s->damage_rects.empty())
+      addUncopied(s->damage);
+    else
+      for (const auto &r : s->damage_rects)
+        addUncopied(r);
+    for (const auto &r : repaint) addDamage(r);
     g.SetClip(&dirty);
   }
   SolidBrush solid_brush(Color(s->background_argb));
@@ -1679,7 +1887,7 @@ void RenderFrame(Surface *s) {
       return target_g.IsVisible(bounds) != FALSE;
     };
     for (size_t i = range_begin; i < range_end; ++i) {
-      const auto &c = s->commands[i];
+      auto &c = s->commands[i];
       if ((c.kind == 2 || c.kind == 5) && c.clip_end > i && c.clip_end < range_end) {
         auto bounds = c.rect;
         bounds.Inflate(1, 1);
@@ -1838,29 +2046,8 @@ void RenderFrame(Surface *s) {
       } else if (c.kind == 8) {
         if (!IsRectVisible(c.rect))
           continue;
-        if (c.text.rfind(L"mem://", 0) == 0) {
-          if (auto mem_bmp = LookupMemoryImage(c.text))
-            target_g.DrawImage(mem_bmp.get(), c.rect);
-          continue;
-        }
-        auto it = s->images.find(c.text);
-        if (it == s->images.end()) {
-          if (s->images.size() >= 512)
-            s->images.erase(s->images.begin());
-          std::unique_ptr<Bitmap> decoded;
-          Image src(c.text.c_str());
-          if (src.GetLastStatus() == Ok && src.GetWidth() > 0 && src.GetHeight() > 0) {
-            const UINT iw = src.GetWidth(), ih = src.GetHeight();
-            decoded = std::make_unique<Bitmap>(INT(iw), INT(ih), PixelFormat32bppPARGB);
-            Graphics img_g(decoded.get());
-            img_g.SetCompositingMode(CompositingModeSourceCopy);
-            img_g.DrawImage(&src, Rect(0, 0, INT(iw), INT(ih)),
-                            0, 0, INT(iw), INT(ih), UnitPixel);
-          }
-          it = s->images.emplace(c.text, std::move(decoded)).first;
-        }
-        if (it->second)
-          target_g.DrawImage(it->second.get(), c.rect);
+        if (!c.image) c.image = SurfaceImage(s, c.text, true);
+        if (c.image) target_g.DrawImage(c.image.get(), c.rect);
       } else if (c.kind == 2) {
         clips.push_back(target_g.Save());
         clip_transforms.push_back(false);
@@ -1871,11 +2058,11 @@ void RenderFrame(Surface *s) {
           RoundedPath(path, c.rect, c.radius);
           target_g.SetClip(&path, CombineModeIntersect);
         }
-      } else if (c.rect.Width > 0 && c.rect.Height > 0 && IsRectVisible(c.rect)) {
-        if (c.kind == 1) {
+      } else if (c.kind == 1) {
+        if (c.rect.Width > 0 && c.rect.Height > 0 &&
+            (c.text_ink.dpi != dpi || IsRectVisible(c.text_ink.bounds(c.rect))))
           DrawTextCommand(s, target_g, local_brush, c, transform_depth > 0);
-          continue;
-        }
+      } else if (c.rect.Width > 0 && c.rect.Height > 0 && IsRectVisible(c.rect)) {
         const bool plain_rect = c.radius < 0.01f;
         if (c.fill >> 24) {
           local_brush.SetColor(Color(c.fill));
@@ -2552,6 +2739,9 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
   if (msg == WM_KEYDOWN && wp == VK_TAB) {
     if (Input(s, hwnd, id, msg, wp, lp))
       return 0;
+    auto current = s->edits.find(hwnd);
+    if (current == s->edits.end() || current->second.id != id)
+      return 0;
     sui_surface_focus_next(s, hwnd, (Modifiers() & 1) != 0);
     return 0;
   }
@@ -2583,14 +2773,17 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
       }
     }
   }
-  if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_MOUSEWHEEL) &&
-      Input(s, hwnd, id, msg, wp, lp)) {
-    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_RETURN) {
-      auto cur = s->edits.find(hwnd);
-      if (cur != s->edits.end())
-        cur->second.suppress_return_char = true;
+  if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_MOUSEWHEEL) {
+    const bool handled = Input(s, hwnd, id, msg, wp, lp);
+    // A synchronous Swift update can remove or replace this native peer.
+    found = s->edits.find(hwnd);
+    if (found == s->edits.end() || found->second.id != id)
+      return 0;
+    if (handled) {
+      if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_RETURN)
+        found->second.suppress_return_char = true;
+      return 0;
     }
-    return 0;
   }
   if (msg == WM_CHAR) {
     if (wp == 0x1B)
@@ -2695,6 +2888,14 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
     if (hwnd == s->host && s->input)
       s->input(s->context, 0, 12, 0, 0, 0, 0);
     return result;
+  }
+  if (msg == wheel_update) {
+    s->wheel_update_pending = false;
+    s->previous_wheel_update_ms = ClockMilliseconds();
+    if (s->input && s->input(s->context, 0, 13, 0, 0, 0, 0) &&
+        !s->defer_commit && IsWindowVisible(s->host))
+      RedrawWindow(s->host, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+    return 0;
   }
   if (msg == deferred_input) {
     if (s->input)
@@ -2813,10 +3014,14 @@ LRESULT CALLBACK ButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
     break;
   }
   const int64_t id = found->second.id;
-  if ((msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL || msg == WM_RBUTTONDOWN ||
-       msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) &&
-      Input(s, hwnd, id, msg, wp, lp))
-    return 0;
+  if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL || msg == WM_RBUTTONDOWN ||
+      msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
+    if (Input(s, hwnd, id, msg, wp, lp))
+      return 0;
+    found = s->buttons.find(hwnd);
+    if (found == s->buttons.end() || found->second.id != id)
+      return 0;
+  }
   if (found->second.custom_draw &&
       (msg == WM_PAINT || msg == WM_PRINTCLIENT || msg == WM_ERASEBKGND))
     return Paint(s, hwnd, msg, wp);
@@ -2854,6 +3059,51 @@ Command Box(int kind, double x, double y, double w, double h, double radius) {
   c.rect = RectF(float(x), float(y), float(w), float(h));
   c.radius = float(std::isfinite(radius) ? radius : min(w, h) / 2);
   return c;
+}
+// Keep the longest subsequence already in paint order. When one new row is
+// attached at the top of its parent, move that row instead of moving every
+// existing native control in front of it.
+void ArrangeSiblings(HWND parent, const std::vector<HWND> &desired) {
+  const size_t count = desired.size();
+  HWND first = GetTopWindow(parent);
+  size_t prefix = 0;
+  while (prefix < count && first == desired[prefix]) {
+    ++prefix;
+    first = GetWindow(first, GW_HWNDNEXT);
+  }
+  if (prefix == count) return;
+
+  std::unordered_map<HWND, size_t> indices;
+  for (size_t i = prefix; i < count; ++i)
+    indices.emplace(desired[i], i);
+  std::vector<size_t> tails, predecessor(count, count);
+  std::vector<bool> keep(count, false);
+  if (indices.size() == count - prefix) {
+    // Unmanaged native siblings retain their relative order behind all
+    // managed controls. No managed window below the first such sibling
+    // can stay in place.
+    for (HWND w = first; w; w = GetWindow(w, GW_HWNDNEXT)) {
+      const auto found = indices.find(w);
+      if (found == indices.end()) break;
+      const size_t index = found->second;
+      const auto it = std::lower_bound(tails.begin(), tails.end(), index);
+      if (it != tails.begin()) predecessor[index] = *(it - 1);
+      if (it == tails.end()) tails.push_back(index);
+      else *it = index;
+    }
+    if (!tails.empty())
+      for (size_t i = tails.back(); i != count; i = predecessor[i])
+        keep[i] = true;
+  }
+  HWND above = prefix ? desired[prefix - 1] : nullptr;
+  for (size_t i = prefix; i < count; ++i) {
+    const auto hwnd = desired[i];
+    if (!keep[i] && GetWindow(hwnd, GW_HWNDPREV) != above) {
+      SetWindowPos(hwnd, above ? above : HWND_TOP, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
+    }
+    above = hwnd;
+  }
 }
 void OrderControl(Surface *s, HWND hwnd) {
   if (!s->controls_updated)
@@ -2930,7 +3180,11 @@ void ApplyRegion(HWND hwnd, HRGN region) {
   if (equal || !SetWindowRgn(hwnd, region, FALSE))
     DeleteObject(region);
 }
+bool UnknownTextInk(const Command &c) {
+  return c.kind == 1 && !c.text.empty() && c.text_ink.dpi == 0;
+}
 RectF InkBounds(const Command &c) {
+  if (c.kind == 1 && c.text_ink.dpi) return c.text_ink.bounds(c.rect);
   auto bounds = c.rect;
   if (c.kind == 4)
     bounds.Inflate(c.stroke_width / 2, c.stroke_width / 2);
@@ -2950,21 +3204,24 @@ bool Contains(RectF outer, RectF inner) {
 }
 bool Near(double a, double b) { return std::abs(a - b) < 0.0001; }
 bool Translates(const Command &a, const Command &b, double dx, double dy,
-                bool allow_color_change = false) {
-  if (a.kind != b.kind || !Near(a.rect.X + dx, b.rect.X) ||
-      !Near(a.rect.Y + dy, b.rect.Y) || !Near(a.rect.Width, b.rect.Width) ||
-      !Near(a.rect.Height, b.rect.Height) || a.radius != b.radius ||
+                bool allow_color_change = false, bool exact = false) {
+  // A local subpixel epsilon can become multiple device pixels under a
+  // scale. Require exact relative coordinates inside every affine group.
+  auto equal = [exact](double x, double y) { return exact ? x == y : Near(x, y); };
+  if (a.kind != b.kind || !equal(a.rect.X + dx, b.rect.X) ||
+      !equal(a.rect.Y + dy, b.rect.Y) || !equal(a.rect.Width, b.rect.Width) ||
+      !equal(a.rect.Height, b.rect.Height) || a.radius != b.radius ||
       a.stroke_width != b.stroke_width || a.size != b.size ||
       a.weight != b.weight || a.line_spacing != b.line_spacing ||
       (!allow_color_change && (a.fill != b.fill || a.stroke != b.stroke)) ||
       a.text != b.text || a.family != b.family || a.colors != b.colors ||
       a.locations != b.locations || a.gradient_kind != b.gradient_kind ||
       a.grad_p0 != b.grad_p0 || a.grad_p1 != b.grad_p1 ||
-      a.path.size() != b.path.size() || a.mask != b.mask)
+      a.path.size() != b.path.size() || a.mask != b.mask || a.image != b.image)
     return false;
   if (a.kind == 7 &&
-      (!Near(a.start.X + dx, b.start.X) || !Near(a.start.Y + dy, b.start.Y) ||
-       !Near(a.end.X + dx, b.end.X) || !Near(a.end.Y + dy, b.end.Y)))
+      (!equal(a.start.X + dx, b.start.X) || !equal(a.start.Y + dy, b.start.Y) ||
+       !equal(a.end.X + dx, b.end.X) || !equal(a.end.Y + dy, b.end.Y)))
     return false;
   for (size_t i = 0; i < a.path.size();) {
     if (a.path[i] != b.path[i])
@@ -2974,25 +3231,88 @@ bool Translates(const Command &a, const Command &b, double dx, double dy,
     if (i + count > a.path.size())
       return false;
     for (const size_t end = i + count; i < end; i += 2)
-      if (!Near(a.path[i] + dx, b.path[i]) ||
-          !Near(a.path[i + 1] + dy, b.path[i + 1]))
+      if (!equal(a.path[i] + dx, b.path[i]) ||
+          !equal(a.path[i + 1] + dy, b.path[i + 1]))
         return false;
   }
   return true;
+}
+// Compare an entire transformed or filtered group. Its descendants can
+// contribute pixels beyond their individual bounds in surface coordinates.
+bool GroupTranslates(const std::vector<Command> &old, size_t a,
+                     const std::vector<Command> &next, size_t b,
+                     double dx, double dy) {
+  const auto &left = old[a], &right = next[b];
+  if (left.kind != right.kind || left.clip_end <= a || right.clip_end <= b ||
+      left.clip_end - a != right.clip_end - b)
+    return false;
+  if (left.kind == 9) {
+    // Local coordinates need only make up the change not already carried
+    // by the translation itself (including groups drawn at a fixed origin).
+    dx -= right.rect.X - left.rect.X;
+    dy -= right.rect.Y - left.rect.Y;
+  } else if (!Translates(left, right, dx, dy, false, true)) {
+    return false;
+  }
+  for (size_t i = a + 1, j = b + 1; i < left.clip_end; ++i, ++j) {
+    const auto &x = old[i], &y = next[j];
+    if (x.kind != y.kind || (x.kind == 8 && !x.image)) return false;
+    if (x.kind == 6 || x.kind == 9 || x.kind == 11) {
+      if (!GroupTranslates(old, i, next, j, dx, dy)) return false;
+      i = x.clip_end;
+      j = y.clip_end;
+    } else if (x.kind != 3 && !Translates(x, y, dx, dy, false, true)) {
+      return false;
+    }
+  }
+  return true;
+}
+void AddDamageRect(std::vector<RECT> &rects, const RECT &r) {
+  if (IsRectEmpty(&r))
+    return;
+  for (auto &existing : rects) {
+    RECT expanded{existing.left - 8, existing.top - 8, existing.right + 8,
+                  existing.bottom + 8};
+    RECT overlap{};
+    if (IntersectRect(&overlap, &expanded, &r)) {
+      UnionRect(&existing, &existing, &r);
+      return;
+    }
+  }
+  if (rects.size() < 12) {
+    rects.push_back(r);
+  } else {
+    UnionRect(&rects[0], &rects[0], &r);
+  }
 }
 struct InkIterator {
   const std::vector<Command> &commands;
   size_t position, end;
   double dx, dy;
   RectF area;
+  bool includeClear;
   std::vector<const Command *> clips;
   bool valid = true;
   const Command *next() {
     while (position < end) {
       const auto &c = commands[position++];
+      if ((c.kind == 2 || c.kind == 5 || c.kind == 11) &&
+          c.clip_end >= position && c.clip_end < end) {
+        auto bounds = InkBounds(c);
+        bounds.Inflate(2, 2);
+        bounds.Offset(float(dx), float(dy));
+        if (!bounds.IntersectsWith(area)) {
+          position = c.clip_end + 1;
+          continue;
+        }
+      }
       if (c.kind == 6 || c.kind == 9 || c.kind == 11) {
-        valid = false;
-        return nullptr;
+        if (c.clip_end < position || c.clip_end >= end) {
+          valid = false;
+          return nullptr;
+        }
+        position = c.clip_end + 1;
+        return &c;
       }
       if (c.kind == 2 || c.kind == 5) {
         clips.push_back(&c);
@@ -3006,21 +3326,18 @@ struct InkIterator {
         clips.pop_back();
         continue;
       }
-      if ((c.kind == 0 || c.kind == 4) && !(c.fill >> 24) && !(c.stroke >> 24))
+      if (!includeClear && (c.kind == 0 || c.kind == 4) && !(c.fill >> 24) && !(c.stroke >> 24))
         continue;
+      if (UnknownTextInk(c)) {
+        valid = false;
+        return nullptr;
+      }
       auto ink = InkBounds(c);
       ink.Inflate(2, 2);
       for (const auto *clip : clips)
         ink.Intersect(clip->rect);
       ink.Offset(float(dx), float(dy));
-      if (ink.IntersectsWith(area)) {
-        // External bitmap files can change without changing their command.
-        if (c.kind == 8) {
-          valid = false;
-          return nullptr;
-        }
-        return &c;
-      }
+      if (ink.IntersectsWith(area)) return &c;
     }
     return nullptr;
   }
@@ -3028,22 +3345,42 @@ struct InkIterator {
 bool ScrollInkTranslates(Surface *s, const std::vector<Command> &commands,
                          const ScrollDrawing &a, const ScrollDrawing &b,
                          RECT destination, int dx, int dy, double scale,
-                         RECT &repaint) {
+                         std::vector<RECT> &repaint, bool includeClear) {
+  repaint.clear();
   RectF area(float(destination.left / scale), float(destination.top / scale),
              float((destination.right - destination.left) / scale),
              float((destination.bottom - destination.top) / scale));
-  InkIterator before{commands, a.begin, a.end, dx / scale, dy / scale, area};
-  InkIterator after{s->pending, b.begin, b.end, 0, 0, area};
+  Matrix pixelTransform;
+  pixelTransform.Scale(float(scale), float(scale));
+  InkIterator before{commands, a.begin, a.end, dx / scale, dy / scale, area, includeClear};
+  InkIterator after{s->pending, b.begin, b.end, 0, 0, area, includeClear};
   for (;;) {
     const auto *old = before.next(), *next = after.next();
     if (!before.valid || !after.valid)
       return false;
     if (!old || !next)
       return old == next;
-    if (!Translates(*old, *next, dx / scale, dy / scale, true) ||
-        before.clips.size() != after.clips.size())
+    const bool group = old->kind == 6 || old->kind == 9 || old->kind == 11;
+    const bool matches = group
+        ? GroupTranslates(commands, size_t(old - commands.data()), s->pending,
+                          size_t(next - s->pending.data()), dx / scale, dy / scale)
+        : Translates(*old, *next, dx / scale, dy / scale, true);
+    if (!matches || before.clips.size() != after.clips.size())
       return false;
-    if (old->fill != next->fill || old->stroke != next->stroke) {
+    // A path with no decoded snapshot could resolve at paint time.
+    // Redraw that image at its destination even if its two commands match.
+    bool textMovedOffGrid = false;
+    if (next->kind == 1 && old->text_ink.dpi && next->text_ink.dpi) {
+      // Use GDI+'s transform and rounding, including fractional-DPI ties.
+      auto origin = [&](const Command &c) {
+        return LabelPixelOrigin(pixelTransform, c.rect.X - 4.f,
+                                c.text_ink.top(c.rect));
+      };
+      const auto p = origin(*old), q = origin(*next);
+      textMovedOffGrid = p.X + dx != q.X || p.Y + dy != q.Y;
+    }
+    if (!group && (old->fill != next->fill || old->stroke != next->stroke ||
+                   textMovedOffGrid || (next->kind == 8 && !next->image))) {
       auto ink = InkBounds(*next);
       ink.Inflate(2, 2);
       RECT changed{LONG(std::floor(ink.X * scale)),
@@ -3051,7 +3388,7 @@ bool ScrollInkTranslates(Surface *s, const std::vector<Command> &commands,
                    LONG(std::ceil(ink.GetRight() * scale)),
                    LONG(std::ceil(ink.GetBottom() * scale))};
       IntersectRect(&changed, &changed, &destination);
-      UnionRect(&repaint, &repaint, &changed);
+      AddDamageRect(repaint, changed);
     }
     for (size_t i = 0; i < before.clips.size(); ++i)
       if (!Translates(*before.clips[i], *after.clips[i], dx / scale,
@@ -3080,6 +3417,23 @@ bool ScrollBackdrop(Surface *s, const ScrollDrawing &scroll, RectF copy_area) {
       continue;
     }
     const auto &c = s->pending[i];
+    // A layer composites only its padded bitmap, even when a child uses an
+    // unbounded transform. Clips also bound all nested ink in this space.
+    if ((c.kind == 2 || c.kind == 5 || c.kind == 11) && c.clip_end > i &&
+        (i >= scroll.end || c.clip_end < scroll.begin)) {
+      auto bounds = InkBounds(c);
+      bounds.Inflate(2, 2);
+      bounds.Intersect(scopes.back().clip);
+      if (!bounds.IntersectsWith(copy_area)) {
+        i = c.clip_end;
+        continue;
+      }
+      if (c.kind == 11 && i < scroll.begin) {
+        flat = false;
+        i = c.clip_end;
+        continue;
+      }
+    }
     if (c.kind == 6 || c.kind == 9 || c.kind == 11)
       return false;
     if (c.kind == 2 || c.kind == 5) {
@@ -3096,7 +3450,7 @@ bool ScrollBackdrop(Surface *s, const ScrollDrawing &scroll, RectF copy_area) {
     }
     if (c.kind == 0 && !(c.fill >> 24) && !(c.stroke >> 24))
       continue;
-    auto ink = InkBounds(c);
+    auto ink = UnknownTextInk(c) ? scopes.back().clip : InkBounds(c);
     ink.Inflate(2, 2);
     ink.Intersect(scopes.back().clip);
     if (!ink.IntersectsWith(copy_area))
@@ -3157,19 +3511,19 @@ ScrollCopy PrepareScrollCopy(Surface *s) {
       OffsetRect(&shifted, dx, dy);
       if (!IntersectRect(&destination, &area, &shifted))
         continue;
-      RECT repaint{};
-      const bool ink = ScrollInkTranslates(s, commands, a, b, destination, dx,
-                                           dy, scale, repaint);
-      if (!ink)
+      std::vector<RECT> repaint;
+      // Clear shapes normally have no ink. If a hover color crossed zero
+      // opacity, include them to match the same geometry across both frames.
+      if (!ScrollInkTranslates(s, commands, a, b, destination, dx, dy, scale, repaint, false) &&
+          !ScrollInkTranslates(s, commands, a, b, destination, dx, dy, scale, repaint, true))
         continue;
-      // A broad theme/content change is cheaper to redraw. Small hover color
-      // changes repaint their ink over the translated, last-painted pixels.
-      if (int64_t(repaint.right - repaint.left) *
-              (repaint.bottom - repaint.top) >
-          int64_t(destination.right - destination.left) *
-              (destination.bottom - destination.top) / 2)
+      int64_t repaintPixels = 0;
+      for (const auto &r : repaint)
+        repaintPixels += int64_t(r.right - r.left) * (r.bottom - r.top);
+      if (repaintPixels > int64_t(destination.right - destination.left) *
+                             (destination.bottom - destination.top) / 2)
         continue;
-      return {destination, dx, dy, repaint};
+      return {destination, dx, dy, std::move(repaint)};
     }
   }
   return {};
@@ -3224,7 +3578,9 @@ RECT ChangedScope(Surface *s, RECT client) {
         --depth;
         simple_middle = false;
       } else if (simple_middle) {
-        if (!(kind == 0 && !(cmd.fill >> 24) && !(cmd.stroke >> 24))) {
+        if (UnknownTextInk(cmd)) {
+          simple_middle = false;
+        } else if (!(kind == 0 && !(cmd.fill >> 24) && !(cmd.stroke >> 24))) {
           auto r = InkBounds(cmd);
           r.Inflate(2 + cmd.stroke_width, 2 + cmd.stroke_width);
           RECT pixels{LONG(std::floor((r.X + ox) * scale)),
@@ -3244,28 +3600,10 @@ RECT ChangedScope(Surface *s, RECT client) {
   }
   return scopes[enclosing].clip;
 }
-void AddDamageRect(std::vector<RECT> &rects, const RECT &r) {
-  if (IsRectEmpty(&r))
-    return;
-  for (auto &existing : rects) {
-    RECT expanded{existing.left - 8, existing.top - 8, existing.right + 8,
-                  existing.bottom + 8};
-    RECT overlap{};
-    if (IntersectRect(&overlap, &expanded, &r)) {
-      UnionRect(&existing, &existing, &r);
-      return;
-    }
-  }
-  if (rects.size() < 12) {
-    rects.push_back(r);
-  } else {
-    UnionRect(&rects[0], &rects[0], &r);
-  }
-}
 RECT Damage(Surface *s, std::vector<RECT> &out_rects) {
   out_rects.clear();
   RECT client = SurfaceClientRect(s);
-  if (!s->buffer || s->offset_changed_since_paint) {
+  if (!s->buffer || s->buffer_dpi != s->publication_dpi || s->offset_changed_since_paint) {
     AddDamageRect(out_rects, client);
     return client;
   }
@@ -3283,7 +3621,8 @@ RECT Damage(Surface *s, std::vector<RECT> &out_rects) {
   for (size_t i = 0; i < s->commands.size(); ++i) {
     const auto &a = s->commands[i], &b = s->pending[i];
     if (!(a == b)) {
-      if (a.kind != b.kind || transformed || a.kind == 2 || a.kind == 3 ||
+      if (a.kind != b.kind || transformed || UnknownTextInk(a) || UnknownTextInk(b) ||
+          a.kind == 2 || a.kind == 3 ||
           a.kind == 5 || a.kind == 6 || a.kind == 9 || a.kind == 11) {
         out_rects.clear();
         RECT r = ChangedScope(s, client);
@@ -3451,6 +3790,20 @@ void sui_surface_trace_update(void *handle, int begin) {
   if (!s->trace.Enabled()) return;
   if (begin) s->trace.update_start = FrameTrace::Now();
   else s->trace.Add(2, 2, s->trace.update_start, s->host);
+}
+extern "C" void sui_surface_request_wheel_update(void *handle) {
+  auto *s = static_cast<Surface *>(handle);
+  if (s->wheel_update_pending || s->defer_commit) return;
+  const auto now = ClockMilliseconds();
+  if (now - s->refresh_checked_ms > 1000) {
+    DWM_TIMING_INFO timing{};
+    timing.cbSize = sizeof(timing);
+    if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &timing)) && timing.rateRefresh.uiNumerator && timing.rateRefresh.uiDenominator)
+      s->refresh_ms = 1000. * timing.rateRefresh.uiDenominator / timing.rateRefresh.uiNumerator;
+    s->refresh_checked_ms = now;
+  }
+  if (now - s->previous_wheel_update_ms >= s->refresh_ms)
+    s->wheel_update_pending = PostMessageW(s->host, wheel_update, 0, 0) != 0;
 }
 void sui_surface_schedule(void *handle) {
   PostMessageW(static_cast<Surface *>(handle)->host, deferred_input, 0, 0);
@@ -3975,6 +4328,7 @@ void sui_surface_begin(void *handle) {
     s->deferred_clips.clear();
   }
   s->pending.clear();
+  s->publication_dpi = GetDpiForWindow(s->host);
   s->pending_scrolls.clear();
   s->scroll_stack.clear();
   s->control_contexts.clear();
@@ -4028,6 +4382,7 @@ void sui_surface_text(void *h, double x, double y, double w, double height,
   c.weight = float(weight);
   c.fill = color;
   c.line_spacing = float(line_spacing);
+  c.text_ink = DWrite().knownInk(c, s->publication_dpi);
   s->pending.push_back(std::move(c));
 }
 void sui_surface_path(void *h, const double *commands, int count, uint32_t fill,
@@ -4102,7 +4457,9 @@ void sui_surface_image(void *h, const char *file, double x, double y,
                        double width, double height) {
   auto c = Box(8, x, y, width, height, 0);
   c.text = Wide(file);
-  static_cast<Surface *>(h)->pending.push_back(std::move(c));
+  auto *s = static_cast<Surface *>(h);
+  c.image = SurfaceImage(s, c.text, false);
+  s->pending.push_back(std::move(c));
 }
 void sui_register_memory_image(const char *key, const uint8_t *bytes, int count) {
   if (!key || !*key || !bytes || count <= 0)
@@ -4167,6 +4524,17 @@ void sui_surface_end(void *h) {
     s->publish_times[stage] = now - started;
     started = now;
   };
+  std::vector<size_t> scopes;
+  for (size_t i = 0; i < s->pending.size(); ++i) {
+    auto &command = s->pending[i];
+    if (SavesGraphics(command.kind))
+      scopes.push_back(i);
+    else if (command.kind == 3 && !scopes.empty()) {
+      s->pending[scopes.back()].clip_end = i;
+      scopes.pop_back();
+    }
+  }
+  checkpoint(2);
   s->scroll_copy = PrepareScrollCopy(s);
   checkpoint(0);
   s->reused_pixels = 0;
@@ -4182,29 +4550,13 @@ void sui_surface_end(void *h) {
       it = s->control_groups.erase(it);
     }
     // Later painted siblings are in front. Tab order is retained separately.
-    std::unordered_map<HWND, HWND> previous;
-    for (auto it = s->control_order.rbegin(); it != s->control_order.rend();
-         ++it) {
-      auto hwnd = *it;
-      auto &above = previous[GetParent(hwnd)];
-      if (GetWindow(hwnd, GW_HWNDPREV) != above)
-        SetWindowPos(hwnd, above ? above : HWND_TOP, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
-      above = hwnd;
-    }
+    std::unordered_map<HWND, std::vector<HWND>> siblings;
+    for (auto it = s->control_order.rbegin(); it != s->control_order.rend(); ++it)
+      siblings[GetParent(*it)].push_back(*it);
+    for (const auto &group : siblings)
+      ArrangeSiblings(group.first, group.second);
   }
   checkpoint(1);
-  std::vector<size_t> scopes;
-  for (size_t i = 0; i < s->pending.size(); ++i) {
-    auto &command = s->pending[i];
-    if (SavesGraphics(command.kind))
-      scopes.push_back(i);
-    else if (command.kind == 3 && !scopes.empty()) {
-      s->pending[scopes.back()].clip_end = i;
-      scopes.pop_back();
-    }
-  }
-  checkpoint(2);
   if (s->updating_views && !s->defer_commit) {
     native_view_end_updates(false);
     s->updating_views = false;

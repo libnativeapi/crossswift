@@ -77,6 +77,11 @@ final class EvaluationGraph {
   }
   private var root: Node?
   private var current: Node?
+  private struct ImageAssetKey: Hashable {
+    let name: String
+    let bundle: Bundle?
+  }
+  private var imagePaths: [ImageAssetKey: String] = [:]
   private var trackingObservation = false
   private var globalInvalidationEpoch = 0
   private var readers: [StateKey: [Int: WeakNode]] = [:]
@@ -174,7 +179,18 @@ final class EvaluationGraph {
     return body()
   }
 
+  /// Duplicate icons within a render pass share the result of the bundle
+  /// lookup. Recheck on the next pass, including previously missing files.
+  func imagePath(named name: String, in bundle: Bundle?, resolve: () -> String) -> String {
+    let key = ImageAssetKey(name: name, bundle: bundle)
+    if let cached = imagePaths[key] { return cached }
+    let path = resolve()
+    imagePaths[key] = path
+    return path
+  }
+
   func evaluateRoot(_ body: () -> Element) -> Element {
+    imagePaths.removeAll(keepingCapacity: true)
     let previous = Self.active
     Self.active = self
     defer { Self.active = previous }
@@ -234,9 +250,10 @@ final class EvaluationGraph {
       node = Node(type: type, path: path, parent: nil, graph: self)
       root = node
     }
-    let currentViewport = EnvironmentValues.current.scrollViewportContext
+    // Only nodes that read the viewport compare it; most rows skip the lookup.
     let viewportChanged =
-      node.readsScrollViewport && node.lastScrollViewport != currentViewport
+      node.readsScrollViewport
+      && node.lastScrollViewport != EnvironmentValues.current.scrollViewportContext
     var forced = parent?.forceChildren ?? false
     if forced, !viewportChanged, let eqView = equatableView, !node.dirty, node.result != nil,
       node.lastGlobalInvalidationEpoch == globalInvalidationEpoch,
@@ -279,7 +296,9 @@ final class EvaluationGraph {
       node.childrenByPath = map
     }
     node.result = result
-    node.lastScrollViewport = currentViewport
+    // Modifiers restore the environment, so this is the value seen on entry.
+    node.lastScrollViewport =
+      node.readsScrollViewport ? EnvironmentValues.current.scrollViewportContext : nil
     if let eqView = equatableView {
       node.lastEquatableView = eqView
       node.lastEnvironment = EnvironmentValues.current

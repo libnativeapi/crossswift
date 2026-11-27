@@ -139,6 +139,170 @@ final class ControlsAndContainersTests: XCTestCase {
     XCTAssertLessThan(evaluatedCount, 80)
   }
 
+  @MainActor
+  func testVerticalLazyStackBoundsMountedRowsAndPreservesFarScrollTargets() throws {
+    for count in [1_000, 10_000] {
+      var built = 0
+      var proxy: ScrollViewProxy?
+      let renderer = Renderer(
+        backend: FakeBackend(),
+        root: AnyView(
+          ScrollViewReader { reader in
+            proxy = reader
+            return ScrollView {
+              LazyVStack(spacing: 2) {
+                ForEach(0..<count) { i in
+                  built += 1
+                  return Text(verbatim: "Entry \(i)").frame(height: 30)
+                }
+              }
+            }
+          }
+        ), size: Size(width: 400, height: 360))
+      renderer.mount()
+      var scroll = try XCTUnwrap(findNode(in: try XCTUnwrap(renderer.tree), kind: .scroll))
+      XCTAssertEqual(scroll.children.first?.frame.height ?? 0, Double(count * 32 - 2), accuracy: 0.1)
+      XCTAssertLessThan(built, 100)
+      built = 0
+      renderer.scroll(id: scroll.id, to: Point(x: 0, y: 16_000))
+      renderer.renderIfNeeded()
+      scroll = try XCTUnwrap(findNode(in: try XCTUnwrap(renderer.tree), kind: .scroll))
+      let children = try XCTUnwrap(scroll.children.first).children
+      XCTAssertLessThan(children.count, 100)
+      XCTAssertEqual(children.filter { $0.props.isLazyPlaceholder }.count, 2)
+      XCTAssertLessThan(built, 100)
+      XCTAssertNotNil(findNode(in: scroll, text: "Entry 500"))
+
+      try XCTUnwrap(proxy).scrollTo(count - 1, anchor: .bottom)
+      renderer.renderIfNeeded()
+      let updated = try XCTUnwrap(findNode(in: try XCTUnwrap(renderer.tree), kind: .scroll))
+      let last = try XCTUnwrap(findNode(in: updated, text: "Entry \(count - 1)"))
+      XCTAssertLessThanOrEqual(last.frame.maxY, updated.frame.maxY + 1)
+      XCTAssertGreaterThan(last.frame.maxY, updated.frame.minY)
+      renderer.unmount()
+    }
+  }
+
+  @MainActor
+  func testUniformVerticalLazyStackOnlyReadsViewportAndAdjacentGapIDs() throws {
+    final class Reads { var count = 0 }
+    struct Rows: RandomAccessCollection {
+      let startIndex = 37
+      let endIndex: Int
+      let reads: Reads
+      subscript(index: Int) -> Int {
+        reads.count += 1
+        return index - startIndex
+      }
+    }
+    for count in [1_000, 10_000] {
+      let reads = Reads()
+      let renderer = Renderer(backend: FakeBackend(), root: AnyView(
+        ScrollView {
+          LazyVStack(spacing: 2) {
+            ForEach(Rows(endIndex: count + 37, reads: reads), id: \.self) { id in
+              Text(verbatim: "Row \(id)").frame(height: 30)
+            }
+          }
+        }), size: Size(width: 400, height: 360))
+      renderer.mount()
+      XCTAssertLessThan(reads.count, 100, "Mount should access only the seeded viewport")
+      let first = try XCTUnwrap(findNode(in: try XCTUnwrap(renderer.tree), kind: .scroll))
+      for index in [500, 50, count - 18] {
+        reads.count = 0
+        renderer.scroll(id: first.id, to: Point(x: 0, y: Double(index * 32)))
+        renderer.renderIfNeeded()
+        let scroll = try XCTUnwrap(findNode(in: try XCTUnwrap(renderer.tree), kind: .scroll))
+        XCTAssertLessThan(reads.count, 100, "A bucket change must not read the whole collection")
+        XCTAssertNotNil(findNode(in: scroll, text: "Row \(index)"))
+        XCTAssertEqual(scroll.children.first?.frame.height ?? 0, Double(count * 32 - 2), accuracy: 0.01)
+      }
+      renderer.unmount()
+    }
+  }
+
+  @MainActor
+  func testTallScrollViewRealizesItsBottomRowsBeforeFirstAndResizedPublications() throws {
+    final class CapturingBackend: RenderBackend {
+      var tapHandler: ((NodeID) -> Void)?
+      var needsRenderCommands: Bool { false }
+      var roots = [Element]()
+      func perform(_ commands: [RenderCommand]) {}
+      func didRender(_ root: Element) { roots.append(root) }
+    }
+    final class Reads { var count = 0 }
+    struct Rows: RandomAccessCollection {
+      let startIndex = 0
+      let endIndex: Int
+      let reads: Reads
+      subscript(index: Int) -> Int { reads.count += 1; return index }
+    }
+    for count in [1000, 10_000] {
+      for height in [28, 7] {
+        let backend = CapturingBackend()
+        let reads = Reads()
+        let renderer = Renderer(backend: backend, root: AnyView(ScrollView {
+          LazyVStack(spacing: 0) {
+            ForEach(Rows(endIndex: count, reads: reads), id: \.self) { index in
+              Text("File \(index)").frame(height: Double(height))
+            }
+          }
+        }), size: Size(width: 640, height: 832))
+        for viewport in [832, 1512] {
+          reads.count = 0
+          let previous = backend.roots.count
+          if previous == 0 { renderer.mount() }
+          else { renderer.resize(to: Size(width: 640, height: Double(viewport))) }
+          XCTAssertEqual(backend.roots.count, previous + 1)
+          let published = try XCTUnwrap(backend.roots.last)
+          let scroll = try XCTUnwrap(findNode(in: published, kind: .scroll))
+          let last = (viewport - 1) / height
+          XCTAssertNotNil(findNode(in: scroll, text: "File \(last)"), "count=\(count), height=\(height), viewport=\(viewport)")
+          let stack = try XCTUnwrap(scroll.children.first)
+          XCTAssertTrue(stack.children.filter(\.props.isLazyPlaceholder).allSatisfy {
+            $0.frame.minY >= scroll.frame.maxY || $0.frame.maxY <= scroll.frame.minY
+          })
+          XCTAssertLessThan(reads.count, (viewport + 388) / height * 3 + 30)
+        }
+        renderer.unmount()
+      }
+    }
+  }
+
+  @MainActor
+  func testUniformGapsPreserveMeasuredHeightsWhenVisibleRowsBecomeMixed() throws {
+    let count = 1_000
+    let renderer = Renderer(backend: FakeBackend(), root: AnyView(
+      ScrollView {
+        LazyVStack(spacing: 2) {
+          ForEach(0..<count) { id in
+            Text(verbatim: "Row \(id)").frame(height: id >= 500 && id < 520 ? 63 : 30)
+          }
+        }
+      }), size: Size(width: 400, height: 360))
+    renderer.mount()
+    let first = try XCTUnwrap(findNode(in: try XCTUnwrap(renderer.tree), kind: .scroll))
+    let key = try XCTUnwrap(first.children.first?.lazyCacheKey)
+    XCTAssertEqual(LazyHeightCache.shared.uniformEstimate(stack: key), 30)
+    renderer.scroll(id: first.id, to: Point(x: 0, y: 16_000))
+    renderer.renderIfNeeded()
+    let scroll = try XCTUnwrap(findNode(in: try XCTUnwrap(renderer.tree), kind: .scroll))
+    XCTAssertNil(LazyHeightCache.shared.uniformEstimate(stack: key))
+    // A fixed physical offset can cover different IDs after estimating
+    // previously unseen heights. The first pass must have measured row 500,
+    // and every row in the settled viewport must have actual content.
+    XCTAssertEqual(LazyHeightCache.shared.measuredHeight(stack: key, item: AnyHashable(500)), 63)
+    let stack = try XCTUnwrap(scroll.children.first)
+    XCTAssertTrue(stack.children.filter(\.props.isLazyPlaceholder).allSatisfy {
+      $0.frame.minY >= scroll.frame.maxY || $0.frame.maxY <= scroll.frame.minY
+    })
+    let expected = (0..<count).reduce(Double((count - 1) * 2)) { total, index in
+      total + LazyHeightCache.shared.estimatedHeight(stack: key, item: AnyHashable(index))
+    }
+    XCTAssertEqual(scroll.children.first?.frame.height ?? 0, expected, accuracy: 0.01)
+    renderer.unmount()
+  }
+
   func testXCStringsCatalogLoadsTranslationsAndPlurals() throws {
     let sampleJSON = """
     {

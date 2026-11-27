@@ -6,7 +6,129 @@ import NativeAPI
 import SwiftUIRuntime
 import XCTest
 
+private final class HoverObservations {
+  var taps: [Bool] = []
+}
+
+private struct HoverPeerFixture: SwiftUIRuntime.View {
+  let observations: HoverObservations
+  let hasEditor: Bool
+  @State private var hot = false
+  @State private var query = "native text"
+
+  var body: some SwiftUIRuntime.View {
+    let active = hot
+    SwiftUIRuntime.VStack {
+      SwiftUIRuntime.Button("Row") { observations.taps.append(active) }
+        .frame(width: 100, height: 32)
+        .background(active ? SwiftUIRuntime.Color.blue : .red)
+        .onHover { hot = $0 }
+      if hasEditor {
+        SwiftUIRuntime.TextField("Query", text: $query)
+          .foregroundStyle(active ? SwiftUIRuntime.Color.blue : .red)
+          .frame(width: 120, height: 32)
+      }
+    }
+  }
+}
+
 final class WindowsDrawingTests: XCTestCase {
+  func testHoverPreservesNativeFocusAndDispatchesCurrentButtonActions() throws {
+    func find(_ kind: ElementKind, in element: Element) -> Element? {
+      if kind == element.kind { return element }
+      return element.children.lazy.compactMap { find(kind, in: $0) }.first
+    }
+    WindowsDrawingBackend.prepareApplication()
+    for hasEditor in [false, true] {
+      let window = try XCTUnwrap(NativeAPI.Window.create())
+      let backend = try XCTUnwrap(WindowsDrawingBackend(window: window))
+      let observations = HoverObservations()
+      let renderer = Renderer(backend: backend,
+        root: AnyView(HoverPeerFixture(observations: observations, hasEditor: hasEditor)),
+        size: .init(width: 240, height: 180))
+      renderer.mount()
+      defer { renderer.unmount(); _ = window.close() }
+      let root = try XCTUnwrap(renderer.tree)
+      let buttonID = try XCTUnwrap(find(.button, in: root)).id
+      let button = try XCTUnwrap(backend.nativeButton(buttonID))
+      let handle = try XCTUnwrap(button.nativeObject)
+      let editorID = find(.textField, in: root)?.id
+      let editor = editorID.flatMap(backend.nativeTextField)
+      XCTAssertEqual(editor != nil, hasEditor)
+      let focused: NativeAPI.View = editor ?? button
+      focused.focus()
+      XCTAssertTrue(focused.isFocused)
+      let full = backend.fullPublicationCount
+      renderer.interact(buttonID, .hover(true))
+      XCTAssertTrue(focused.isFocused)
+      XCTAssertEqual(backend.nativeButton(buttonID)?.nativeObject, handle)
+      XCTAssertEqual(backend.fullPublicationCount, full + (hasEditor ? 1 : 0))
+      if let editorID, let editor {
+        XCTAssertEqual(backend.nativeTextField(editorID)?.nativeObject, editor.nativeObject)
+        XCTAssertEqual(editor.text, "native text")
+        XCTAssertGreaterThan(editor.textColor.b, editor.textColor.r)
+        backend.replaceText(editorID, with: "updated")
+        XCTAssertEqual(editor.text, "updated")
+      }
+      backend.activate(buttonID)
+      renderer.interact(buttonID, .hover(false))
+      backend.activate(buttonID)
+      XCTAssertEqual(observations.taps, [true, false])
+    }
+  }
+  func testColorFramesKeepButtonPeersAndRefreshNativeEditors() throws {
+    struct Content: SwiftUIRuntime.View {
+      let nativeEditor: Bool
+      @State var active = false
+      @State var query = ""
+      var body: some SwiftUIRuntime.View {
+        SwiftUIRuntime.ScrollView {
+          SwiftUIRuntime.VStack(spacing: 0) {
+            SwiftUIRuntime.Button("Toggle") {
+              SwiftUIRuntime.withAnimation(.linear(duration: 1)) { active.toggle() }
+            }
+            SwiftUIRuntime.Text("Card").background(active ? SwiftUIRuntime.Color.blue : .red)
+            if nativeEditor { SwiftUIRuntime.TextField("Query", text: $query) }
+            SwiftUIRuntime.Text("Tail").frame(height: 800)
+          }
+        }
+      }
+    }
+    func node(_ kind: ElementKind, in element: Element) -> Element? {
+      if element.kind == kind { return element }
+      return element.children.lazy.compactMap { node(kind, in: $0) }.first
+    }
+    WindowsDrawingBackend.prepareApplication()
+    for nativeEditor in [false, true] {
+      var now = 10.0
+      let window = try XCTUnwrap(NativeAPI.Window.create())
+      let backend = try XCTUnwrap(WindowsDrawingBackend(window: window))
+      let renderer = Renderer(backend: backend, root: AnyView(Content(nativeEditor: nativeEditor)),
+                              size: .init(width: 300, height: 160))
+      renderer.clock = { now }
+      renderer.mount()
+      let buttonID = try XCTUnwrap(node(.button, in: try XCTUnwrap(renderer.tree))?.id)
+      let button = try XCTUnwrap(backend.nativeButton(buttonID)?.nativeObject)
+      renderer.performTap(buttonID)
+      let full = backend.fullPublicationCount
+      now += 0.2
+      XCTAssertTrue(renderer.stepAnimations())
+      XCTAssertEqual(backend.fullPublicationCount, full + (nativeEditor ? 1 : 0))
+      if !nativeEditor { XCTAssertEqual(backend.lastTimings["controls"], 0) }
+      now += 0.2
+      XCTAssertTrue(renderer.input(event: 5, point: .init(x: 120, y: 80), value: -8))
+      let scroll = try XCTUnwrap(node(.scroll, in: try XCTUnwrap(renderer.tree)))
+      XCTAssertGreaterThan(scroll.props.scrollOffset.y, 0)
+      XCTAssertEqual(backend.fullPublicationCount, full + (nativeEditor ? 2 : 0))
+      XCTAssertEqual(backend.nativeButton(buttonID)?.nativeObject, button)
+      if nativeEditor {
+        let editID = try XCTUnwrap(node(.textField, in: try XCTUnwrap(renderer.tree))?.id)
+        XCTAssertNotNil(backend.nativeTextField(editID))
+      }
+      renderer.unmount()
+    }
+  }
+
   func testTransparentNativeButtonKeepsShortcutWithoutCoveringCanvas() throws {
     final class Model: ObservableObject {
       @Published var opacity = 0.0
@@ -147,6 +269,11 @@ final class WindowsDrawingTests: XCTestCase {
       result.fallback_errors, 0,
       "Backgrounds, overlays, content edits and fractional pixels must fall back")
   }
+  func testRotatingNativeControlsMovesOnlyTheDisplacedSibling() {
+    WindowsDrawingBackend.prepareApplication()
+    XCTAssertEqual(control_order_probe(), 0)
+  }
+
   func testHighDpiPixelsAndHoverDoNotRepositionControls() {
     WindowsDrawingBackend.prepareApplication()
     let result = drawing_probe()

@@ -12,6 +12,7 @@ final class LifecycleRegistry {
   var entries: [StateKey: Entry] = [:]
   var liveByRoot: [ObjectIdentifier: Set<StateKey>] = [:]
   var pendingByRoot: [ObjectIdentifier: [() -> Void]] = [:]
+  private var observableByRoot: [ObjectIdentifier: Set<StateKey>] = [:]
   var activeRoot: ObjectIdentifier?
 
   func enqueue(_ action: @escaping () -> Void) {
@@ -47,6 +48,11 @@ final class LifecycleRegistry {
     GeometrySnapshot.active?.lifecycle.insert(key)
     liveByRoot[rootID, default: []].insert(key)
     let old = entries[key]
+    if appear != nil || change != nil || disappear != nil || task != nil {
+      observableByRoot[rootID, default: []].insert(key)
+    } else if observableByRoot[rootID] != nil {
+      observableByRoot[rootID]?.remove(key)
+    }
     if old == nil || old!.value != value {
       old?.task?.cancel()
       var entry = Entry(value: value, disappear: disappear)
@@ -63,12 +69,19 @@ final class LifecycleRegistry {
       entries[key]?.disappear = disappear
     }
   }
+  // register() updates entries while building the tree, including retained
+  // and outgoing entries. AnimationValueView registers bookkeeping only.
+  func hasUserEffects(root: ViewPath) -> Bool {
+    let rootID = ObjectIdentifier(root)
+    return pendingByRoot[rootID]?.isEmpty == false || observableByRoot[rootID]?.isEmpty == false
+  }
   func commit(root: ViewPath) {
     let rootID = ObjectIdentifier(root)
     let live = liveByRoot[rootID] ?? []
     for key in Set(entries.keys).subtracting(live) where key.path.root === root {
       LifecycleSnapshots.shared.values.removeValue(forKey: key)
       LifecycleSnapshots.shared.versions.removeValue(forKey: key)
+      observableByRoot[rootID]?.remove(key)
       let old = entries.removeValue(forKey: key)
       old?.task?.cancel()
       if let action = old?.disappear { pendingByRoot[rootID, default: []].append(action) }
@@ -84,12 +97,14 @@ final class LifecycleRegistry {
       LifecycleSnapshots.shared.values.removeValue(forKey: key)
       LifecycleSnapshots.shared.versions.removeValue(forKey: key)
     }
+    observableByRoot.removeValue(forKey: rootID)
     liveByRoot.removeValue(forKey: rootID)
     pendingByRoot.removeValue(forKey: rootID)
   }
   func reset() {
     entries.values.forEach { $0.task?.cancel() }
     entries.removeAll()
+    observableByRoot.removeAll()
     liveByRoot.removeAll()
     pendingByRoot.removeAll()
     activeRoot = nil

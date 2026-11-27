@@ -6,7 +6,7 @@
 
   /// Generic SwiftUI drawing hosted by nativeapi. Decorative nodes share a
   /// display list; buttons keep native Windows handles and native activation.
-  public final class WindowsDrawingBackend: RenderBackend {
+  public final class WindowsDrawingBackend: RenderBackend, HoverLayoutBackend {
     /// Ensures NativeAPI's early Per-Monitor V2 DPI setup has run before any
     /// standalone HWNDs are created outside `Application`.
     public static func prepareApplication() { _ = NativeAPI.Application.shared.isRunning() }
@@ -29,6 +29,49 @@
     private var modalControls: Set<NodeID>?
     private var presentationOccluderRects: [Rect] = []
     private var controlBranches: Set<NodeID> = []
+    package var hoverTime: Double { Date.timeIntervalSinceReferenceDate }
+    private var paintTime = 0.0
+    private var pendingHoverPaint = false
+    package var prepareForDiscreteInput: (() -> Void)?
+    private var viewportRefresh: (() -> Void)?
+    package var supportsDeferredViewport: Bool { schedulesUpdates }
+    package func refreshViewportAfterPaint(_ work: @escaping () -> Void) {
+      viewportRefresh = work
+      _ = content.requestUpdate()
+    }
+    private var hasQueuedWheel = false
+    private var previousWheel = 0.0
+    private var wheelPeriod = 0.0
+    private var consecutiveWheels = 0
+    private var lastScrollPublication = 0.0
+
+    private func wheelArrived(at now: Double) {
+      let interval = now - previousWheel
+      previousWheel = now
+      if interval > 0.05 {
+        consecutiveWheels = 0
+        wheelPeriod = 0
+      } else if interval > 0.003 {
+        wheelPeriod = consecutiveWheels == 0 ? interval : wheelPeriod * 0.7 + interval * 0.3
+        consecutiveWheels += 1
+      }
+    }
+
+    // Scrolling already samples every ongoing color transition. Coalesce an
+    // autonomous color repaint into that frame when the last scroll is recent.
+    // Pointer changes and the final fade after scrolling use the display clock.
+    private func canCombineHoverWithScroll(at now: Double) -> Bool {
+      guard consecutiveWheels >= 2, wheelPeriod > 0, now - previousWheel < wheelPeriod * 1.5 else { return false }
+      return now - lastScrollPublication < min(wheelPeriod, 1.0 / 60.0)
+    }
+
+    private var hoverPaintPhases: [ObjectIdentifier: HoverPaintPhase] = [:]
+    private var colorsOnlyAffectCanvas = false
+    package func requestHoverPaint(_ phase: HoverPaintPhase) {
+      pendingHoverPaint = true
+      hoverPaintPhases[ObjectIdentifier(phase)] = phase
+      if !deliveringUpdate { _ = content.requestUpdate() }
+    }
     private var desiredFocus: NodeID?
     private struct RetainedButton {
       let view: NativeAPI.Button
@@ -171,6 +214,7 @@
     public var canAcquireControlFocus: (() -> Bool)?
     public var environment: EnvironmentValues {
       var env: EnvironmentValues = window.map { .hosting($0) } ?? EnvironmentValues()
+      if schedulesUpdates { env.hoverPaintHost = self }
       environmentTransform?(&env)
       return env
     }
@@ -263,7 +307,16 @@
               backend.queuePointer(fallback: CGPoint(x: x, y: y))
               return 1
             }
+            if event == 13 {
+              guard backend.hasQueuedWheel && !backend.deliveringUpdate else { return 0 }
+              let publications = backend.publicationCount
+              backend.deliverUpdate()
+              return backend.publicationCount != publications ? 1 : 0
+            }
             if event == 5 {
+              backend.hasQueuedWheel = true
+              if let surface = backend.surface { sui_surface_request_wheel_update(surface) }
+              backend.wheelArrived(at: backend.hoverTime)
               backend.enqueue { [weak backend] in
                 _ = backend?.inputHandler?(
                   id == 0 ? nil : NodeID(rawValue: Int(id)), 5,
@@ -278,7 +331,10 @@
               return 0
             }
             // Preserve press/key/text ordering relative to earlier pointer input.
-            if [2, 3, 4, 6, 7, 9].contains(Int(event)) { backend.drainInput() }
+            if [2, 3, 4, 6, 7, 9].contains(Int(event)) {
+              backend.drainInput()
+              backend.prepareForDiscreteInput?()
+            }
           }
           if event == 12 {
             if let root = backend.fullRoot ?? backend.root { backend.didRender(root) }
@@ -437,7 +493,7 @@
     public func didMeasureRender(_ timings: [String: Double]) {
       guard tracesFrames, let surface else { return }
       for (stage, name) in ["evaluate", "environment", "layout", "finalize", "diff",
-                            "backend", "scroll.translate"].enumerated() {
+                            "backend", "scroll.translate", "animation.colors", "hover.reuse", "hover.reject"].enumerated() {
         if let value = timings[name] { sui_surface_trace_duration(surface, Int32(stage), value) }
       }
       for (stage, name) in ["prepare", "draw", "controls", "publish"].enumerated() {
@@ -572,6 +628,10 @@
         return hasControl
       }
       animate(renderRoot, inherited: nil, disabled: suppressAllAnimations)
+      // Owner-drawn buttons use transparent focus peers. Native editors and
+      // hosted views can consume colors from any of their ancestors.
+      colorsOnlyAffectCanvas = liveEdits.isEmpty && liveHosted.isEmpty && !hasPopups
+        && !renderRoot.hasActivePresentation && !hasModal && !hasFocusRequest
       if suppressAllAnimations {
         motions.removeAll(keepingCapacity: true)
       }
@@ -607,6 +667,7 @@
         for child in node.children { focusTarget(child) }
       }
       if hasFocusRequest { focusTarget(renderRoot) }
+      sui_surface_begin(surface)
       if !buttons.isEmpty {
         let deadButtons = buttons.keys.filter { !live.contains($0) }
         for id in deadButtons { removeButton(id) }
@@ -619,7 +680,6 @@
         let deadHosted = hostedViews.keys.filter { !liveHosted.contains($0) }
         for id in deadHosted { removeHostedView(id) }
       }
-      sui_surface_begin(surface)
       lastTimings["prepare"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
       publish(renderRoot, on: surface)
       if canUseNativePopups && ownerVisible, let ownerHwnd {
@@ -635,21 +695,53 @@
       }
     }
 
+    // Native peers dispatch actions by ID to the renderer. Fresh callback
+    // captures are already installed on the new tree at publication time.
+    package func didUpdateHoverColors(_ root: Element, changes: [(id: NodeID, props: NodeProps)], scrolled: Bool) {
+      didUpdateColors(root, changes: changes, scrolled: scrolled)
+    }
+
+    public func didUpdateColors(_ root: Element, changes: [(id: NodeID, props: NodeProps)], scrolled: Bool) {
+      guard let surface, colorsOnlyAffectCanvas, motions.isEmpty, self.root?.id == root.id,
+        !root.hasActivePresentation, changes.allSatisfy({ previous[$0.id] != nil })
+      else {
+        didRender(root)
+        return
+      }
+      let started = Date.timeIntervalSinceReferenceDate
+      for (id, props) in changes { previous[id] = AnimatedValues(props) }
+      fullRoot = root
+      self.root = root
+      lastTimings["prepare"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
+      sui_surface_begin(surface)
+      publish(root, on: surface, controls: scrolled ? .geometry : .unchanged)
+      if schedulesUpdates && !deliveringUpdate && root.hasLayoutAnimation { _ = content.requestUpdate() }
+    }
+
     public func didScroll(_ root: Element) {
       guard motions.isEmpty else {
         didRender(root)
         return
       }
       guard let surface else { return }
+      fullRoot = root
       self.root = root
       // Scrolling does not change live controls, animation values, modal state
       // or focus requests. Keep those registrations and publish new geometry.
       lastTimings["prepare"] = 0
       sui_surface_begin(surface)
-      publish(root, on: surface, geometryOnly: true)
+      publish(root, on: surface, controls: .geometry)
     }
 
-    private func publish(_ root: Element, on surface: UnsafeMutableRawPointer, geometryOnly: Bool = false) {
+    private enum ControlUpdate { case full, geometry, unchanged }
+
+    private func publish(_ root: Element, on surface: UnsafeMutableRawPointer, controls: ControlUpdate = .full) {
+      paintTime = Date.timeIntervalSinceReferenceDate
+      pendingHoverPaint = false
+      if !hoverPaintPhases.isEmpty {
+        hoverPaintPhases = hoverPaintPhases.filter { $0.value.isAnimating(at: paintTime) }
+      }
+      if controls == .geometry { lastScrollPublication = paintTime }
       publicationCount += 1
       presentationOccluderRects.removeAll(keepingCapacity: true)
       if root.hasActivePresentation {
@@ -672,10 +764,14 @@
       var started = Date.timeIntervalSinceReferenceDate
       draw(root, clip: root.frame)
       lastTimings["draw"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
-      started = Date.timeIntervalSinceReferenceDate
-      sui_controls_begin(surface)
-      updateButtons(root, clip: root.frame, background: surfaceBackgroundColor, geometryOnly: geometryOnly)
-      lastTimings["controls"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
+      if controls == .unchanged {
+        lastTimings["controls"] = 0
+      } else {
+        started = Date.timeIntervalSinceReferenceDate
+        sui_controls_begin(surface)
+        updateButtons(root, clip: root.frame, background: surfaceBackgroundColor, geometryOnly: controls == .geometry)
+        lastTimings["controls"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
+      }
       started = Date.timeIntervalSinceReferenceDate
       sui_surface_end(surface)
       lastTimings["publish"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
@@ -742,11 +838,13 @@
       hostedViews[id]?.handleKeyDown?(vk, modifiers) ?? false
     }
     public func focusNextControl(from current: UnsafeMutableRawPointer?, backward: Bool = false) {
+      prepareForDiscreteInput?()
       if let surface {
         sui_surface_focus_next(surface, current, backward ? 1 : 0)
       }
     }
     public func advanceFocus(from id: NodeID?, backward: Bool = false) {
+      prepareForDiscreteInput?()
       if let surface {
         let current = id.flatMap {
           buttons[$0]?.view.nativeObject
@@ -797,6 +895,7 @@
       }
     }
     private func drainInput() {
+      hasQueuedWheel = false
       let jobs = pendingEvents
       pendingEvents.removeAll(keepingCapacity: true)
       let pointer = pendingPointer
@@ -817,6 +916,10 @@
       let render = pendingRender
       pendingRender = nil
       render?()
+      if publications == publicationCount, let refresh = viewportRefresh {
+        viewportRefresh = nil
+        refresh()
+      }
       if publications == publicationCount {
         if root?.hasLayoutAnimation == true {
           _ = animationTickHandler?()
@@ -825,7 +928,7 @@
         }
       }
       flushPendingEdits()
-      if !motions.isEmpty || root?.hasLayoutAnimation == true { _ = content.requestUpdate() }
+      if !motions.isEmpty || root?.hasLayoutAnimation == true || !hoverPaintPhases.isEmpty || pendingHoverPaint || viewportRefresh != nil { _ = content.requestUpdate() }
     }
     private func enqueue(_ action: @escaping () -> Void) {
       let schedule = pendingEvents.isEmpty
@@ -838,7 +941,15 @@
     }
     private func tick() {
       // The C bridge services Dispatch without consuming NativeAPI WM_QUIT.
-      guard !motions.isEmpty, let surface, let root else { return }
+      guard let surface, let root else { return }
+      if pendingHoverPaint || !hoverPaintPhases.isEmpty {
+        if motions.isEmpty && canCombineHoverWithScroll(at: hoverTime) { return }
+        motions = motions.filter { $0.value.isActive(at: Date.timeIntervalSinceReferenceDate) }
+        sui_surface_begin(surface)
+        publish(root, on: surface, controls: .unchanged)
+        return
+      }
+      guard !motions.isEmpty else { return }
       let hadVisible = motions.values.contains(where: {
         let visible = $0.frame.intersection(root.frame)
         return visible.width > 0 && visible.height > 0
@@ -1278,6 +1389,8 @@
     ) {
       guard let surface, node.props.visible else { return }
       var p = node.props
+      p.foreground = p.foreground?.sampledForPaint(at: paintTime)
+      p.background = p.background?.sampledForPaint(at: paintTime)
       let allowed = allowed && p.hitTesting
       let modalAllowed = modalControls?.contains(node.id) ?? true
       let blockedByPresentation =
@@ -1290,7 +1403,7 @@
             let inter = $0.intersection(r)
             return inter.width > 0 && inter.height > 0
           }))
-      var translated = false
+      var translation = CGPoint.zero
       if let motion = motions[node.id] {
         let now = Date.timeIntervalSinceReferenceDate
         let current = motion.interpolated(to: AnimatedValues(p), at: now)
@@ -1303,11 +1416,9 @@
         p.borderColor = current.borderColor
         let dx = current.offsetX - p.offsetX
         let dy = current.offsetY - p.offsetY
-        if dx != 0 || dy != 0 {
-          sui_surface_translation(surface, dx, dy)
-          translated = true
-        }
+        translation = CGPoint(x: dx, y: dy)
       }
+      let translated = translation != .zero
       guard p.opacity > 0 else { return }
       let relOpacity = inheritedOpacity > 1e-6 ? min(1.0, p.opacity / inheritedOpacity) : p.opacity
       let hasPixelFilter =
@@ -1336,6 +1447,9 @@
           width: r.width + margin * 2, height: r.height + margin * 2)
         let visible = ink.intersection(clip)
         if visible.width <= 0 || visible.height <= 0 { return }
+      }
+      if translated {
+        sui_surface_translation(surface, translation.x, translation.y)
       }
       if transformed {
         sui_surface_transform(
@@ -1559,17 +1673,12 @@
           sui_surface_restore(surface)
         }
       }
-      func subtreeHasMotion(_ element: Element) -> Bool {
-        if motions[element.id] != nil { return true }
-        return element.children.contains(where: subtreeHasMotion)
-      }
       let cacheScroll =
         node.kind == .scroll && canCull && p.clipped && p.cornerRadius == 0
-        && node.clipPathBuilder == nil && (motions.isEmpty || !subtreeHasMotion(node))
-        && node.children.first != nil
+        && node.clipPathBuilder == nil && !node.children.isEmpty
       if cacheScroll, let child = node.children.first {
-        // The bridge verifies translated paint commands, clips and backdrop
-        // before copying pixels; opaque/custom layout does not need guessing.
+        // The bridge compares the current interpolated commands with the
+        // last painted frame and repaints ink whose color changed.
         sui_surface_scroll_begin(
           surface, Int64(node.id.rawValue), 0,
           clip.minX, clip.minY, clip.width, clip.height, child.frame.minX, child.frame.minY)
@@ -1639,4 +1748,5 @@
       return byte(opacity) << 24 | byte(red) << 16 | byte(green) << 8 | byte(blue)
     }
   }
+  extension WindowsDrawingBackend: HoverPaintHost, LazyViewportRefreshBackend {}
 #endif

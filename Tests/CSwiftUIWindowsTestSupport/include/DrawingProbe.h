@@ -13,6 +13,8 @@ typedef struct {
   int expose_errors;
 } drawing_probe_result;
 drawing_probe_result drawing_probe(void);
+int control_order_probe(void);
+int input_reentry_probe(void);
 typedef struct {
   int copies, pixel_errors, fallback_errors;
 } scroll_probe_result;

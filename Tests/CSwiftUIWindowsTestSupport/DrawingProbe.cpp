@@ -3,6 +3,7 @@
 #include <nativeapi.h>
 #include <windows.h>
 
+#include <array>
 #include <cmath>
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -290,6 +291,58 @@ int shadow_probe(const uint8_t *alpha, int width, int height, double inset,
   }
   sui_surface_destroy(surface);
   DestroyWindow(host);
+  return errors;
+}
+int control_order_probe(void) {
+  Probe p;
+  p.host = CreateWindowW(L"STATIC", L"", WS_POPUP, 0, 0, 160, 80,
+                         nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+  if (!p.host) return 1;
+  p.surface = sui_surface_create(p.host, Event, &p, 0);
+  auto child = [&](const wchar_t *kind) {
+    return CreateWindowW(kind, L"", WS_CHILD | WS_VISIBLE, 4, 4, 60, 24,
+                         p.host, nullptr, GetModuleHandleW(nullptr), nullptr);
+  };
+  HWND unmanaged = child(L"STATIC");
+  std::array<HWND, 4> controls{};
+  for (size_t i = 0; i < controls.size(); ++i) {
+    controls[i] = child(L"BUTTON");
+    sui_surface_button(p.surface, controls[i], int64_t(i + 1), 1, 0);
+    SetWindowSubclass(controls[i], Observe, 1, reinterpret_cast<DWORD_PTR>(&p));
+  }
+  int errors = 0;
+  auto publish = [&](const std::array<HWND, 4> &frontToBack) {
+    sui_surface_begin(p.surface);
+    sui_controls_begin(p.surface);
+    for (auto it = frontToBack.rbegin(); it != frontToBack.rend(); ++it)
+      sui_button_update(p.surface, *it, 0, "", 0, 0, 60, 24);
+    sui_surface_end(p.surface);
+    HWND next = GetTopWindow(p.host);
+    for (HWND expected : frontToBack) {
+      if (next != expected) ++errors;
+      next = GetWindow(expected, GW_HWNDNEXT);
+    }
+    if (next != unmanaged) ++errors;
+  };
+  publish(controls);
+  p.track = true;
+  // A newly attached frontmost row belongs behind the other three.
+  const std::array<HWND, 4> rotated{controls[1], controls[2], controls[3], controls[0]};
+  publish(rotated);
+  if (p.result.position_changes != 1) ++errors;
+  publish(rotated);
+  if (p.result.position_changes != 1) ++errors;
+  p.track = false;
+  SetWindowPos(unmanaged, HWND_TOP, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  publish(controls);
+  for (HWND hwnd : controls) {
+    RemoveWindowSubclass(hwnd, Observe, 1);
+    sui_surface_remove_button(p.surface, hwnd);
+    DestroyWindow(hwnd);
+  }
+  sui_surface_destroy(p.surface);
+  DestroyWindow(p.host);
   return errors;
 }
 drawing_probe_result drawing_probe(void) {

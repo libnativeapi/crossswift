@@ -42,6 +42,10 @@ public protocol RenderBackend: AnyObject {
   func didMeasureRender(_ timings: [String: Double])
   func perform(_ commands: [RenderCommand])
   func didRender(_ root: Element)
+  /// A mounted tree with sampled colors and expired animation descriptors.
+  /// The changed nodes keep their IDs, actions and control properties. When
+  /// `scrolled` is true the runtime also translated a scroll viewport.
+  func didUpdateColors(_ root: Element, changes: [(id: NodeID, props: NodeProps)], scrolled: Bool)
   /// Content and actions are unchanged; only a scroll offset and descendant
   /// frames moved. Backends may retain animation/control property state.
   func didScroll(_ root: Element)
@@ -59,6 +63,13 @@ public protocol RenderBackend: AnyObject {
   /// Advances active layout animations on display frame ticks; returns true
   /// while layout animations remain active.
   var animationTickHandler: (() -> Bool)? { get set }
+}
+/// A frame-scheduled host can first publish measured rows and later refresh
+/// the offscreen window. Native keyboard/focus handling joins this ordering.
+package protocol LazyViewportRefreshBackend: AnyObject {
+  var supportsDeferredViewport: Bool { get }
+  var prepareForDiscreteInput: (() -> Void)? { get set }
+  func refreshViewportAfterPaint(_ work: @escaping () -> Void)
 }
 public final class FakeBackend: RenderBackend {
   public private(set) var commands: [RenderCommand] = []
@@ -107,6 +118,9 @@ extension RenderBackend {
   public func requestRender(_ render: @escaping () -> Void) -> Bool { false }
   public func didMeasureRender(_ timings: [String: Double]) {}
   public func didRender(_ root: Element) {}
+  public func didUpdateColors(_ root: Element, changes: [(id: NodeID, props: NodeProps)], scrolled: Bool) {
+    didRender(root)
+  }
   public func didScroll(_ root: Element) { didRender(root) }
   public func didScroll(_ root: Element, viewport: Rect) { didScroll(root) }
   public func pointerLocation(fallback: CGPoint) -> CGPoint? { fallback }
@@ -118,4 +132,10 @@ extension RenderBackend {
     get { nil }
     set {}
   }
+}
+
+/// Retains geometry after a hover pass verifies stable identity and layout.
+/// Event callbacks in the new tree may capture newly evaluated state.
+package protocol HoverLayoutBackend: RenderBackend {
+  func didUpdateHoverColors(_ root: Element, changes: [(id: NodeID, props: NodeProps)], scrolled: Bool)
 }

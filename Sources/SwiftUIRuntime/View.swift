@@ -66,22 +66,36 @@ public struct _HostedViewPrimitive: View, _PrimitiveView {
     return el
   }
 }
+/// Protocol conformances of a dynamic view type, which every render consults.
+private struct ViewTypeTraits {
+  let primitive: Bool
+  let equatable: Bool
+}
+@MainActor private var viewTypeTraits: [ObjectIdentifier: ViewTypeTraits] = [:]
+@MainActor private func traits<V: View>(of view: V) -> ViewTypeTraits {
+  let type = ObjectIdentifier(Swift.type(of: view))
+  if let traits = viewTypeTraits[type] { return traits }
+  let traits = ViewTypeTraits(primitive: view is any _PrimitiveView, equatable: view is any Equatable)
+  viewTypeTraits[type] = traits
+  return traits
+}
 @MainActor func _render<V: View>(_ view: V, path: ViewPath) -> Element {
+  let traits = traits(of: view)
   if let graph = EvaluationGraph.active {
     // Only use Equatable memoization for composite views (not primitives,
     // which are cheap to emit and may read ambient state/environment directly).
     let equatableView: (any Equatable)? =
-      (view is any _PrimitiveView) ? nil : (view as? any Equatable)
+      traits.primitive || !traits.equatable ? nil : (view as? any Equatable)
     return graph.evaluate(type: ObjectIdentifier(V.self), path: path, equatableView: equatableView)
     {
-      _renderUncached(view, path: path)
+      _renderUncached(view, path: path, primitive: traits.primitive)
     }
   }
-  return _renderUncached(view, path: path)
+  return _renderUncached(view, path: path, primitive: traits.primitive)
 }
-@MainActor private func _renderUncached<V: View>(_ view: V, path: ViewPath) -> Element {
+@MainActor private func _renderUncached<V: View>(_ view: V, path: ViewPath, primitive: Bool) -> Element {
   _installState(view, path: path)
-  if let primitive = view as? any _PrimitiveView {
+  if primitive, let primitive = view as? any _PrimitiveView {
     return primitive._makeElement(path: path)
   }
   let bodyValue: V.Body

@@ -77,6 +77,16 @@ import Foundation
   private var scrollIdleTasks: [NodeID: Task<Void, Never>] = [:]
   private var hoverPending = false
   private var hoverPoint: CGPoint?
+  private let hoverBackend: (any HoverLayoutBackend)?
+  private var dispatchingHover = false
+  private var hoverStateChanged = false
+  private var otherStateChanged = false
+  private var hoverCandidateScroll: (id: NodeID, offset: Point)?
+  private var retainedHover: HoverLayout?
+  private var unpublishedFullPass = false
+  private var deferredViewport: NodeID?
+  private var viewportGeneration: UInt64 = 0
+  private var deferredViewportPublished = false
   private var pendingScroll: (id: NodeID, key: StateKey, offset: Point)?
   private var isAttached = false
 
@@ -94,6 +104,7 @@ import Foundation
     layoutEngine: LayoutEngine = LayoutEngine()
   ) {
     self.backend = backend
+    self.hoverBackend = backend as? any HoverLayoutBackend
     self.root = root
     self.contentSize = size
     self.layoutEngine = layoutEngine
@@ -103,16 +114,25 @@ import Foundation
   private func attachObservers() {
     isAttached = true
     StateRegistry.shared.observe(rootPath, change: { [weak self] in
+      self?.otherStateChanged = true
       self?.pendingScroll = nil
       self?.evaluations.invalidateAll()
       self?.scheduleRender()
     }, stateChange: { [weak self] key in
+      if self?.dispatchingHover == true {
+        self?.hoverStateChanged = true
+      } else if self?.pendingScroll?.key != key {
+        self?.otherStateChanged = true
+      }
       if self?.pendingScroll?.key != key { self?.pendingScroll = nil }
       self?.evaluations.invalidate(key)
       self?.scheduleRender()
     })
     evaluations.onObservableChange = { [weak self] in
       self?.scheduleObservableRender()
+    }
+    (backend as? LazyViewportRefreshBackend)?.prepareForDiscreteInput = { [weak self] in
+      self?.synchronizeDeferredViewport()
     }
     backend.tapHandler = { [weak self] id in
       self?.performTap(id)
@@ -157,9 +177,18 @@ import Foundation
     pointerDown = nil
     pointerDownHighPriority = false
     pointerDownSimultaneous.removeAll()
+    deferredViewport = nil
+    deferredViewportPublished = false
+    (backend as? LazyViewportRefreshBackend)?.prepareForDiscreteInput = nil
     pendingScroll = nil
     unpublishedOffsets.removeAll()
     wheelRemainders.removeAll()
+    retainedHover = nil
+    dispatchingHover = false
+    hoverStateChanged = false
+    otherStateChanged = false
+    unpublishedFullPass = false
+    hoverCandidateScroll = nil
     hoverPending = false
     hoverPoint = nil
     needsRender = false
@@ -217,7 +246,10 @@ import Foundation
     }
 
     isRendering = true
-    var mountedTree = buildTree()
+    // Only an update to an existing scroll viewport can bypass layout.
+    guard var mountedTree = buildTree() else {
+      preconditionFailure("Initial mount must produce a tree")
+    }
     var commands: [RenderCommand]? = backend.needsRenderCommands ? [] : nil
     mountSubtree(
       &mountedTree,
@@ -287,6 +319,7 @@ import Foundation
       evaluations.invalidateAll()
     }
     contentSize = size
+    otherStateChanged = true
     pendingScroll = nil
     scheduleRender()
   }
@@ -294,6 +327,7 @@ import Foundation
   /// Marks the tree dirty and renders now unless already inside a render pass.
   public func setNeedsRender() {
     guard isAttached else { return }
+    otherStateChanged = true
     pendingScroll = nil
     // Explicit host invalidation may follow changes outside tracked wrappers.
     evaluations.invalidateAll()
@@ -304,6 +338,7 @@ import Foundation
   /// then schedules a re-render (e.g. after hot-reloading `.xcstrings` or image assets).
   public func reloadResources() {
     guard isAttached else { return }
+    otherStateChanged = true
     layoutEngine.invalidateMeasurements()
     evaluations.invalidateAll()
     pendingScroll = nil
@@ -316,6 +351,7 @@ import Foundation
   /// after the write see it) while deferring automatic rendering until after `willSet` completes.
   private func scheduleObservableRender() {
     guard isAttached else { return }
+    otherStateChanged = true
     pendingScroll = nil
     if AnimationContext.disablesAnimations {
       pendingDisablesAnimations = true
@@ -368,12 +404,36 @@ import Foundation
       return layoutAnimations.hasActiveMotions
     }
     guard layoutAnimations.hasActiveMotions else { return false }
-    update()
+    if canAdvanceColors, var root = mounted {
+      isRendering = true
+      var changes: [(id: NodeID, props: NodeProps)] = []
+      let started = Date.timeIntervalSinceReferenceDate
+      let changed = layoutAnimations.advanceColors(in: &root, at: clock(), changes: &changes)
+      lastTimings = ["animation.colors": (Date.timeIntervalSinceReferenceDate - started) * 1000]
+      mounted = root
+      tree = root
+      lastCommands = backend.needsRenderCommands ? changes.map { .setProps(id: $0.id, props: $0.props) } : []
+      if changed || !root.hasLayoutAnimation {
+        refreshMountedGeometryChildren(root)
+        let publish = Date.timeIntervalSinceReferenceDate
+        if backend.needsRenderCommands { backend.perform(lastCommands) }
+        backend.didUpdateColors(root, changes: changes, scrolled: false)
+        lastTimings["backend"] = (Date.timeIntervalSinceReferenceDate - publish) * 1000
+      }
+      isRendering = false
+    } else {
+      update()
+    }
     backend.didMeasureRender(lastTimings)
     unpublishedOffsets.removeAll(keepingCapacity: true)
     if needsRender { renderIfNeeded() }
     return layoutAnimations.hasActiveMotions
   }
+  private var canAdvanceColors: Bool {
+    layoutAnimations.hasOnlyColorMotions && mounted?.hasLayoutAnimation == true
+      && mounted?.hasActivePresentation == false
+  }
+
   private func requestRender() {
     guard isAttached else { return }
     if !backend.requestRender({ [weak self] in
@@ -415,10 +475,26 @@ import Foundation
     onDidFinishRenderPasses?()
   }
 
+  // Input may arrive in the same host transaction as the wheel. Rebuild with
+  // the latest state before looking up a shortcut, focus peer or hit target.
+  private func synchronizeDeferredViewport() {
+    guard deferredViewport != nil, isAttached, !isRendering else { return }
+    pendingScroll = nil
+    otherStateChanged = true
+    guard deferredViewportPublished else {
+      // The transaction has not published this wheel. Input still addresses
+      // the previous tree, and the transaction will apply the wheel normally.
+      deferredViewport = nil
+      return
+    }
+    renderIfNeeded()
+  }
+
   /// Invokes the current action registered for a native button.
   public func performTap(_ id: NodeID) {
     transactionDepth += 1
     defer { finishTransaction() }
+    synchronizeDeferredViewport()
     var chain: [Element] = []
     guard ancestry(id, in: tree, into: &chain) else { return }
     guard let target = chain.first(where: { $0.action != nil }),
@@ -431,6 +507,7 @@ import Foundation
   public func performBoolInput(_ id: NodeID, value: Bool) {
     transactionDepth += 1
     defer { finishTransaction() }
+    synchronizeDeferredViewport()
     guard let node = find(id, in: tree), node.props.enabled, node.props.visible else { return }
     node.semanticBoolAction?(value)
   }
@@ -439,6 +516,7 @@ import Foundation
   public func performDoubleInput(_ id: NodeID, value: Double, ended: Bool) {
     transactionDepth += 1
     defer { finishTransaction() }
+    synchronizeDeferredViewport()
     guard let node = find(id, in: tree), node.props.enabled, node.props.visible else { return }
     node.semanticDoubleAction?(value, ended)
   }
@@ -447,6 +525,7 @@ import Foundation
   public func performIntInput(_ id: NodeID, value: Int) {
     transactionDepth += 1
     defer { finishTransaction() }
+    synchronizeDeferredViewport()
     guard let node = find(id, in: tree), node.props.visible else { return }
     if node.props.semanticControl?.kind == "alert" {
       if value >= 0, value < node.semanticAlertActions.count {
@@ -463,6 +542,7 @@ import Foundation
   public func performStepInput(_ id: NodeID, delta: Int) {
     transactionDepth += 1
     defer { finishTransaction() }
+    synchronizeDeferredViewport()
     guard let node = find(id, in: tree), node.props.enabled, node.props.visible else { return }
     if delta >= 0 {
       node.semanticIncrementAction?()
@@ -475,6 +555,7 @@ import Foundation
   public func performBackInput(_ id: NodeID) {
     transactionDepth += 1
     defer { finishTransaction() }
+    synchronizeDeferredViewport()
     guard let node = find(id, in: tree), node.props.visible else { return }
     node.semanticBackAction?()
   }
@@ -483,6 +564,7 @@ import Foundation
   public func dismissActivePresentation() {
     transactionDepth += 1
     defer { finishTransaction() }
+    synchronizeDeferredViewport()
     func findDismiss(_ node: Element?) -> (() -> Void)? {
       guard let node else { return nil }
       if let dismiss = node.dismissPresentation { return dismiss }
@@ -507,6 +589,10 @@ import Foundation
     }
     transactionDepth += 1
     defer { finishTransaction() }
+    switch interaction {
+    case .pressed, .focus: synchronizeDeferredViewport()
+    case .hover: break
+    }
     var chain: [Element] = []
     guard ancestry(id, in: tree, into: &chain), let node = chain.first else { return }
     switch interaction {
@@ -542,6 +628,9 @@ import Foundation
     }
   }
   private func updateHover(_ chain: [Element], point: CGPoint? = nil) {
+    let wasDispatching = dispatchingHover
+    dispatchingHover = true
+    defer { dispatchingHover = wasDispatching }
     let ids = chain.map(\.id)
     if hoveredNodeIDs != ids {
       let previous = Set(hoveredNodeIDs)
@@ -603,6 +692,7 @@ import Foundation
   ) -> Bool {
     transactionDepth += 1
     defer { finishTransaction() }
+    if event != 1 && event != 5 && event != 10 { synchronizeDeferredViewport() }
     if event == 7 {
       if let id { find(id, in: tree)?.textAction?(text) }
       return true
@@ -1054,11 +1144,42 @@ import Foundation
       offset.y = max(minY, min(offset.y, maxY))
     }
     guard offset != (unpublishedOffsets[node.id] ?? node.props.scrollOffset) else { return }
+    if deferredViewportPublished && !isRendering {
+      // The next transaction can contain a key after this wheel. Finish the
+      // previous window while its original offset is still available.
+      synchronizeDeferredViewport()
+      if let current = find(node.id, in: tree) { scroll(current, to: requested) }
+      return
+    }
     unpublishedOffsets[node.id] = offset
     let lazyBucketUnchanged =
       !containsLazyContainer(node)
       || (ScrollViewportContext.quantize(node.props.scrollOffset.x) == ScrollViewportContext.quantize(offset.x)
         && ScrollViewportContext.quantize(node.props.scrollOffset.y) == ScrollViewportContext.quantize(offset.y))
+    var useMeasuredRows = false
+    if (!lazyBucketUnchanged || deferredViewport != nil),
+      let host = backend as? LazyViewportRefreshBackend, host.supportsDeferredViewport,
+      deferredViewport == nil || deferredViewport == node.id,
+      offset.x == node.props.scrollOffset.x, node.props.clipped,
+      abs(offset.y - node.props.scrollOffset.y) <= node.frame.height {
+      let shift = node.props.scrollOffset.y - offset.y
+      var fixed = false
+      func covers(_ item: Element, directlyUnderFixedStack: Bool) -> Bool {
+        if item.kind == .scroll { return false }
+        if item.hasFixedLazyRows {
+          guard !fixed, item.props.isLazyContainer else { return false }
+          fixed = true
+        } else if item.props.isLazyContainer || item.lazyCacheKey != nil {
+          return false
+        }
+        if item.props.isLazyPlaceholder {
+          return directlyUnderFixedStack && item.frame.height > 0 &&
+            (item.frame.maxY + shift <= node.frame.minY || item.frame.minY + shift >= node.frame.maxY)
+        }
+        return item.children.allSatisfy { covers($0, directlyUnderFixedStack: item.hasFixedLazyRows) }
+      }
+      useMeasuredRows = node.children.allSatisfy { covers($0, directlyUnderFixedStack: false) } && fixed
+    }
     // Global/named geometry and active presentations require a full pass.
     // Opaque layouts must reproduce exactly translated placement proposals.
     // Note: if any phase or geometry handler below mutates @State other than
@@ -1066,16 +1187,22 @@ import Foundation
     // folds that update into a single render pass instead of two.
     if !needsRender || pendingScroll?.id == node.id, !isRendering, let key = node.scrollStateKey,
       mounted?.hasActivePresentation == false,
-      mounted?.hasLayoutAnimation == false,
-      lazyBucketUnchanged,
+      mounted?.hasLayoutAnimation == false || canAdvanceColors,
+      (lazyBucketUnchanged && deferredViewport == nil) || useMeasuredRows,
       node.children.allSatisfy({
         layoutEngine.canTranslateScroll(
           $0, dx: node.props.scrollOffset.x - offset.x,
           dy: node.props.scrollOffset.y - offset.y)
       })
     {
+      if useMeasuredRows && deferredViewport == nil {
+        viewportGeneration &+= 1
+        deferredViewport = node.id
+      }
+      hoverCandidateScroll = (node.id, offset)
       pendingScroll = (node.id, key, offset)
     } else {
+      hoverCandidateScroll = nil
       pendingScroll = nil
     }
     if !node.scrollPhaseHandlers.isEmpty {
@@ -1183,6 +1310,17 @@ import Foundation
       return false
     }
     guard move(&updated) else { return false }
+    // Incoming scrolls can share the frame tick with a hover fade. Advance
+    // it here as well, so a continuous stream of scrolls cannot starve it.
+    let sampledColors = canAdvanceColors
+    let beforeColors = Date.timeIntervalSinceReferenceDate
+    var changes: [(id: NodeID, props: NodeProps)] = []
+    let colorsChanged = sampledColors
+      && layoutAnimations.advanceColors(in: &updated, at: clock(), changes: &changes)
+    if commands != nil {
+      commands?.append(contentsOf: changes.map { .setProps(id: $0.id, props: $0.props) })
+    }
+    let colorMilliseconds = (Date.timeIntervalSinceReferenceDate - beforeColors) * 1000
     pendingAnimation = nil
     isRendering = true
     mounted = updated
@@ -1192,7 +1330,10 @@ import Foundation
     lastTimings = ["scroll.translate": (Date.timeIntervalSinceReferenceDate - started) * 1000]
     let published = Date.timeIntervalSinceReferenceDate
     if let commands { backend.perform(commands) }
-    backend.didScroll(updated, viewport: viewport)
+    if deferredViewport != nil { deferredViewportPublished = true }
+    if sampledColors { lastTimings["animation.colors"] = colorMilliseconds }
+    if colorsChanged { backend.didUpdateColors(updated, changes: changes, scrolled: true) }
+    else { backend.didScroll(updated, viewport: viewport) }
     if updated.hasPreferences {
       LifecycleRegistry.shared.clearPending(root: rootPath)
       let savedActiveRoot = LifecycleRegistry.shared.activeRoot
@@ -1203,10 +1344,31 @@ import Foundation
     }
     lastTimings["backend"] = (Date.timeIntervalSinceReferenceDate - published) * 1000
     isRendering = false
+    if let id = deferredViewport, let host = backend as? LazyViewportRefreshBackend {
+      lastTimings["scroll.measuredRows"] = 1
+      let generation = viewportGeneration
+      host.refreshViewportAfterPaint { [weak self] in
+        guard let self, self.deferredViewport == id, self.viewportGeneration == generation else { return }
+        self.synchronizeDeferredViewport()
+      }
+    }
     return true
   }
 
-  private func buildTree() -> Element {
+  // Visiting the freshly evaluated nodes is necessary: the new range may be
+  // the first time a custom label with a geometry reader or adapter exists.
+  private func hasObservableLayout(_ e: Element) -> Bool {
+    if e.kind == .hostedView || e.kind == .presentation || e.geometryBuilder != nil
+      || e.layout != nil || e.scrollTarget != nil || e.props.focusRequested
+      || !e.scrollGeometryHandlers.isEmpty || !e.geometryChangeHandlers.isEmpty
+      || !e.preferences.isEmpty || !e.anchorPreferences.isEmpty || e.preferenceAction != nil
+      || !e.preferenceTransforms.isEmpty || !e.horizontalGuides.isEmpty || !e.verticalGuides.isEmpty
+    { return true }
+    return e.children.contains(where: hasObservableLayout)
+  }
+
+  private func buildTree(allowHoverLayout: Bool = false, measuringScroll: Bool = false) -> Element? {
+    retainedHover = nil
     let savedEnvironment = EnvironmentValues.current
     EnvironmentValues.current = backend.environment
     defer { EnvironmentValues.current = savedEnvironment }
@@ -1225,6 +1387,25 @@ import Foundation
     defer { LifecycleRegistry.shared.activeRoot = savedActiveRoot }
     var element = evaluations.evaluateRoot { _render(root, path: rootPath) }
     lastTimings["evaluate"] = (Date.timeIntervalSinceReferenceDate - start) * 1000
+    if measuringScroll {
+      let evaluationTime = lastTimings["evaluate"]
+      if !needsRender, pendingScroll != nil,
+         let old = mounted, !hasObservableLayout(old), !hasObservableLayout(element),
+         !LifecycleRegistry.shared.hasUserEffects(root: rootPath) {
+        StateRegistry.shared.end(root: rootPath)
+        LifecycleRegistry.shared.commit(root: rootPath)
+        if !needsRender, updateScroll() {
+          lastTimings["evaluate"] = evaluationTime
+          lastTimings["scroll.preflight"] = 1
+          return nil
+        }
+      }
+      // Keep this evaluation and its pending callbacks. A second begin()
+      // would drop onAppear/task/preference work scheduled during evaluation.
+      pendingScroll = nil
+      deferredViewport = nil
+      deferredViewportPublished = false
+    }
     start = Date.timeIntervalSinceReferenceDate
     element = normalize(element, previous: normalized)
     lastTimings["normalize"] = (Date.timeIntervalSinceReferenceDate - start) * 1000
@@ -1259,16 +1440,35 @@ import Foundation
       transactionDisabled: disablesAnimations)
     lastTimings["environment"] = (Date.timeIntervalSinceReferenceDate - start) * 1000
     start = Date.timeIntervalSinceReferenceDate
-    layoutEngine.layout(
-      root: &element,
-      in: contentSize,
-      animator: layoutAnimations,
-      evaluations: evaluations,
-      mountedGeometryChildren: mountedGeometryChildren,
-      renderPass: currentPass,
-      now: now)
-    lastTimings["layout"] = (Date.timeIntervalSinceReferenceDate - start) * 1000
-    for (key, value) in layoutEngine.lastTimings { lastTimings["layout." + key] = value }
+    if allowHoverLayout, let previousBase, !previousBase.hasDynamicLayout,
+      !previousBase.hasPreferences, !previousBase.hasPresentation,
+      !layoutAnimations.hasActiveMotions || layoutAnimations.hasOnlyColorMotions
+    {
+      var candidate = element
+      var proof = HoverLayout(scroll: hoverCandidateScroll)
+      if proof.retain(&candidate, from: previousBase) {
+        retainedHover = proof
+        element = candidate
+      }
+      lastTimings[retainedHover == nil ? "hover.reject" : "hover.reuse"] =
+        (Date.timeIntervalSinceReferenceDate - start) * 1000
+    }
+    if retainedHover == nil {
+      let refineViewport = layoutEngine.layout(
+        root: &element,
+        in: contentSize,
+        animator: layoutAnimations,
+        evaluations: evaluations,
+        mountedGeometryChildren: mountedGeometryChildren,
+        renderPass: currentPass,
+        now: now)
+      if refineViewport {
+        evaluations.invalidateAll()
+        needsRender = true
+      }
+      lastTimings["layout"] = (Date.timeIntervalSinceReferenceDate - start) * 1000
+      for (key, value) in layoutEngine.lastTimings { lastTimings["layout." + key] = value }
+    }
     start = Date.timeIntervalSinceReferenceDate
     element = resolvePresentations(element, in: contentSize)
     assignKeys(&element)
@@ -1279,17 +1479,32 @@ import Foundation
   }
 
   private func update(allowSkipIntermediatePublish: Bool = false) {
-    if updateScroll() { return }
+    let allowHoverLayout = hoverBackend != nil && hoverStateChanged && !otherStateChanged && !unpublishedFullPass
+    hoverStateChanged = false
+    otherStateChanged = false
+    defer { hoverCandidateScroll = nil }
+    let measuringScroll = pendingScroll != nil && deferredViewport != nil
+    if !measuringScroll {
+      if updateScroll() { return }
+      deferredViewport = nil
+      deferredViewportPublished = false
+    }
     guard let old = mounted else {
       mount()
       return
     }
 
     isRendering = true
-    var mountedTree = buildTree()
+    guard var mountedTree = buildTree(
+      allowHoverLayout: allowHoverLayout && !measuringScroll, measuringScroll: measuringScroll
+    ) else { return }
+    let proof = retainedHover
+    retainedHover = nil
     var start = Date.timeIntervalSinceReferenceDate
     var commands: [RenderCommand]? = backend.needsRenderCommands ? [] : nil
-    if commands == nil && old.hasActivePresentation != mountedTree.hasActivePresentation {
+    if commands == nil && proof != nil {
+      // The proof matched and retained the mounted ID of every node.
+    } else if commands == nil && old.hasActivePresentation != mountedTree.hasActivePresentation {
       if mountedTree.hasActivePresentation, !mountedTree.children.isEmpty {
         mountedTree.id = allocator.allocate()
         reconcile(
@@ -1328,9 +1543,14 @@ import Foundation
     lastTimings["diff"] = (Date.timeIntervalSinceReferenceDate - start) * 1000
     if !backend.needsRenderCommands {
       LifecycleRegistry.shared.commit(root: rootPath)
-      if !(allowSkipIntermediatePublish && needsRender) {
+      unpublishedFullPass = allowSkipIntermediatePublish && needsRender
+      if !unpublishedFullPass {
         start = Date.timeIntervalSinceReferenceDate
-        backend.didRender(mountedTree)
+        if let proof, let hoverBackend {
+          hoverBackend.didUpdateHoverColors(mountedTree, changes: proof.changes, scrolled: proof.scrolled)
+        } else {
+          backend.didRender(mountedTree)
+        }
         lastTimings["backend"] = (Date.timeIntervalSinceReferenceDate - start) * 1000
       }
       isRendering = false

@@ -20,8 +20,66 @@ public struct ZStack<Content: View>: View, _PrimitiveView {
       kind: .zStack, props: props, children: flattenChildren(_render(content, path: path)))
   }
 }
+/// Consecutive offscreen rows share one layout element. Keep unknown heights
+/// separate so the first measurement of the visible rows also sizes the gap.
+private struct LazyRowGap: Hashable {
+  var firstID: AnyHashable?
+  var measuredExtent: Double = 0
+  var estimatedCount: Int = 0
+  var count: Int = 0
+  let spacing: Double
+
+  mutating func include(_ id: AnyHashable, measuredHeight: Double?) {
+    if count == 0 { firstID = id }
+    count += 1
+    if let measuredHeight {
+      measuredExtent += measuredHeight
+    } else {
+      estimatedCount += 1
+    }
+  }
+
+  func height(average: Double) -> Double {
+    measuredExtent + Double(estimatedCount) * average + Double(count - 1) * spacing
+  }
+}
+
+/// Under a uniform estimate, any contiguous gap has an analytic extent.
+/// If a newly visible row reveals a different height during this layout pass,
+/// resolve the same gap by the actual IDs in the collection being laid out.
+private final class UniformLazyRowGap: Hashable {
+  let firstID: AnyHashable
+  let count: Int
+  let spacing: Double
+  let mixedHeight: (LazyHeightCache, AnyHashable) -> Double
+
+  init(firstID: AnyHashable, count: Int, spacing: Double,
+       mixedHeight: @escaping (LazyHeightCache, AnyHashable) -> Double) {
+    self.firstID = firstID
+    self.count = count
+    self.spacing = spacing
+    self.mixedHeight = mixedHeight
+  }
+
+  static func == (lhs: UniformLazyRowGap, rhs: UniformLazyRowGap) -> Bool {
+    lhs.firstID == rhs.firstID && lhs.count == rhs.count && lhs.spacing == rhs.spacing
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine(firstID)
+    hasher.combine(count)
+    hasher.combine(spacing)
+  }
+
+  func extent(cache: LazyHeightCache, stack: AnyHashable) -> Double {
+    let rows = cache.uniformEstimate(stack: stack).map { $0 * Double(count) }
+      ?? mixedHeight(cache, stack)
+    return rows + Double(count - 1) * spacing
+  }
+}
+
 final class LazyHeightCache {
-  struct StackViewportMetrics {
+  struct StackViewportMetrics: Equatable {
     var offsetX: Double
     var offsetY: Double
     var viewportWidth: Double
@@ -29,12 +87,29 @@ final class LazyHeightCache {
   }
   nonisolated(unsafe) static let shared = LazyHeightCache()
   private var heightsByStack: [AnyHashable: [AnyHashable: Double]] = [:]
+  private var extentCounts: [AnyHashable: [Double: Int]] = [:]
   private var averagesByStack: [AnyHashable: Double] = [:]
+  private struct VerticalSelection {
+    let viewport: StackViewportMetrics?
+    let measurements: Int
+  }
+  private var measurementRevisions: [AnyHashable: Int] = [:]
+  private var verticalSelections: [AnyHashable: VerticalSelection] = [:]
   private var viewportsByStack: [AnyHashable: StackViewportMetrics] = [:]
 
   func record(stack: AnyHashable, item: AnyHashable, height: Double) {
-    guard height > 1 else { return }
+    guard height.isFinite, height > 0 else { return }
+    if let previous = heightsByStack[stack]?[item] {
+      guard previous != height else { return }
+      if extentCounts[stack]?[previous] == 1 {
+        extentCounts[stack]?.removeValue(forKey: previous)
+      } else {
+        extentCounts[stack]?[previous]? -= 1
+      }
+    }
+    measurementRevisions[stack, default: 0] += 1
     heightsByStack[stack, default: [:]][item] = height
+    extentCounts[stack, default: [:]][height, default: 0] += 1
     let dict = heightsByStack[stack]!
     let sample = dict.values.prefix(32)
     if !sample.isEmpty {
@@ -44,6 +119,17 @@ final class LazyHeightCache {
 
   func hasSamples(stack: AnyHashable) -> Bool {
     !(heightsByStack[stack]?.isEmpty ?? true)
+  }
+
+  func recordVerticalSelection(stack: AnyHashable) {
+    verticalSelections[stack] = VerticalSelection(
+      viewport: viewportsByStack[stack], measurements: measurementRevisions[stack] ?? 0)
+  }
+
+  func canRefineVerticalSelection(stack: AnyHashable) -> Bool {
+    guard let selection = verticalSelections[stack] else { return false }
+    return selection.viewport != viewportsByStack[stack]
+      || selection.measurements != measurementRevisions[stack] ?? 0
   }
 
   func recordStackViewport(
@@ -60,8 +146,28 @@ final class LazyHeightCache {
   }
 
   func estimatedHeight(stack: AnyHashable, item: AnyHashable) -> Double {
-    if let exact = heightsByStack[stack]?[item] { return exact }
-    return averagesByStack[stack] ?? 44.0
+    measuredHeight(stack: stack, item: item) ?? averageHeight(stack: stack)
+  }
+
+  /// Unknown rows use the estimate; if every known row agrees, every step
+  /// in the estimated stack has exactly the same height, regardless of order.
+  func uniformEstimate(stack: AnyHashable) -> Double? {
+    guard let counts = extentCounts[stack] else { return 44 }
+    return counts.count == 1 ? counts.keys.first : nil
+  }
+
+  func placeholderExtent(stack: AnyHashable, item: AnyHashable) -> Double {
+    if let gap = item.base as? UniformLazyRowGap {
+      return gap.extent(cache: self, stack: stack)
+    }
+    if let gap = item.base as? LazyRowGap {
+      return gap.height(average: averageHeight(stack: stack))
+    }
+    return estimatedHeight(stack: stack, item: item)
+  }
+
+  func measuredHeight(stack: AnyHashable, item: AnyHashable) -> Double? {
+    heightsByStack[stack]?[item]
   }
 
   func averageHeight(stack: AnyHashable) -> Double {
@@ -179,39 +285,98 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
       let leadingBuffer = 260.0
       let trailingBuffer = ScrollViewportContext.bucketSpan + 260.0
       var children: [Element] = []
-      children.reserveCapacity(data.count)
 
       switch lazyCtx.axis {
       case .verticalStack:
+        LazyHeightCache.shared.recordVerticalSelection(stack: stackKey)
         let clampedOffsetY = seeded
           ? max(0, min(localOffsetY, max(0, approxSpan - vpH)))
           : max(0, localOffsetY)
         let minVisibleY = clampedOffsetY - leadingBuffer
         let maxVisibleY = clampedOffsetY + vpH + trailingBuffer
+        func appendRow(_ item: Data.Element, id itemID: AnyHashable) {
+          let itemView = EvaluationGraph.active?.trackObservation { content(item) } ?? content(item)
+          var child = _render(itemView, path: path.appending(id: itemID))
+          child.explicitID = itemID
+          children.append(child)
+        }
+
+        if viewport.targetID == nil, spacing >= 0, seeded || minVisibleY <= 0,
+          let uniform = LazyHeightCache.shared.uniformEstimate(stack: stackKey),
+          uniform.isFinite, spacing.isFinite, minVisibleY.isFinite, maxVisibleY.isFinite
+        {
+          let count = data.count
+          let step = uniform + spacing
+          func bounded(_ index: Double) -> Int {
+            if index <= 0 { return 0 }
+            if index >= Double(count) { return count }
+            return Int(index)
+          }
+          // Include both boundaries, as in the heterogeneous scan below.
+          let first = bounded(ceil((minVisibleY - uniform) / step))
+          let end = max(seeded ? 0 : min(14, count), bounded(floor(maxVisibleY / step) + 1))
+          let lower = data.index(data.startIndex, offsetBy: first)
+          let upper = data.index(data.startIndex, offsetBy: end)
+          func appendUniformGap(_ range: Range<Data.Index>, count: Int) {
+            guard count > 0 else { return }
+            let gap = UniformLazyRowGap(
+              firstID: AnyHashable(data[range.lowerBound][keyPath: id]),
+              count: count, spacing: spacing
+            ) { [data, id] cache, stack in
+              var sum = 0.0
+              for item in data[range] {
+                let itemID = AnyHashable(item[keyPath: id])
+                sum += cache.estimatedHeight(stack: stack, item: itemID)
+              }
+              return sum
+            }
+            var placeholder = NodeProps()
+            placeholder.frameHeight = uniform * Double(count) + Double(count - 1) * spacing
+            placeholder.fillWidth = true
+            placeholder.isLazyPlaceholder = true
+            children.append(Element(kind: .frame, props: placeholder, explicitID: AnyHashable(gap)))
+          }
+
+          appendUniformGap(data.startIndex..<lower, count: first)
+          for item in data[lower..<upper] { appendRow(item, id: AnyHashable(item[keyPath: id])) }
+          appendUniformGap(upper..<data.endIndex, count: count - end)
+          break
+        }
+
+        var gap = LazyRowGap(spacing: spacing)
+        func appendGap() {
+          guard gap.count > 0 else { return }
+          var placeholder = NodeProps()
+          placeholder.frameHeight = gap.height(average: avgExtent)
+          placeholder.fillWidth = true
+          placeholder.isLazyPlaceholder = true
+          children.append(Element(kind: .frame, props: placeholder, explicitID: AnyHashable(gap)))
+          gap = LazyRowGap(spacing: spacing)
+        }
+
         var runningY = 0.0
         for (index, item) in data.enumerated() {
           let itemID = AnyHashable(item[keyPath: id])
-          let estH = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
+          let measuredHeight = LazyHeightCache.shared.measuredHeight(stack: stackKey, item: itemID)
+          let estH = measuredHeight ?? avgExtent
           let inWindow = (runningY + estH >= minVisibleY && runningY <= maxVisibleY)
             || (!seeded && index < 14)
             || itemID == viewport.targetID
           runningY += estH + spacing
           if inWindow {
-            let itemView: Content =
-              EvaluationGraph.active?.trackObservation { content(item) } ?? content(item)
-            var child = _render(itemView, path: path.appending(id: itemID))
-            child.explicitID = itemID
-            children.append(child)
+            appendGap()
+            appendRow(item, id: itemID)
           } else {
-            var placeholder = NodeProps()
-            placeholder.frameHeight = estH
-            placeholder.fillWidth = true
-            placeholder.isLazyPlaceholder = true
-            children.append(Element(kind: .frame, props: placeholder, explicitID: itemID))
+            gap.include(itemID, measuredHeight: measuredHeight)
+            // Overlapping rows can have a negative total advance, which a
+            // single nonnegative frame cannot represent.
+            if spacing < 0 { appendGap() }
           }
         }
+        appendGap()
 
       case .horizontalStack:
+        children.reserveCapacity(data.count)
         let clampedOffsetX = seeded
           ? max(0, min(localOffsetX, max(0, approxSpan - vpW)))
           : max(0, localOffsetX)
@@ -241,6 +406,7 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
         }
 
       case .verticalGrid(let columns):
+        children.reserveCapacity(data.count)
         let cols = max(1, columns)
         let minVisibleY = localOffsetY - leadingBuffer
         let maxVisibleY = localOffsetY + vpH + trailingBuffer
@@ -269,6 +435,7 @@ public struct ForEach<Data: RandomAccessCollection, ID: Hashable, Content: View>
         }
 
       case .horizontalGrid(let rows):
+        children.reserveCapacity(data.count)
         let rowCount = max(1, rows)
         let minVisibleX = localOffsetX - leadingBuffer
         let maxVisibleX = localOffsetX + vpW + trailingBuffer
@@ -543,6 +710,16 @@ public struct LazyVStack<Content: View>: View, _PrimitiveView {
   public let pinnedViews: PinnedScrollableViews
   public let content: Content
 
+  private var hasFixedClippedRows = false
+
+  /// The caller guarantees equal row heights and clips each row's drawing and
+  /// hit testing to its layout bounds. Only the immediate rows are certified.
+  @_spi(WindowsRendering) public func _fixedLazyRows() -> Self {
+    var stack = self
+    stack.hasFixedClippedRows = true
+    return stack
+  }
+
   public init(
     alignment: HorizontalAlignment = .center,
     spacing: CGFloat? = nil,
@@ -581,6 +758,7 @@ public struct LazyVStack<Content: View>: View, _PrimitiveView {
       props: props,
       children: children
     )
+    el.hasFixedLazyRows = hasFixedClippedRows
     el.lazyCacheKey = stackKey
     return el
   }

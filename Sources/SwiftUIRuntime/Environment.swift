@@ -65,6 +65,8 @@ public struct EnvironmentValues {
   public var font: Font? = nil
   public var fontResolutionContext: Font.Context { Font.Context() }
   public var accessibilityReduceMotion = false
+
+  package weak var hoverPaintHost: (any HoverPaintHost)?
   public init(foregroundColor: Color? = nil, isEnabled: Bool = true) {
     self.foregroundColor = foregroundColor
     self.isEnabled = isEnabled
@@ -79,6 +81,7 @@ public struct EnvironmentValues {
   /// Returns true when every entry in `self` matches `other` so an `Equatable`
   /// view can soundly skip re-evaluation when its inputs and environment match.
   func isEquivalent(to other: EnvironmentValues) -> Bool {
+    guard hoverPaintHost === other.hoverPaintHost else { return false }
     guard foregroundColor == other.foregroundColor,
       isEnabled == other.isEnabled,
       layoutDirection == other.layoutDirection,

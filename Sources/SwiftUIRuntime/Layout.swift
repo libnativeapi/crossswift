@@ -104,7 +104,8 @@ public struct LayoutEngine {
     var liveMeasurements = Set<Int>()
     var geometryMilliseconds = 0.0
     var activeScrollContentOrigin: CGPoint?
-    var activeScrollViewportSize: Size?
+    var activeScrollViewport: Rect?
+    var needsLazyViewportRefinement = false
   }
   private var pass: Pass?
   public var lastTimings: [String: Double] { cache.timings }
@@ -147,8 +148,9 @@ public struct LayoutEngine {
     return element.children.allSatisfy { canTranslateScroll($0, dx: dx, dy: dy) }
   }
   public func layout(root: inout Element, in size: Size) {
-    layout(root: &root, in: size, animator: nil, renderPass: 0, now: 0)
+    _ = layout(root: &root, in: size, animator: nil, renderPass: 0, now: 0)
   }
+  @discardableResult
   func layout(
     root: inout Element,
     in size: Size,
@@ -157,7 +159,7 @@ public struct LayoutEngine {
     mountedGeometryChildren: [Int: Element] = [:],
     renderPass: Int,
     now: TimeInterval
-  ) {
+  ) -> Bool {
     var engine = self
     cache.passes += 1
     // IDs are never recycled. Reclaim obsolete proposals and snapshots in
@@ -200,6 +202,7 @@ public struct LayoutEngine {
       }
     }
     cache.timings["prune"] = (Date.timeIntervalSinceReferenceDate - started) * 1000
+    return engine.pass!.needsLazyViewportRefinement
   }
   private func identify(_ element: inout Element, previousGeometry: Element? = nil) {
     guard let pass else { return }
@@ -586,7 +589,7 @@ public struct LayoutEngine {
           sz = measure(child, childOffer)
         }
         measuredChildren[i] = sz
-        if let stackKey, let itemID = child.explicitID, !child.children.isEmpty {
+        if let stackKey, let itemID = child.explicitID {
           LazyHeightCache.shared.record(
             stack: stackKey, item: itemID, height: horizontal ? sz.width : sz.height)
         }
@@ -594,7 +597,7 @@ public struct LayoutEngine {
       for i in children.indices where children[i].props.isLazyPlaceholder {
         let child = children[i]
         if let stackKey, let itemID = child.explicitID {
-          let est = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
+          let est = LazyHeightCache.shared.placeholderExtent(stack: stackKey, item: itemID)
           measuredChildren[i] = horizontal
             ? Size(width: est, height: 0)
             : Size(width: 0, height: est)
@@ -1037,12 +1040,12 @@ public struct LayoutEngine {
       if !e.children.isEmpty { place(&e.children[0], in: rect) }
       if e.children.count > 1 {
         let savedScrollOrigin = pass?.activeScrollContentOrigin
-        let savedScrollViewport = pass?.activeScrollViewportSize
+        let savedScrollViewport = pass?.activeScrollViewport
         pass?.activeScrollContentOrigin = nil
-        pass?.activeScrollViewportSize = nil
+        pass?.activeScrollViewport = nil
         defer {
           pass?.activeScrollContentOrigin = savedScrollOrigin
-          pass?.activeScrollViewportSize = savedScrollViewport
+          pass?.activeScrollViewport = savedScrollViewport
         }
         let panel = e.children[1]
         func unboundedScrollContentHeight(_ node: Element, width: CGFloat) -> Double? {
@@ -1181,7 +1184,7 @@ public struct LayoutEngine {
       if let layout = e.layout {
         if let stackKey = e.lazyCacheKey,
           let origin = pass?.activeScrollContentOrigin,
-          let vp = pass?.activeScrollViewportSize
+          let vp = pass?.activeScrollViewport
         {
           LazyHeightCache.shared.recordStackViewport(
             stack: stackKey,
@@ -1244,15 +1247,16 @@ public struct LayoutEngine {
       }
       e.props.scrollOffset = offset
       let savedScrollOrigin = pass?.activeScrollContentOrigin
-      let savedScrollViewport = pass?.activeScrollViewportSize
+      let savedScrollViewport = pass?.activeScrollViewport
       defer {
         pass?.activeScrollContentOrigin = savedScrollOrigin
-        pass?.activeScrollViewportSize = savedScrollViewport
+        pass?.activeScrollViewport = savedScrollViewport
       }
       let initialContentFrame = frame(at: offset)
       pass?.activeScrollContentOrigin = CGPoint(
         x: initialContentFrame.minX, y: initialContentFrame.minY)
-      pass?.activeScrollViewportSize = Size(width: visibleWidth, height: visibleHeight)
+      pass?.activeScrollViewport = Rect(x: rect.minX + insets.leading, y: rect.minY + insets.top,
+                                        width: visibleWidth, height: visibleHeight)
       place(&e.children[0], in: initialContentFrame)
       var finalOffset = offset
       if let target = e.scrollTarget, let match = scrollTargetFrame(target.id, in: e.children[0]) {
@@ -1313,7 +1317,7 @@ public struct LayoutEngine {
     let vertical = axis == .vertical
     if let stackKey = e.lazyCacheKey,
       let origin = pass?.activeScrollContentOrigin,
-      let vp = pass?.activeScrollViewportSize
+      let vp = pass?.activeScrollViewport
     {
       LazyHeightCache.shared.recordStackViewport(
         stack: stackKey,
@@ -1347,8 +1351,7 @@ public struct LayoutEngine {
         natural = measure(child, proposal)
       }
       sizes[pos] = (natural, flex, minSpacer, child.props.layoutPriority)
-      if let stackKey = e.lazyCacheKey, let itemID = child.explicitID, !child.children.isEmpty,
-        flex == 0
+      if let stackKey = e.lazyCacheKey, let itemID = child.explicitID, flex == 0
       {
         LazyHeightCache.shared.record(
           stack: stackKey, item: itemID, height: vertical ? natural.height : natural.width)
@@ -1361,7 +1364,7 @@ public struct LayoutEngine {
     }
     for (pos, i) in indices.enumerated() where e.children[i].props.isLazyPlaceholder {
       if let stackKey = e.lazyCacheKey, let itemID = e.children[i].explicitID {
-        let est = LazyHeightCache.shared.estimatedHeight(stack: stackKey, item: itemID)
+        let est = LazyHeightCache.shared.placeholderExtent(stack: stackKey, item: itemID)
         if vertical {
           e.children[i].props.frameHeight = est
         } else {
@@ -1497,10 +1500,20 @@ public struct LayoutEngine {
             size, in: slot, alignment: alignment, child: child,
             applyHorizontalGuide: vertical, applyVerticalGuide: !vertical))
       }
-      if let stackKey = e.lazyCacheKey, let itemID = e.children[i].explicitID,
-         !e.children[i].children.isEmpty
+      if let stackKey = e.lazyCacheKey, let itemID = child.explicitID,
+         !child.props.isLazyPlaceholder
       {
         LazyHeightCache.shared.record(stack: stackKey, item: itemID, height: main)
+      }
+      if vertical, child.props.isLazyPlaceholder, let viewport = pass?.activeScrollViewport,
+        let stack = e.lazyCacheKey,
+        cursor < viewport.maxY + ScrollViewportContext.bucketSpan,
+        cursor + main > viewport.minY - ScrollViewportContext.bucketSpan,
+        LazyHeightCache.shared.canRefineVerticalSelection(stack: stack)
+      {
+        // The initial selection runs before the scroll view and its rows have
+        // been measured. Cover both the clip and translations within its bucket.
+        pass?.needsLazyViewportRefinement = true
       }
       cursor += main + e.props.spacing
     }

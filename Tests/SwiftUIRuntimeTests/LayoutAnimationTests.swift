@@ -34,6 +34,81 @@ final class LayoutAnimationTests: XCTestCase {
     XCTAssertEqual(pingPong.progress(at: 0.90, start: 0), 0.2, accuracy: 1e-6)
   }
 
+  private struct HoverColorRow: View {
+    let index: Int
+    @State private var hovered = false
+
+    var body: some View {
+      Text("File \(index)")
+        .frame(width: 240, height: 28)
+        .background(hovered ? Color.blue : Color.red)
+        .animation(.linear(duration: 0.4), value: hovered)
+        .onHover { hovered = $0 }
+    }
+  }
+
+  func testScrollingAdvancesHoverColorsWithoutRepeatingLayout() throws {
+    StateRegistry.shared.reset()
+    final class ColorBackend: RenderBackend {
+      var tapHandler: ((NodeID) -> Void)?
+      let recorder = FakeBackend()
+      var scrollSamples: [Bool] = []
+      var lastChanges: [(id: NodeID, props: NodeProps)] = []
+      func perform(_ commands: [RenderCommand]) { recorder.perform(commands) }
+      func didUpdateColors(_ root: Element, changes: [(id: NodeID, props: NodeProps)], scrolled: Bool) {
+        lastChanges = changes
+        scrollSamples.append(scrolled)
+      }
+    }
+    var now = 10.0
+    let backend = ColorBackend()
+    let renderer = Renderer(backend: backend, root: AnyView(ScrollView {
+      LazyVStack(spacing: 0) { ForEach(0..<10_000, id: \.self) { HoverColorRow(index: $0) } }
+    }), size: Size(width: 240, height: 120))
+    renderer.clock = { now }
+    renderer.mount()
+    let target = try XCTUnwrap(findNode(in: renderer.tree!, text: "File 0"))
+    let point = CGPoint(x: target.frame.minX + target.frame.width / 2, y: target.frame.minY + target.frame.height / 2)
+    renderer.input(event: 1, point: point)
+    XCTAssertTrue(renderer.hasActiveAnimations)
+    let scroll = try XCTUnwrap(findNode(in: renderer.tree!, kind: .scroll))
+    var fullEvaluations = 0
+    var fullLayouts = 0
+    var elapsedMS = 0.0
+    for step in 1...20 {
+      now = 10 + Double(step) / 50
+      let start = Date.timeIntervalSinceReferenceDate
+      if step.isMultiple(of: 2) {
+        renderer.scroll(id: scroll.id, to: Point(x: 0, y: Double(step) / 2))
+      } else {
+        _ = renderer.stepAnimations()
+      }
+      elapsedMS += (Date.timeIntervalSinceReferenceDate - start) * 1000
+      if renderer.lastTimings["evaluate"] != nil { fullEvaluations += 1 }
+      if renderer.lastTimings["layout"] != nil { fullLayouts += 1 }
+      let root = try XCTUnwrap(renderer.tree)
+      XCTAssertFalse(allNodes(root).contains { $0.props.animation != nil })
+      let rowColor = try XCTUnwrap(allNodes(root).first { item in
+        item.props.background != nil && item.frame.minY <= point.y && item.frame.maxY >= point.y
+      }?.props.background)
+      let expected = Color.red.blue + (Color.blue.blue - Color.red.blue) * Double(step) / 20
+      XCTAssertEqual(rowColor.blue, expected, accuracy: 0.01)
+    }
+    print("Hover color scroll: 20 updates, \(fullEvaluations) evaluations, \(fullLayouts) layouts, \(elapsedMS) ms")
+    XCTAssertEqual(fullEvaluations, 0)
+    XCTAssertEqual(fullLayouts, 0)
+    XCTAssertFalse(renderer.hasActiveAnimations)
+    XCTAssertFalse(renderer.tree!.hasLayoutAnimation)
+    let finalNodes = allNodes(try XCTUnwrap(renderer.tree))
+    XCTAssertFalse(backend.lastChanges.isEmpty)
+    for change in backend.lastChanges {
+      XCTAssertEqual(finalNodes.first(where: { $0.id == change.id })?.props, change.props)
+    }
+    XCTAssertEqual(backend.scrollSamples.count, 20)
+    XCTAssertEqual(backend.scrollSamples.filter { $0 }.count, 10)
+    XCTAssertTrue(backend.recorder.commands.contains(where: \.isSetProps))
+  }
+
   private struct ShellFixture: View {
     @State private var listOpen = true
     @State private var asideOpen = true

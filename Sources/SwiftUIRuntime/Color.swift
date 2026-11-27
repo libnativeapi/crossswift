@@ -5,8 +5,11 @@
 /// components are 0...1; values outside the range are clamped when converted.
 
 private final class DynamicColorProvider: @unchecked Sendable {
+  let hover: (phase: HoverPaintPhase, target: Color)?
   let resolve: @Sendable (ColorScheme) -> (Double, Double, Double, Double)
-  init(_ resolve: @escaping @Sendable (ColorScheme) -> (Double, Double, Double, Double)) {
+  init(hover: (phase: HoverPaintPhase, target: Color)? = nil,
+       _ resolve: @escaping @Sendable (ColorScheme) -> (Double, Double, Double, Double)) {
+    self.hover = hover
     self.resolve = resolve
   }
 }
@@ -95,8 +98,26 @@ public struct Color: Hashable, Sendable {
     )
   }
 
+  func onHover(_ phase: HoverPaintPhase, color: Color) -> Color {
+    guard color != self else { return self }
+    var copy = self
+    let provider = DynamicColorProvider(hover: (phase, color)) { _ in (self.red, self.green, self.blue, self.opacity) }
+    copy.dynamicProvider = provider
+    return copy
+  }
+
+  package func sampledForPaint(at now: Double) -> Color {
+    guard let h = dynamicProvider?.hover else { return self }
+    let t = h.phase.fraction(at: now)
+    return Color(red: red + (h.target.red - red) * t,
+                 green: green + (h.target.green - green) * t,
+                 blue: blue + (h.target.blue - blue) * t,
+                 opacity: opacity + (h.target.opacity * dynamicOpacityScale - opacity) * t)
+  }
+
   public func resolved(in scheme: ColorScheme) -> Color {
     guard let provider = dynamicProvider else { return self }
+    if provider.hover != nil { return self }
     let c = provider.resolve(scheme)
     return Color(red: c.0, green: c.1, blue: c.2, opacity: c.3 * dynamicOpacityScale)
   }
@@ -107,6 +128,11 @@ public struct Color: Hashable, Sendable {
       return lhs.red == rhs.red && lhs.green == rhs.green && lhs.blue == rhs.blue
         && lhs.opacity == rhs.opacity
     case (let l?, let r?):
+      if let a = l.hover, let b = r.hover {
+        return a.phase === b.phase && a.target == b.target && lhs.red == rhs.red
+          && lhs.green == rhs.green && lhs.blue == rhs.blue && lhs.opacity == rhs.opacity
+          && lhs.dynamicOpacityScale == rhs.dynamicOpacityScale
+      }
       return l === r && lhs.dynamicOpacityScale == rhs.dynamicOpacityScale
     default:
       return false
@@ -114,7 +140,15 @@ public struct Color: Hashable, Sendable {
   }
 
   public func hash(into hasher: inout Hasher) {
-    if let p = dynamicProvider {
+    if let h = dynamicProvider?.hover {
+      hasher.combine(ObjectIdentifier(h.phase))
+      hasher.combine(h.target)
+      hasher.combine(red)
+      hasher.combine(green)
+      hasher.combine(blue)
+      hasher.combine(opacity)
+      hasher.combine(dynamicOpacityScale)
+    } else if let p = dynamicProvider {
       hasher.combine(true)
       hasher.combine(ObjectIdentifier(p))
       hasher.combine(dynamicOpacityScale)
@@ -129,11 +163,11 @@ public struct Color: Hashable, Sendable {
 
   func saturating(_ amount: Double) -> Color {
     let gray = red * 0.2126 + green * 0.7152 + blue * 0.0722
-    return Color(
-      red: gray + (red - gray) * amount,
-      green: gray + (green - gray) * amount,
-      blue: gray + (blue - gray) * amount,
-      opacity: opacity)
+    let base = Color(red: gray + (red - gray) * amount,
+                     green: gray + (green - gray) * amount,
+                     blue: gray + (blue - gray) * amount, opacity: opacity)
+    guard let hover = dynamicProvider?.hover else { return base }
+    return base.onHover(hover.phase, color: hover.target.opacity(dynamicOpacityScale).saturating(amount))
   }
 
   public static let clear = Color(red: 0, green: 0, blue: 0, opacity: 0)
