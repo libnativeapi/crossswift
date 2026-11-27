@@ -700,6 +700,35 @@ final class CrossXcodeBuildTests: XCTestCase {
     XCTAssertTrue(fm.fileExists(atPath: adaptedOut.appendingPathComponent("Sources/MyDesignKit/KitView.swift").path))
   }
 
+  func testAdaptedLocalTargetKeepsPlatformGuardsAndRefreshesEditedSources() throws {
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: tmp) }
+    let source = tmp.appendingPathComponent("Kit")
+    let target = source.appendingPathComponent("Sources/Kit")
+    try fm.createDirectory(at: target, withIntermediateDirectories: true)
+    try """
+    import PackageDescription
+    let package = Package(name: "Kit", dependencies: [], targets: [
+      .target(name: "Kit", dependencies: [
+        .product(name: "Bridge", package: "bridge", condition: .when(platforms: [.windows, .linux]))
+      ])
+    ])
+    """.write(to: source.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+    let input = target.appendingPathComponent("Platform.swift")
+    let output = tmp.appendingPathComponent("adapted")
+    for revision in [1, 2] {
+      let contents = "import SwiftUI\n#if os(macOS)\nlet version = \(revision)\n#endif\n"
+      try contents.write(to: input, atomically: true, encoding: .utf8)
+      _ = try PackageDependencyAdapter.adaptCheckoutIfNeeded(
+        sourceRoot: source, outputDirectory: output, crossSwiftRoot: repositoryRoot,
+        resolveRelativePaths: true)
+      let staged = try String(contentsOf: output.appendingPathComponent("Sources/Kit/Platform.swift"))
+      XCTAssertTrue(staged.contains("#if os(macOS)\n"))
+      XCTAssertTrue(staged.contains("let version = \(revision)"))
+    }
+  }
+
   func testPackageDependencyAdapterInsertsDependenciesBeforePath() throws {
     let manifest = """
       // swift-tools-version: 5.9

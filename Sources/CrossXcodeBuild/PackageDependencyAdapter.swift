@@ -385,6 +385,22 @@ public enum PackageDependencyAdapter {
     return updated
   }
 
+  private static func swiftSourceStamp(in root: URL, targets: [TargetInspection]) throws -> String {
+    var files: [String] = []
+    for target in targets {
+      let directory = root.appendingPathComponent(target.relativePath)
+      guard let entries = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil,
+                                                         options: [.skipsHiddenFiles]) else { continue }
+      for case let file as URL in entries {
+        if file.pathExtension == "xcassets" { entries.skipDescendants() }
+        if file.pathExtension != "swift" { continue }
+        let text = try String(contentsOf: file, encoding: .utf8)
+        files.append("\(file.path):\(ProcessRunner.fnv1aHex(text))")
+      }
+    }
+    return ProcessRunner.fnv1aHex(files.sorted().joined(separator: "\n"))
+  }
+
   /// Rewrites `.package(url: ...)` declarations matching `adaptedRemoteOverrides` to local
   /// `.package(path: ...)` declarations, and resolves relative `.package(path: "...")`
   /// literals against `sourceRoot` so adapted local packages stay valid from staging dirs.
@@ -567,7 +583,12 @@ public enum PackageDependencyAdapter {
     let stampSummary = prunedImagesetsByCatalogKey.keys.sorted().map { key in
       "\(key)=\(prunedImagesetsByCatalogKey[key]?.joined(separator: ",") ?? "")"
     }.joined(separator: "\n")
-    let stampText = patchedManifest + "\n// PRUNED-V11:\n" + stampSummary
+    // Adapted local Swift files are copies. A manifest-only stamp can silently
+    // keep compiling yesterday's sources after an incremental rebuild.
+    let localSources = resolveRelativePaths
+      ? try swiftSourceStamp(in: sourceRoot, targets: inspection.targets)
+      : ""
+    let stampText = patchedManifest + "\n// PRUNED-V12:\n" + stampSummary + "\n" + localSources
     let stampURL = outputDirectory.appendingPathComponent(".crossswift-adapt-stamp")
     let dstManifestURL = outputDirectory.appendingPathComponent("Package.swift")
     if let existingStamp = try? String(contentsOf: stampURL, encoding: .utf8),
@@ -601,6 +622,9 @@ public enum PackageDependencyAdapter {
     let guardDarwinCanImport = !useWasmBundleShim
       && inspection.targets.contains { $0.hasCrossPlatformDarwinGuard }
     let needsSwiftRewrite = needsObjCStrip || needsCTFontDedupe || applyDesktopRewrites || guardDarwinCanImport
+    // Targets with explicit Windows/Linux dependency conditions already select
+    // their own implementations for those hosts, often in separate files.
+    let declarations = parseTargetDeclarations(from: originalManifest)
     for target in inspection.targets {
       let rel = target.relativePath
       let srcTarget = sourceRoot.appendingPathComponent(rel)
@@ -634,6 +658,8 @@ public enum PackageDependencyAdapter {
           stripObjCInSwiftFiles: needsObjCStrip,
           dedupeCTFontConformances: needsCTFontDedupe,
           applyDesktopRewrites: applyDesktopRewrites,
+          macOSFallbackPlatforms: declarations.first { $0.name == target.name }?.macOSFallbackPlatforms
+            ?? ["Windows", "Linux"],
           guardDarwinCanImport: guardDarwinCanImport,
           pruneEnumCases: keptEnumCases
         )
@@ -788,6 +814,7 @@ public enum PackageDependencyAdapter {
     stripObjCInSwiftFiles: Bool,
     dedupeCTFontConformances: Bool = false,
     applyDesktopRewrites: Bool = false,
+    macOSFallbackPlatforms: [String] = ["Windows", "Linux"],
     guardDarwinCanImport: Bool = false,
     pruneEnumCases: Set<String>? = nil
   ) throws {
@@ -815,6 +842,7 @@ public enum PackageDependencyAdapter {
             stripObjCInSwiftFiles: stripObjCInSwiftFiles,
             dedupeCTFontConformances: dedupeCTFontConformances,
             applyDesktopRewrites: applyDesktopRewrites,
+            macOSFallbackPlatforms: macOSFallbackPlatforms,
             guardDarwinCanImport: guardDarwinCanImport,
             pruneEnumCases: pruneEnumCases
           )
@@ -824,7 +852,7 @@ public enum PackageDependencyAdapter {
       {
         if applyDesktopRewrites {
           text = SwiftPMBackend.preprocessSwiftSourceForCrossPlatform(text)
-          text = rewriteMacOSGuardsForDesktop(text)
+          text = rewriteMacOSGuardsForDesktop(text, platforms: macOSFallbackPlatforms)
           text = workaroundSwiftPackNestedFuncCrash(text)
           text = fixCGFloatDefaultsSerialization(text)
         } else if stripObjCInSwiftFiles {
@@ -877,11 +905,12 @@ public enum PackageDependencyAdapter {
   /// For adapted Apple desktop packages that wrap macOS implementations in `#if os(macOS)`
   /// without explicit Windows/Linux branches, widen `os(macOS)` in preprocessor lines to
   /// include Windows and Linux so desktop AppKit/Carbon code paths compile on non-Apple desktops.
-  private static func rewriteMacOSGuardsForDesktop(_ source: String) -> String {
-    guard source.contains("os(macOS)"),
+  private static func rewriteMacOSGuardsForDesktop(_ source: String, platforms: [String]) -> String {
+    guard !platforms.isEmpty, source.contains("os(macOS)"),
           !source.contains("os(Windows)"),
           !source.contains("os(Linux)")
     else { return source }
+    let condition = (["macOS"] + platforms).map { "os(\($0))" }.joined(separator: " || ")
     var lines: [String] = []
     lines.reserveCapacity(128)
     source.enumerateLines { line, _ in
@@ -890,7 +919,7 @@ public enum PackageDependencyAdapter {
          line.contains("os(macOS)")
       {
         lines.append(
-          line.replacingOccurrences(of: "os(macOS)", with: "(os(macOS) || os(Windows) || os(Linux))")
+          line.replacingOccurrences(of: "os(macOS)", with: "(\(condition))")
         )
       } else {
         lines.append(line)
@@ -1106,11 +1135,27 @@ public enum PackageDependencyAdapter {
     let slug = ProcessRunner.sanitizedSlug(remote.packageName).prefix(24)
     let hash = ProcessRunner.fnv1aHex(remote.repositoryURL + "|" + refKey)
     let checkoutDir = cacheRoot.appendingPathComponent("\(slug)-\(hash)")
+    let gitExe = ProcessRunner.findExecutable(named: ["git"])
     if fm.fileExists(atPath: checkoutDir.appendingPathComponent("Package.swift").path) {
-      return checkoutDir
+      // The cache lives under the temporary directory on Windows, where
+      // cleanup can delete old files and keep their directories. Reuse a
+      // checkout only while git still finds every tracked file intact.
+      guard let gitExe else { return checkoutDir }
+      if let status = try? ProcessRunner.run(
+        executable: gitExe,
+        arguments: ["status", "--porcelain", "--untracked-files=no"],
+        workingDirectory: checkoutDir
+      ), status.exitCode == 0,
+        status.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      {
+        return checkoutDir
+      }
+      ProcessRunner.writeStderr(
+        "warning: cached checkout of \(remote.packageName) is incomplete; fetching it again\n"
+      )
     }
 
-    guard let gitExe = ProcessRunner.findExecutable(named: ["git"]) else {
+    guard let gitExe else {
       throw BuildBackendError.toolMissing(
         "Could not locate 'git' to inspect remote package \(remote.repositoryURL)"
       )
@@ -1173,6 +1218,13 @@ public enum PackageDependencyAdapter {
     let name: String
     let path: String?
     let rawBody: String
+
+    var macOSFallbackPlatforms: [String] {
+      ["Windows", "Linux"].filter { platform in
+        let pattern = #"\.when\s*\(\s*platforms\s*:\s*\[[^\]]*\."# + platform.lowercased() + #"\b"#
+        return rawBody.range(of: pattern, options: .regularExpression) == nil
+      }
+    }
   }
 
   private static func parseAuxiliaryTargetPaths(from manifest: String) -> [String] {
