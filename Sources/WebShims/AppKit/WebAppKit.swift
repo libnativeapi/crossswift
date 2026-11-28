@@ -323,3 +323,83 @@ open class NSColor: NSObject, @unchecked Sendable {
     )
   }
 }
+
+public typealias NSSize = CGSize
+
+open class NSImage: NSObject, @unchecked Sendable {
+  public var size: NSSize
+  public let filePath: String?
+  public let data: Data?
+
+  public init(size: NSSize) {
+    self.size = size
+    self.filePath = nil
+    self.data = nil
+    super.init()
+  }
+
+  public init?(contentsOfFile fileName: String) {
+    guard let raw = try? Data(contentsOf: URL(fileURLWithPath: fileName)), !raw.isEmpty else {
+      return nil
+    }
+    self.size = .zero
+    self.filePath = fileName
+    self.data = raw
+    super.init()
+  }
+
+  public init?(data: Data) {
+    guard !data.isEmpty else { return nil }
+    self.size = .zero
+    self.filePath = nil
+    self.data = data
+    super.init()
+  }
+
+  public static func resolveAssetPath(named name: String, in bundle: Bundle? = nil) -> String? {
+    nil
+  }
+}
+
+open class NSPasteboard: NSObject, @unchecked Sendable {
+  public struct PasteboardType: RawRepresentable, Equatable, Hashable, Sendable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public init(_ rawValue: String) { self.rawValue = rawValue }
+
+    public static let string = PasteboardType(rawValue: "public.utf8-plain-text")
+    public static let rtf = PasteboardType(rawValue: "public.rtf")
+    public static let html = PasteboardType(rawValue: "public.html")
+    public static let fileURL = PasteboardType(rawValue: "public.file-url")
+    public static let png = PasteboardType(rawValue: "public.png")
+    public static let tiff = PasteboardType(rawValue: "public.tiff")
+    public static let pdf = PasteboardType(rawValue: "com.adobe.pdf")
+  }
+
+  public static let general = NSPasteboard()
+  public static var writeStringHandler: ((String) -> Void)?
+
+  private var strings: [PasteboardType: String] = [:]
+  public private(set) var changeCount: Int = 0
+
+  @discardableResult
+  public func clearContents() -> Int {
+    strings.removeAll()
+    changeCount += 1
+    return changeCount
+  }
+
+  @discardableResult
+  public func setString(_ string: String, forType dataType: PasteboardType) -> Bool {
+    strings[dataType] = string
+    changeCount += 1
+    if dataType == .string {
+      Self.writeStringHandler?(string)
+    }
+    return true
+  }
+
+  public func string(forType dataType: PasteboardType) -> String? {
+    strings[dataType]
+  }
+}

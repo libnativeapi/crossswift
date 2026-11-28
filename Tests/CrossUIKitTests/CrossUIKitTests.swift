@@ -9,7 +9,7 @@ final class CrossUIKitTests: XCTestCase {
     let rect = CGRect(x: 0, y: 0, width: 100, height: 80).inset(by: insets)
     XCTAssertEqual(rect, CGRect(x: 8, y: 4, width: 76, height: 64))
 
-    let dir = NSDirectionalEdgeInsets(top: 6, leading: 10, bottom: 14, trailing: 18)
+    let dir = CrossUIKit.NSDirectionalEdgeInsets(top: 6, leading: 10, bottom: 14, trailing: 18)
     XCTAssertEqual(dir.leading, 10)
     XCTAssertEqual(dir.trailing, 18)
 
@@ -264,7 +264,7 @@ final class CrossUIKitTests: XCTestCase {
     }
     tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
 
-    var snapshot = NSDiffableDataSourceSnapshot<String, String>()
+    var snapshot = CrossUIKit.NSDiffableDataSourceSnapshot<String, String>()
     snapshot.appendSections(["Main", "Secondary"])
     snapshot.appendItems(["Alpha", "Beta"], toSection: "Main")
     snapshot.appendItems(["Gamma"], toSection: "Secondary")

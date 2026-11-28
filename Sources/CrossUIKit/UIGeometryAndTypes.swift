@@ -349,19 +349,29 @@ extension IndexPath {
     self.init(indexes: [section, row])
   }
 
-  public init(item: Int, section: Int) {
-    self.init(indexes: [section, item])
-  }
-
-  public var section: Int {
-    count > 0 ? self[0] : 0
-  }
-
   public var row: Int {
     count > 1 ? self[1] : 0
   }
 
-  public var item: Int {
+  #if !os(macOS)
+    public init(item: Int, section: Int) {
+      self.init(indexes: [section, item])
+    }
+
+    public var section: Int {
+      count > 0 ? self[0] : 0
+    }
+
+    public var item: Int {
+      count > 1 ? self[1] : 0
+    }
+  #endif
+
+  internal var _crossSection: Int {
+    count > 0 ? self[0] : 0
+  }
+
+  internal var _crossItem: Int {
     count > 1 ? self[1] : 0
   }
 }

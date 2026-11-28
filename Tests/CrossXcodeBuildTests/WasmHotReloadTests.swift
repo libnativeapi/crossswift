@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-#if canImport(Darwin)
+#if !os(Windows) && !os(Linux) && canImport(Darwin)
   import Darwin
 #elseif canImport(Glibc)
   import Glibc
@@ -411,7 +411,7 @@ final class WasmHotReloadTests: XCTestCase {
       XCTAssertGreaterThanOrEqual(fd, 0)
 
       var addr = sockaddr_in()
-      #if canImport(Darwin)
+      #if !os(Windows) && !os(Linux) && canImport(Darwin)
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
       #endif
       addr.sin_family = sa_family_t(AF_INET)

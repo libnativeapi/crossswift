@@ -69,7 +69,7 @@ jobs:
 
   android:
     name: build Android APK (XcodeDemo)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -126,6 +126,8 @@ jobs:
 
       - name: Install Swift Static Linux SDK (ARM64)
         run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates
           sdk_name=swift-6.4.2-RELEASE_static-linux-0.1.0
           archive="/tmp/${sdk_name}.artifactbundle.tar.gz"
           curl --fail --location --retry 2 --output "$archive" \

@@ -123,7 +123,11 @@ open class NSTextStorage: NSMutableAttributedString {
   #endif
 
   public override init(string str: String) {
-    super.init(string: str)
+    #if os(macOS)
+      super.init()
+    #else
+      super.init(string: str)
+    #endif
     backing.replaceCharacters(in: NSRange(location: 0, length: 0), with: str)
   }
 

@@ -435,7 +435,7 @@ final class CrossXcodeBuildTests: XCTestCase {
     XCTAssertTrue(manifest.contains(".product(name: \"SwiftUI\", package: \"crossswift\")"))
     XCTAssertTrue(manifest.contains("stack-size=16777216"))
     XCTAssertTrue(manifest.contains(".when(platforms: [.wasi])"))
-    XCTAssertFalse(manifest.contains(".product(name: \"AppKit\""))
+    XCTAssertTrue(manifest.contains(".product(name: \"AppKit\", package: \"crossswift\")"))
     XCTAssertFalse(manifest.contains(".product(name: \"CryptoKit\""))
     XCTAssertFalse(manifest.contains(".product(name: \"NativeAPI\""))
   }

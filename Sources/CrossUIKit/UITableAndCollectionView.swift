@@ -666,8 +666,8 @@ open class UITableViewDiffableDataSource<
   }
 
   public func itemIdentifier(for indexPath: IndexPath) -> ItemIdentifierType? {
-    guard currentSnapshot.sectionIdentifiers.indices.contains(indexPath.section) else { return nil }
-    let sec = currentSnapshot.sectionIdentifiers[indexPath.section]
+    guard currentSnapshot.sectionIdentifiers.indices.contains(indexPath._crossSection) else { return nil }
+    let sec = currentSnapshot.sectionIdentifiers[indexPath._crossSection]
     let items = currentSnapshot.itemIdentifiers(inSection: sec)
     return items.indices.contains(indexPath.row) ? items[indexPath.row] : nil
   }
@@ -914,7 +914,7 @@ open class UICollectionView: UIScrollView {
     for sec in 0..<sections {
       let count = max(0, ds.collectionView(self, numberOfItemsInSection: sec))
       for idx in 0..<count {
-        let ip = IndexPath(item: idx, section: sec)
+        let ip = IndexPath(indexes: [sec, idx])
         let cell = ds.collectionView(self, cellForItemAt: ip)
         let sz = (collectionViewLayout as? UICollectionViewFlowLayout)?.itemSize ?? CGSize(width: w, height: 44)
         cell.frame = CGRect(x: 0, y: y, width: sz.width > 0 ? sz.width : w, height: max(32, sz.height))
@@ -960,10 +960,10 @@ open class UICollectionViewDiffableDataSource<
   }
 
   public func itemIdentifier(for indexPath: IndexPath) -> ItemIdentifierType? {
-    guard currentSnapshot.sectionIdentifiers.indices.contains(indexPath.section) else { return nil }
-    let sec = currentSnapshot.sectionIdentifiers[indexPath.section]
+    guard currentSnapshot.sectionIdentifiers.indices.contains(indexPath._crossSection) else { return nil }
+    let sec = currentSnapshot.sectionIdentifiers[indexPath._crossSection]
     let items = currentSnapshot.itemIdentifiers(inSection: sec)
-    return items.indices.contains(indexPath.item) ? items[indexPath.item] : nil
+    return items.indices.contains(indexPath._crossItem) ? items[indexPath._crossItem] : nil
   }
 
   public func numberOfSections(in collectionView: UICollectionView) -> Int {

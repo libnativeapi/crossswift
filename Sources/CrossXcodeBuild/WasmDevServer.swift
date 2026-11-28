@@ -1,6 +1,6 @@
 import Foundation
 
-#if !os(Windows) && canImport(Darwin)
+#if !os(Windows) && !os(Linux) && canImport(Darwin)
   import Darwin
 #elseif canImport(Glibc)
   import Glibc
@@ -145,7 +145,7 @@ public final class WasmDevServer: @unchecked Sendable {
       _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
 
       var addr = sockaddr_in()
-      #if canImport(Darwin)
+      #if !os(Windows) && !os(Linux) && canImport(Darwin)
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
       #endif
       addr.sin_family = sa_family_t(AF_INET)
@@ -321,7 +321,7 @@ public final class WasmDevServer: @unchecked Sendable {
           continue
         }
 
-        #if canImport(Darwin)
+        #if !os(Windows) && !os(Linux) && canImport(Darwin)
           var noSigPipe: Int32 = 1
           _ = setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
         #endif
