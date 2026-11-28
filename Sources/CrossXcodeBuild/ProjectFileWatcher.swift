@@ -153,7 +153,7 @@ public final class ProjectFileWatcher: @unchecked Sendable {
 
   private let lock = NSLock()
   private var isRunning = false
-  private var timer: DispatchSourceTimer?
+  private var pollGeneration: UInt64 = 0
   private let queue = DispatchQueue(label: "dev.crossswift.filewatcher", qos: .utility)
 
   private var lastSnapshot: [String: FileStamp] = [:]
@@ -170,7 +170,7 @@ public final class ProjectFileWatcher: @unchecked Sendable {
   ) {
     self.roots = roots.map(\.standardizedFileURL)
     self.excludedPathPrefixes = excludedDirectories.map { dir in
-      let p = dir.standardizedFileURL.path
+      let p = Self.normalizePath(dir.standardizedFileURL.path)
       return p.hasSuffix("/") ? p : p + "/"
     }
     self.pollInterval = max(0.05, pollInterval)
@@ -185,36 +185,47 @@ public final class ProjectFileWatcher: @unchecked Sendable {
       return
     }
     isRunning = true
+    pollGeneration &+= 1
+    let gen = pollGeneration
     lastSnapshot = takeSnapshot()
     pendingPaths.removeAll()
     pendingKind = .ignored
     lastChangeDate = nil
-
-    let source = DispatchSource.makeTimerSource(queue: queue)
-    let intervalMs = max(25, Int(pollInterval * 1000))
-    source.schedule(deadline: .now() + .milliseconds(intervalMs), repeating: .milliseconds(intervalMs))
-    source.setEventHandler { [weak self] in
-      self?.pollOnce()
-    }
-    timer = source
     lock.unlock()
-    source.resume()
+
+    scheduleNextPoll(generation: gen)
   }
 
   public func stop() {
     lock.lock()
     isRunning = false
-    let activeTimer = timer
-    timer = nil
+    pollGeneration &+= 1
     pendingPaths.removeAll()
     pendingKind = .ignored
     lastChangeDate = nil
     lock.unlock()
-    activeTimer?.cancel()
   }
 
   deinit {
     stop()
+  }
+
+  private func scheduleNextPoll(generation: UInt64) {
+    let intervalMs = max(25, Int(pollInterval * 1000))
+    queue.asyncAfter(deadline: .now() + .milliseconds(intervalMs)) { [weak self] in
+      guard let self else { return }
+      self.lock.lock()
+      let active = self.isRunning && self.pollGeneration == generation
+      self.lock.unlock()
+      guard active else { return }
+      self.pollOnce()
+      self.lock.lock()
+      let stillActive = self.isRunning && self.pollGeneration == generation
+      self.lock.unlock()
+      if stillActive {
+        self.scheduleNextPoll(generation: generation)
+      }
+    }
   }
 
   private func pollOnce() {
@@ -241,7 +252,7 @@ public final class ProjectFileWatcher: @unchecked Sendable {
     let now = Date()
     if !newlyChanged.isEmpty {
       for path in newlyChanged {
-        let kind = ProjectChangeClassifier.classify(path: path)
+        let kind = ProjectChangeClassifier.classify(path: relativePathForClassification(path))
         if kind != .ignored {
           pendingPaths.insert(path)
           if kind > pendingKind {
@@ -271,39 +282,58 @@ public final class ProjectFileWatcher: @unchecked Sendable {
     }
   }
 
+  private static func normalizePath(_ path: String) -> String {
+    let forward = path.replacingOccurrences(of: "\\", with: "/")
+    #if os(Windows)
+      return forward.lowercased()
+    #else
+      return forward
+    #endif
+  }
+
+  private func relativePathForClassification(_ fullPath: String) -> String {
+    let normFull = Self.normalizePath(fullPath)
+    for root in roots {
+      let normRoot = Self.normalizePath(root.path)
+      let prefix = normRoot.hasSuffix("/") ? normRoot : normRoot + "/"
+      if normFull.hasPrefix(prefix) {
+        let dropLen = prefix.count
+        let forwardFull = fullPath.replacingOccurrences(of: "\\", with: "/")
+        if forwardFull.count >= dropLen {
+          return String(forwardFull.dropFirst(dropLen))
+        }
+      }
+    }
+    return fullPath
+  }
+
   private func takeSnapshot() -> [String: FileStamp] {
     var snapshot: [String: FileStamp] = [:]
     let fm = FileManager.default
 
-    for root in roots {
-      let rootPath = root.path
-      guard fm.fileExists(atPath: rootPath) else { continue }
-      guard let enumerator = fm.enumerator(
-        at: root,
-        includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
-        options: []
-      ) else { continue }
-
-      for case let url as URL in enumerator {
-        let stdPath = url.standardizedFileURL.path
+    func walk(directory: URL, relativePrefix: String) {
+      guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return }
+      for name in names {
+        let childURL = directory.appendingPathComponent(name).standardizedFileURL
+        let stdPath = childURL.path
         if isExcluded(path: stdPath) {
-          enumerator.skipDescendants()
           continue
         }
 
-        let name = url.lastPathComponent
+        let relPath = relativePrefix.isEmpty ? name : "\(relativePrefix)/\(name)"
         var isDir: ObjCBool = false
-        if fm.fileExists(atPath: stdPath, isDirectory: &isDir), isDir.boolValue {
+        guard fm.fileExists(atPath: stdPath, isDirectory: &isDir) else { continue }
+        if isDir.boolValue {
           if ProjectChangeClassifier.ignoredDirectoryNames.contains(name)
             || (name.hasPrefix(".") && name != "." && name != "..")
           {
-            enumerator.skipDescendants()
+            continue
           }
+          walk(directory: childURL, relativePrefix: relPath)
           continue
         }
 
-        // Skip classifying/statting obvious non-watched files early.
-        if ProjectChangeClassifier.classify(path: stdPath) == .ignored {
+        if ProjectChangeClassifier.classify(path: relPath) == .ignored {
           continue
         }
         if let stamp = readFileStamp(atPath: stdPath) {
@@ -311,13 +341,19 @@ public final class ProjectFileWatcher: @unchecked Sendable {
         }
       }
     }
+
+    for root in roots {
+      guard fm.fileExists(atPath: root.path) else { continue }
+      walk(directory: root, relativePrefix: "")
+    }
     return snapshot
   }
 
   private func isExcluded(path: String) -> Bool {
-    let withSlash = path.hasSuffix("/") ? path : path + "/"
+    let norm = Self.normalizePath(path)
+    let withSlash = norm.hasSuffix("/") ? norm : norm + "/"
     for prefix in excludedPathPrefixes {
-      if withSlash.hasPrefix(prefix) || path + "/" == prefix {
+      if withSlash.hasPrefix(prefix) || norm + "/" == prefix {
         return true
       }
     }
