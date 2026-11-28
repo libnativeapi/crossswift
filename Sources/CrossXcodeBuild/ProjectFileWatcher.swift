@@ -344,14 +344,26 @@ public final class ProjectFileWatcher: @unchecked Sendable {
     #else
       guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
             let modDate = attrs[.modificationDate] as? Date,
-            let size = attrs[.size] as? NSNumber
+            let rawSize = attrs[.size]
       else {
+        return nil
+      }
+      let fileSize: Int64
+      if let n = rawSize as? UInt64 {
+        fileSize = Int64(bitPattern: n)
+      } else if let n = rawSize as? Int64 {
+        fileSize = n
+      } else if let n = rawSize as? Int {
+        fileSize = Int64(n)
+      } else if let n = rawSize as? NSNumber {
+        fileSize = n.int64Value
+      } else {
         return nil
       }
       let secs = modDate.timeIntervalSince1970
       let whole = Int64(secs)
       let nanos = Int64((secs - Double(whole)) * 1_000_000_000)
-      return FileStamp(mtimeSeconds: whole, mtimeNanoseconds: nanos, size: size.int64Value)
+      return FileStamp(mtimeSeconds: whole, mtimeNanoseconds: nanos, size: fileSize)
     #endif
   }
 }

@@ -61,12 +61,20 @@
       WindowsDrawingBackend.prepareApplication()
       _ = NativeAPI.Application.shared.isRunning()
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       window.setBounds(NativeAPI.Rectangle(x: 240, y: 200, width: 180, height: 90))
       window.show()
       pump_pending_win32_messages()
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = Model()
       let renderer = Renderer(
         backend: backend,
@@ -133,13 +141,21 @@
       let workArea = display.workArea
 
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       let nearBottomY = max(workArea.y + 40, workArea.y + workArea.height - 70)
       window.setBounds(NativeAPI.Rectangle(x: workArea.x + 260, y: nearBottomY, width: 200, height: 60))
       window.show()
       pump_pending_win32_messages()
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = Model()
       let renderer = Renderer(
         backend: backend,
@@ -216,12 +232,20 @@
       WindowsDrawingBackend.prepareApplication()
       _ = NativeAPI.Application.shared.isRunning()
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       window.setBounds(NativeAPI.Rectangle(x: 300, y: 260, width: 240, height: 120))
       window.show()
       pump_pending_win32_messages()
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = PickerModel()
       let renderer = Renderer(
         backend: backend,
@@ -312,12 +336,21 @@
       WindowsDrawingBackend.prepareApplication()
       _ = NativeAPI.Application.shared.isRunning()
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       window.setBounds(NativeAPI.Rectangle(x: 240, y: 200, width: 260, height: 180))
       window.show()
+      window.focus()
       pump_pending_win32_messages()
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = StateModel()
       let renderer = Renderer(
         backend: backend,
@@ -447,12 +480,20 @@
       panel.backgroundColor = .clear
       panel.hasShadow = true
       panel.contentView = hosting
-      defer { panel.close() }
+      defer {
+        panel.orderOut(nil)
+        panel.close()
+        pump_pending_win32_messages()
+      }
 
       panel.makeKeyAndOrderFront(nil)
       pump_pending_win32_messages()
 
       let backend = try #require(hosting.backend)
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let renderer = try #require(hosting.renderer)
 
       // Open Popover A from floating NSPanel: inherits topmost & owner.
@@ -504,12 +545,20 @@
       WindowsDrawingBackend.prepareApplication()
       _ = NativeAPI.Application.shared.isRunning()
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       window.setBounds(NativeAPI.Rectangle(x: 240, y: 200, width: 380, height: 260))
       window.show()
       pump_pending_win32_messages()
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = ModalModel()
       let renderer = Renderer(
         backend: backend,
@@ -571,12 +620,20 @@
       WindowsDrawingBackend.prepareApplication()
       _ = NativeAPI.Application.shared.isRunning()
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       window.setBounds(NativeAPI.Rectangle(x: 260, y: 200, width: 200, height: 90))
       window.show()
       pump_pending_win32_messages()
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = NestedModel()
       let renderer = Renderer(
         backend: backend,
@@ -660,12 +717,20 @@
       WindowsDrawingBackend.prepareApplication()
       _ = NativeAPI.Application.shared.isRunning()
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       window.setBounds(NativeAPI.Rectangle(x: 260, y: 200, width: 140, height: 60))
       window.show()
       pump_pending_win32_messages()
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = ScrollTapModel()
       let renderer = Renderer(
         backend: backend,
@@ -722,8 +787,11 @@
       let hostWin = try #require(NativeAPI.Window.create())
       let externalWin = try #require(NativeAPI.Window.create())
       defer {
+        externalWin.hide()
+        hostWin.hide()
         _ = externalWin.close()
         _ = hostWin.close()
+        pump_pending_win32_messages()
       }
       hostWin.setBounds(NativeAPI.Rectangle(x: 240, y: 200, width: 220, height: 100))
       hostWin.show()
@@ -731,6 +799,10 @@
       pump_pending_win32_messages()
 
       let backend = try #require(WindowsDrawingBackend(window: hostWin))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = Model()
       let renderer = Renderer(
         backend: backend,
@@ -776,10 +848,18 @@
       WindowsDrawingBackend.prepareApplication()
       _ = NativeAPI.Application.shared.isRunning()
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       window.setBounds(NativeAPI.Rectangle(x: 260, y: 200, width: 240, height: 160))
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = Model()
       let renderer = Renderer(
         backend: backend,
@@ -826,7 +906,11 @@
       WindowsDrawingBackend.prepareApplication()
       _ = NativeAPI.Application.shared.isRunning()
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       window.setBounds(NativeAPI.Rectangle(x: 240, y: 200, width: 220, height: 120))
       window.show()
       pump_pending_win32_messages()
@@ -836,6 +920,10 @@
       while PeekMessageW(&staleQuit, nil, UINT(WM_QUIT), UINT(WM_QUIT), UINT(PM_REMOVE)) {}
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = Model()
       let renderer = Renderer(
         backend: backend,
@@ -881,12 +969,20 @@
       WindowsDrawingBackend.prepareApplication()
       _ = NativeAPI.Application.shared.isRunning()
       let window = try #require(NativeAPI.Window.create())
-      defer { _ = window.close() }
+      defer {
+        window.hide()
+        _ = window.close()
+        pump_pending_win32_messages()
+      }
       window.setBounds(NativeAPI.Rectangle(x: 260, y: 200, width: 240, height: 140))
       window.show()
       pump_pending_win32_messages()
 
       let backend = try #require(WindowsDrawingBackend(window: window))
+      defer {
+        backend.popupController?.tearDown()
+        pump_pending_win32_messages()
+      }
       let model = Model()
       let renderer = Renderer(
         backend: backend,

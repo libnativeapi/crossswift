@@ -654,6 +654,7 @@ public enum HarmonyBuilder {
         "Sources/Carbon/include",
         "Sources/AppleShims/IOKit/include",
         "Sources/SQLite3/include",
+        "Sources/CQuickJS/include",
       ] {
         let dir = crossSwiftRoot.appendingPathComponent(rel)
         if fm.fileExists(atPath: dir.path) {
@@ -794,10 +795,11 @@ public enum HarmonyBuilder {
         ("CryptoKit", "Sources/CryptoKit", [], []),
         ("Darwin", "Sources/AppleShims/Darwin", [], []),
         ("CoreGraphics", "Sources/CoreGraphics", [], []),
+        ("CoreServices", "Sources/AppleShims/CoreServices", [], []),
+        ("ApplicationServices", "Sources/AppleShims/ApplicationServices", [], []),
         ("CrossFoundation", "Sources/CrossFoundation", [], []),
         ("CrossAppKit", "Sources/CrossAppKit", [], []),
         ("CrossUIKit", "Sources/CrossUIKit", [], []),
-        ("ApplicationServices", "Sources/AppleShims/ApplicationServices", [], []),
         ("ServiceManagement", "Sources/AppleShims/ServiceManagement", [], []),
         ("Security", "Sources/AppleShims/Security", [], []),
         ("CloudKit", "Sources/AppleShims/CloudKit", [], []),
@@ -808,7 +810,6 @@ public enum HarmonyBuilder {
         ("AVKit", "Sources/AppleShims/AVKit", [], []),
         ("QuartzCore", "Sources/AppleShims/QuartzCore", [], []),
         ("CoreAudio", "Sources/AppleShims/CoreAudio", [], []),
-        ("CoreServices", "Sources/AppleShims/CoreServices", [], []),
         ("CoreText", "Sources/AppleShims/CoreText", [], []),
         ("ImageIO", "Sources/AppleShims/ImageIO", [], []),
         ("ColorSync", "Sources/AppleShims/ColorSync", [], []),

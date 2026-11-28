@@ -199,13 +199,22 @@ public enum IncrementalFileWriter {
     }
   }
 
+  private static func fileSize(from attrs: [FileAttributeKey: Any]) -> UInt64? {
+    guard let raw = attrs[.size] else { return nil }
+    if let n = raw as? UInt64 { return n }
+    if let n = raw as? Int64 { return n >= 0 ? UInt64(n) : nil }
+    if let n = raw as? Int { return n >= 0 ? UInt64(n) : nil }
+    if let n = raw as? NSNumber { return n.uint64Value }
+    return nil
+  }
+
   private static func filesHaveEqualContents(_ a: URL, _ b: URL) -> Bool {
     let fm = FileManager.default
     guard let aAttr = try? fm.attributesOfItem(atPath: a.path),
           let bAttr = try? fm.attributesOfItem(atPath: b.path),
-          let aSize = aAttr[.size] as? NSNumber,
-          let bSize = bAttr[.size] as? NSNumber,
-          aSize.uint64Value == bSize.uint64Value
+          let aSize = fileSize(from: aAttr),
+          let bSize = fileSize(from: bAttr),
+          aSize == bSize
     else {
       return false
     }
