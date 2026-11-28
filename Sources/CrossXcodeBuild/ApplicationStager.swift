@@ -216,9 +216,14 @@ public final class ApplicationStager {
         from: built.executableURL.deletingLastPathComponent(),
         to: appDir
       )
+      let extraDLLDirs = SwiftPMBackend.resolvedLibrarySearchPaths(
+        for: project.mainTarget,
+        projectRoot: project.projectRootURL
+      )
       try collectWindowsRuntimeDLLs(
         executableURL: built.executableURL,
         swiftExecutableURL: built.swiftExecutableURL,
+        extraSearchDirectories: extraDLLDirs,
         destinationDir: appDir
       )
     case .linux:
@@ -402,10 +407,11 @@ public final class ApplicationStager {
   private func collectWindowsRuntimeDLLs(
     executableURL: URL,
     swiftExecutableURL: URL,
+    extraSearchDirectories: [URL] = [],
     destinationDir: URL
   ) throws {
     let fm = FileManager.default
-    let searchDirs = windowsRuntimeSearchDirectories(
+    let searchDirs = extraSearchDirectories + windowsRuntimeSearchDirectories(
       executableDir: executableURL.deletingLastPathComponent(),
       swiftExecutableURL: swiftExecutableURL
     )

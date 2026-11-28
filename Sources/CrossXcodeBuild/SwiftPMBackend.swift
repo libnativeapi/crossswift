@@ -1721,6 +1721,9 @@ public final class SwiftPMBackend {
 
       var linkerSettingLines: [String] = []
       if isMain {
+        let extraLibSearchPaths = Self.resolvedLibrarySearchPaths(for: target, projectRoot: project.projectRootURL)
+        let extraLibNames = Self.resolvedLinkedLibraries(for: target)
+
         if platform == .windows {
           var flags = ["-Xlinker", "/STACK:16777216"]
           if !consoleSubsystem {
@@ -1732,11 +1735,24 @@ public final class SwiftPMBackend {
           if let compiledResourceURL {
             flags += ["-Xlinker", compiledResourceURL.path]
           }
+          for dir in extraLibSearchPaths {
+            flags += ["-Xlinker", "/LIBPATH:\(dir.path)"]
+          }
+          for lib in extraLibNames {
+            let resolved = Self.resolveWindowsImportLibrary(named: lib, in: extraLibSearchPaths)
+            flags += ["-Xlinker", resolved]
+          }
           linkerSettingLines.append("        .unsafeFlags([\(flags.map(swiftStringLiteral).joined(separator: ", "))])")
         } else if platform == .linux {
           var flags = ["-Xlinker", "-rpath", "-Xlinker", "$ORIGIN/lib"]
           if configuration == .release {
             flags += ["-Xlinker", "--gc-sections", "-Xlinker", "-s"]
+          }
+          for dir in extraLibSearchPaths {
+            flags += ["-L\(dir.path)"]
+          }
+          for lib in extraLibNames {
+            flags += ["-l\(lib)"]
           }
           linkerSettingLines.append("        .unsafeFlags([\(flags.map(swiftStringLiteral).joined(separator: ", "))])")
         } else if platform == .wasm {
@@ -1795,6 +1811,119 @@ public final class SwiftPMBackend {
       cxxLanguageStandard: .cxx17
     )
     """
+  }
+
+  internal static func resolvedLibrarySearchPaths(
+    for target: ResolvedTarget,
+    projectRoot: URL
+  ) -> [URL] {
+    guard let raw = target.buildSettings["LIBRARY_SEARCH_PATHS"], !raw.isEmpty else {
+      return []
+    }
+    var result: [URL] = []
+    var seen = Set<String>()
+    for token in splitShellSettingTokens(raw) {
+      let cleaned = token.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+      if cleaned.isEmpty || cleaned == "$(inherited)" || cleaned == "${inherited}" {
+        continue
+      }
+      let expanded = cleaned
+        .replacingOccurrences(of: "$(SRCROOT)", with: projectRoot.path)
+        .replacingOccurrences(of: "${SRCROOT}", with: projectRoot.path)
+        .replacingOccurrences(of: "$(PROJECT_DIR)", with: projectRoot.path)
+        .replacingOccurrences(of: "${PROJECT_DIR}", with: projectRoot.path)
+      let url = URL(fileURLWithPath: expanded, relativeTo: projectRoot).standardizedFileURL
+      if seen.insert(url.path).inserted {
+        result.append(url)
+      }
+    }
+    return result
+  }
+
+  internal static func resolvedLinkedLibraries(for target: ResolvedTarget) -> [String] {
+    guard let raw = target.buildSettings["OTHER_LDFLAGS"], !raw.isEmpty else {
+      return []
+    }
+    let tokens = splitShellSettingTokens(raw)
+    var libs: [String] = []
+    var seen = Set<String>()
+    var idx = 0
+    while idx < tokens.count {
+      let token = tokens[idx].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+      idx += 1
+      if token.isEmpty || token == "$(inherited)" || token == "${inherited}" {
+        continue
+      }
+      if token == "-l", idx < tokens.count {
+        let name = tokens[idx].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        idx += 1
+        if !name.isEmpty && seen.insert(name).inserted {
+          libs.append(name)
+        }
+      } else if token.hasPrefix("-l"), token.count > 2 {
+        let name = String(token.dropFirst(2))
+        if seen.insert(name).inserted {
+          libs.append(name)
+        }
+      } else if token.hasPrefix("-Wl,-needed-l"), token.count > 13 {
+        let name = String(token.dropFirst(13))
+        if seen.insert(name).inserted {
+          libs.append(name)
+        }
+      } else if token.hasPrefix("-Wl,-l"), token.count > 6 {
+        let name = String(token.dropFirst(6))
+        if seen.insert(name).inserted {
+          libs.append(name)
+        }
+      }
+    }
+    return libs
+  }
+
+  private static func resolveWindowsImportLibrary(named lib: String, in searchDirs: [URL]) -> String {
+    let fm = FileManager.default
+    let candidates = [
+      "\(lib).dll.lib",
+      "\(lib).lib",
+      "lib\(lib).dll.lib",
+      "lib\(lib).lib",
+    ]
+    for dir in searchDirs {
+      for candidate in candidates {
+        if fm.fileExists(atPath: dir.appendingPathComponent(candidate).path) {
+          return candidate
+        }
+      }
+    }
+    return "\(lib).lib"
+  }
+
+  private static func splitShellSettingTokens(_ raw: String) -> [String] {
+    var tokens: [String] = []
+    var current = ""
+    var inQuote: Character? = nil
+    for ch in raw {
+      if let quote = inQuote {
+        if ch == quote {
+          inQuote = nil
+        } else {
+          current.append(ch)
+        }
+      } else if ch == "\"" || ch == "'" {
+        inQuote = ch
+      } else if ch.isWhitespace {
+        if !current.isEmpty {
+          tokens.append(current)
+          current = ""
+        }
+      } else {
+        current.append(ch)
+      }
+    }
+    if !current.isEmpty {
+      tokens.append(current)
+    }
+    return tokens
   }
 
   private static func isSwift6Target(_ target: ResolvedTarget) -> Bool {
