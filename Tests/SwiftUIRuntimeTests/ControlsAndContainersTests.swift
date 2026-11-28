@@ -140,7 +140,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testVerticalLazyStackBoundsMountedRowsAndPreservesFarScrollTargets() throws {
+  func testVerticalLazyStackBoundsMountedRowsAndPreservesFarScrollTargets() async throws {
     for count in [1_000, 10_000] {
       var built = 0
       var proxy: ScrollViewProxy?
@@ -184,7 +184,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testUniformVerticalLazyStackOnlyReadsViewportAndAdjacentGapIDs() throws {
+  func testUniformVerticalLazyStackOnlyReadsViewportAndAdjacentGapIDs() async throws {
     final class Reads { var count = 0 }
     struct Rows: RandomAccessCollection {
       let startIndex = 37
@@ -222,7 +222,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testTallScrollViewRealizesItsBottomRowsBeforeFirstAndResizedPublications() throws {
+  func testTallScrollViewRealizesItsBottomRowsBeforeFirstAndResizedPublications() async throws {
     final class CapturingBackend: RenderBackend {
       var tapHandler: ((NodeID) -> Void)?
       var needsRenderCommands: Bool { false }
@@ -270,7 +270,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testUniformGapsPreserveMeasuredHeightsWhenVisibleRowsBecomeMixed() throws {
+  func testUniformGapsPreserveMeasuredHeightsWhenVisibleRowsBecomeMixed() async throws {
     let count = 1_000
     let renderer = Renderer(backend: FakeBackend(), root: AnyView(
       ScrollView {
@@ -635,7 +635,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testLazyVStackInsideFormRealizesBottomRowsWhenScrolled() throws {
+  func testLazyVStackInsideFormRealizesBottomRowsWhenScrolled() async throws {
     struct AppRowView: View {
       let index: Int
       var body: some View {
@@ -725,7 +725,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testUnstyledIconButtonsWithAccessibilityLabelRenderStyledSymbolsInsteadOfTextButtons() throws {
+  func testUnstyledIconButtonsWithAccessibilityLabelRenderStyledSymbolsInsteadOfTextButtons() async throws {
     var moves: [Int] = []
     struct FallbackButtonsProbe: View {
       let onMove: (Int) -> Void
@@ -786,7 +786,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testAppPickerPopoverScrollViewHasExactHeightAndRealizesBottomItems() throws {
+  func testAppPickerPopoverScrollViewHasExactHeightAndRealizesBottomItems() async throws {
     final class PickerModel: SwiftUIRuntime.ObservableObject {
       @SwiftUIRuntime.Published var picking = true
     }
@@ -875,7 +875,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testPickerAndMenuDropdownSelectionHighlightSpansFullMenuWidth() throws {
+  func testPickerAndMenuDropdownSelectionHighlightSpansFullMenuWidth() async throws {
     struct NarrowPickerHost: View {
       @State var choice = "dark"
       var body: some View {
@@ -982,7 +982,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testScrollWithModifierStateAndLazyBucketsSkipsRowReevaluationAndDoubleRenders() throws {
+  func testScrollWithModifierStateAndLazyBucketsSkipsRowReevaluationAndDoubleRenders() async throws {
     final class ScrollStats {
       var rowEvaluations = 0
       var phaseTransitions: [ScrollPhase] = []
@@ -1140,7 +1140,7 @@ final class ControlsAndContainersTests: XCTestCase {
   }
 
   @MainActor
-  func testSegmentedPickerSizesToIntrinsicContentWidthInsteadOfFillingContainer() throws {
+  func testSegmentedPickerSizesToIntrinsicContentWidthInsteadOfFillingContainer() async throws {
     struct ProvidersDetailProbe: View {
       @State var tab = "overview"
       var body: some View {

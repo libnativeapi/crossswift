@@ -128,7 +128,6 @@ struct PopoverAnchorTests {
 
   @Test("Small host window preserves full ideal popover content size in popup metadata")
   func smallHostWindowPreservesIdealPopoverSize() throws {
-    StateRegistry.shared.reset()
     struct CompactHost: View {
       @State var open = true
       var body: some View {
@@ -179,7 +178,6 @@ struct PopoverAnchorTests {
 
   @Test("Popups populate popupPresentations while modal sheets and alerts stay in-window")
   func popupVsModalSeparation() throws {
-    StateRegistry.shared.reset()
     struct SheetHost: View {
       @State var showSheet = true
       var body: some View {
@@ -197,7 +195,6 @@ struct PopoverAnchorTests {
     #expect(sheetTree.popupPresentations.isEmpty)
     #expect(sheetTree.children.allSatisfy { $0.popupPresentationIndex == nil })
 
-    StateRegistry.shared.reset()
     struct AlertHost: View {
       @State var showAlert = true
       var body: some View {
@@ -215,7 +212,6 @@ struct PopoverAnchorTests {
     #expect(alertTree.popupPresentations.isEmpty)
     #expect(alertTree.children.allSatisfy { $0.popupPresentationIndex == nil })
 
-    StateRegistry.shared.reset()
     struct ContextHost: View {
       var body: some View {
         Text("Target")
@@ -240,7 +236,6 @@ struct PopoverAnchorTests {
 
   @Test("Nested popup orders outer beneath inner with relative parent anchor")
   func nestedPopupOrderingAndRelativeAnchor() throws {
-    StateRegistry.shared.reset()
     struct NestedHost: View {
       @State var outerOpen = true
       @State var innerOpen = true

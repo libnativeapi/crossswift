@@ -55,7 +55,7 @@ final class LazyWindowReuseTests: XCTestCase {
     return result
   }
 
-  @MainActor func testShiftedWindowMatchesCompleteRebuildAndKeepsRowIdentity() throws {
+  @MainActor func testShiftedWindowMatchesCompleteRebuildAndKeepsRowIdentity() async throws {
     StateRegistry.shared.reset()
     let host = Host()
     let renderer = Renderer(backend: host, root: AnyView(Rows()), size: Size(width: 400, height: 300))

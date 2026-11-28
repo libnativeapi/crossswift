@@ -560,7 +560,7 @@ final class WindowsDrawingTests: XCTestCase {
   }
 
   @MainActor
-  func testSingleLineTransparentNSTextViewPreservesUnderlyingPlaceholderAndHandlesDelegateCommands() throws {
+  func testSingleLineTransparentNSTextViewPreservesUnderlyingPlaceholderAndHandlesDelegateCommands() async throws {
     let win = CrossAppKit.NSWindow(
       contentRect: NSRect(x: 80, y: 80, width: 320, height: 140),
       styleMask: [.titled, .closable],
@@ -629,7 +629,7 @@ final class WindowsDrawingTests: XCTestCase {
   }
 
   @MainActor
-  func testDefaultButtonInDarkFormRendersCustomBezelInsteadOfLightWin32Chrome() throws {
+  func testDefaultButtonInDarkFormRendersCustomBezelInsteadOfLightWin32Chrome() async throws {
     var tapped = 0
     let scene = SwiftUIRuntime.Form {
       SwiftUIRuntime.Section {
@@ -679,7 +679,7 @@ final class WindowsDrawingTests: XCTestCase {
   }
 
   @MainActor
-  func testChatPresetSymbolPickerPopoverRendersAll28IconsInCleanSixColumnGrid() throws {
+  func testChatPresetSymbolPickerPopoverRendersAll28IconsInCleanSixColumnGrid() async throws {
     let presetSymbols = [
       "text.bubble", "bubble.left.and.bubble.right", "person.crop.circle", "brain", "lightbulb",
       "sparkles", "graduationcap", "book", "doc.text", "pencil.and.outline", "magnifyingglass",
@@ -790,7 +790,7 @@ final class WindowsDrawingTests: XCTestCase {
   }
 
   @MainActor
-  func testBorderlessTransparentPanelFormEditsRenderNonBlackOnInitialShow() throws {
+  func testBorderlessTransparentPanelFormEditsRenderNonBlackOnInitialShow() async throws {
     WindowsDrawingBackend.prepareApplication()
     _ = NativeAPI.Application.shared.isRunning()
     CrossAppKit.NSApplication.shared.appearance = CrossAppKit.NSAppearance(named: .darkAqua)

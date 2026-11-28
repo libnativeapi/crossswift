@@ -573,7 +573,13 @@ public enum HarmonyBuilder {
     if let existing = ProcessRunner.environmentValue("PATH"), !existing.isEmpty {
       pathParts.append(existing)
     }
-    let envOverrides = ["PATH": pathParts.joined(separator: ":")]
+    let swiftcTool = try locateHarmonySwiftc()
+    var envOverrides = ["PATH": pathParts.joined(separator: ":")]
+    if ProcessRunner.environmentValue("SWIFT_TOOLCHAIN_BIN")?.isEmpty != false,
+       swiftcTool.executable.lastPathComponent == "swiftc"
+    {
+      envOverrides["SWIFT_TOOLCHAIN_BIN"] = swiftcTool.executable.deletingLastPathComponent().path
+    }
 
     let desktopShims = usesDesktopShims(project: project)
 
@@ -639,7 +645,6 @@ public enum HarmonyBuilder {
       }
     }
 
-    let swiftcTool = try locateHarmonySwiftc()
     let optFlag = configuration == .release ? "-O" : "-Onone"
     let nativeAPIHeaders = nativeAPISwiftRoot.appendingPathComponent("Sources/CNativeAPI/include")
     var cShimIncludeFlags: [String] = []

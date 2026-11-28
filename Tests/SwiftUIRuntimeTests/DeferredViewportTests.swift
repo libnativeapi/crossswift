@@ -63,7 +63,7 @@ final class DeferredViewportTests: XCTestCase {
     }
   }
 
-  @MainActor func testNewRowsDeliverObservableEffectsOnTheFirstPublication() throws {
+  @MainActor func testNewRowsDeliverObservableEffectsOnTheFirstPublication() async throws {
     for effect in [Effect.appearance, .preference, .geometry] {
       let log = Log(), host = Host()
       let renderer = Renderer(backend: host, root: AnyView(Rows(effect: effect, log: log)),
@@ -82,7 +82,7 @@ final class DeferredViewportTests: XCTestCase {
     }
   }
 
-  @MainActor func testKeyboardUsesPublishedWindowThroughWheelTransactionsAndReversal() throws {
+  @MainActor func testKeyboardUsesPublishedWindowThroughWheelTransactionsAndReversal() async throws {
     let log = Log(), host = Host()
     let renderer = Renderer(backend: host, root: AnyView(Rows(effect: .shortcut, log: log)),
                             size: Size(width: 500, height: 489))
@@ -108,7 +108,7 @@ final class DeferredViewportTests: XCTestCase {
     XCTAssertEqual(log.events, ["key", "key"])
   }
 
-  @MainActor func testOldRefreshCannotPublishAfterRemount() throws {
+  @MainActor func testOldRefreshCannotPublishAfterRemount() async throws {
     let host = Host()
     let renderer = Renderer(backend: host, root: AnyView(Rows(effect: .shortcut, log: Log())),
                             size: Size(width: 500, height: 489))

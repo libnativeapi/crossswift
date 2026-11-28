@@ -6,7 +6,7 @@ import XCTest
 
 final class ScrollPositionTests: XCTestCase {
   @MainActor
-  func testDPIRefreshKeepsTranslatedControlAtItsScrolledPosition() throws {
+  func testDPIRefreshKeepsTranslatedControlAtItsScrolledPosition() async throws {
     WindowsDrawingBackend.prepareApplication()
     let window = try XCTUnwrap(NativeAPI.Window.create())
     defer { _ = window.close() }

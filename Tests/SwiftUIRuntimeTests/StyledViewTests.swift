@@ -57,7 +57,7 @@ private struct EnabledLabel: View {
 
 final class StyledViewTests: XCTestCase {
   @MainActor
-  func testRepeatedImageAssetLookupsAreScopedToEachRenderPass() {
+  func testRepeatedImageAssetLookupsAreScopedToEachRenderPass() async {
     let graph = EvaluationGraph()
     let path = ViewPath()
     var generation = 0

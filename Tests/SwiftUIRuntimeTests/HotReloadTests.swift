@@ -334,7 +334,7 @@ final class HotReloadTests: XCTestCase {
     backend.tap(button.id)
   }
 
-  func testPrimitiveAndCollectionStatePreservedAcrossReload() {
+  func testPrimitiveAndCollectionStatePreservedAcrossReload() async {
     let backend1 = FakeBackend()
     let renderer1 = Renderer(
       backend: backend1,
@@ -367,7 +367,7 @@ final class HotReloadTests: XCTestCase {
     renderer2.unmount()
   }
 
-  func testCodableStructAndRawRepresentableStatePreserved() {
+  func testCodableStructAndRawRepresentableStatePreserved() async {
     let backend1 = FakeBackend()
     let renderer1 = Renderer(
       backend: backend1,
@@ -401,7 +401,7 @@ final class HotReloadTests: XCTestCase {
     renderer2.unmount()
   }
 
-  func testSiblingViewPathDisambiguationAndEscapedIDs() {
+  func testSiblingViewPathDisambiguationAndEscapedIDs() async {
     let backend1 = FakeBackend()
     let renderer1 = Renderer(
       backend: backend1,
@@ -435,7 +435,7 @@ final class HotReloadTests: XCTestCase {
     renderer2.unmount()
   }
 
-  func testSceneStoragePreservedAcrossReload() {
+  func testSceneStoragePreservedAcrossReload() async {
     let backend1 = FakeBackend()
     let renderer1 = Renderer(
       backend: backend1,
@@ -465,7 +465,7 @@ final class HotReloadTests: XCTestCase {
     renderer2.unmount()
   }
 
-  func testAppStoragePreservedWhenUserDefaultsStartsEmpty() {
+  func testAppStoragePreservedWhenUserDefaultsStartsEmpty() async {
     let suiteName = "HotReloadTests.\(UUID().uuidString)"
     let defaults1 = UserDefaults(suiteName: suiteName)!
     defaults1.removePersistentDomain(forName: suiteName)
@@ -504,7 +504,7 @@ final class HotReloadTests: XCTestCase {
     renderer2.unmount()
   }
 
-  func testNavigationPathPreservesPrimitiveAndCodableDestinationsAndChildState() {
+  func testNavigationPathPreservesPrimitiveAndCodableDestinationsAndChildState() async {
     // 1) Custom Codable & Hashable route inside NavigationPath + child @State
     let backend1 = FakeBackend()
     let renderer1 = Renderer(
@@ -562,7 +562,7 @@ final class HotReloadTests: XCTestCase {
     renderer4.unmount()
   }
 
-  func testCodableAndNonCodableStateObject() {
+  func testCodableAndNonCodableStateObject() async {
     let backend1 = FakeBackend()
     let renderer1 = Renderer(
       backend: backend1,
@@ -591,7 +591,7 @@ final class HotReloadTests: XCTestCase {
     renderer2.unmount()
   }
 
-  func testGracefulTypeChangeShiftedPropertiesDeletedViewsAndCorruptJSON() {
+  func testGracefulTypeChangeShiftedPropertiesDeletedViewsAndCorruptJSON() async {
     // 1) Corrupt / wrong-version snapshots return false without crashing.
     XCTAssertFalse(StateRegistry.shared.importHotReloadSnapshot("not json"))
     XCTAssertFalse(StateRegistry.shared.importHotReloadSnapshot("{\"version\":999,\"states\":[],\"sceneStorage\":{},\"appStorage\":{}}"))
@@ -661,7 +661,7 @@ final class HotReloadTests: XCTestCase {
     renderer.unmount()
   }
 
-  func testUnconsumedPendingEntriesClearedAfterInitialMount() {
+  func testUnconsumedPendingEntriesClearedAfterInitialMount() async {
     let backend1 = FakeBackend()
     let renderer1 = Renderer(
       backend: backend1,
@@ -699,7 +699,7 @@ final class HotReloadTests: XCTestCase {
     renderer2.unmount()
   }
 
-  func testPrivateTypeNameNormalization() {
+  func testPrivateTypeNameNormalization() async {
     XCTAssertEqual(
       HotReloadCodec.normalizeTypeName("MyApp.(unknown context at $104a3b2c0).CounterView"),
       "MyApp.(private).CounterView"
@@ -716,7 +716,7 @@ final class HotReloadTests: XCTestCase {
     )
   }
 
-  func testRendererUnmountDetachesHandlersAndSupportsCleanRemount() {
+  func testRendererUnmountDetachesHandlersAndSupportsCleanRemount() async {
     let model = UnmountModel()
     let backend = FakeBackend()
     let renderer = Renderer(
@@ -766,7 +766,7 @@ final class HotReloadTests: XCTestCase {
     renderer2.unmount()
   }
 
-  func testRendererReloadResourcesUpdatesXCStrings() {
+  func testRendererReloadResourcesUpdatesXCStrings() async {
     XCStringsCatalog.shared.preferredLanguage = "en"
     let v1 = """
     {

@@ -1407,9 +1407,18 @@ final class CrossXcodeBuildTests: XCTestCase {
   #if !os(Windows)
   func testProcessRunnerDoesNotHangWhenDetachedGrandchildHoldsPipeOpen() throws {
     let start = Date()
+    #if os(Linux)
+      // swift-corelibs-foundation's Process detects child exit via an inherited
+      // non-CLOEXEC socketpair FD (> 2). Close extra FDs in the grandchild so
+      // it holds only stdout/stderr open and isolates ProcessRunner's pipe drain.
+      let command =
+        "echo done-now; (for f in /proc/self/fd/*; do n=${f##*/}; case $n in [0-2]) ;; [0-9]*) eval \"exec ${n}>&-\" 2>/dev/null || true ;; esac; done; sleep 5) &"
+    #else
+      let command = "echo done-now; (sleep 5) &"
+    #endif
     let result = try ProcessRunner.runImpl(
       executable: URL(fileURLWithPath: "/bin/sh"),
-      arguments: ["-c", "echo done-now; (sleep 5) &"],
+      arguments: ["-c", command],
       echoOutput: false,
       postExitIdleTimeout: 0.3
     )

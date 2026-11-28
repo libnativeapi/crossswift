@@ -341,7 +341,8 @@
       backend.activate(menuBtn.id)
       pump_pending_win32_messages()
       #expect(backend.activePopupSnapshots.count == 1)
-      #expect(backend.activePopupSnapshots[0].style == .menuPopover)
+      let menuPopup = try #require(backend.activePopupSnapshots.first)
+      #expect(menuPopup.style == .menuPopover)
 
       let menuOpenTree = try #require(renderer.tree)
       let dupBtn = try #require(findNode(in: menuOpenTree) {
@@ -364,7 +365,8 @@
       renderer.renderIfNeeded()
       pump_pending_win32_messages()
       #expect(backend.activePopupSnapshots.count == 1)
-      #expect(backend.activePopupSnapshots[0].style == .contextMenu)
+      let ctxPopup = try #require(backend.activePopupSnapshots.first)
+      #expect(ctxPopup.style == .contextMenu)
 
       let popupBackend = try #require(backend.activePopupBackends.first)
       let escHandled = popupBackend.inputHandler?(nil, 6, .zero, 27, [], "") ?? false
